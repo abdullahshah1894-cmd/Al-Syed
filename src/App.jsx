@@ -1,0 +1,199 @@
+import React from "react";
+import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider } from "./context/AuthContext";
+import { AppProvider } from "./context/AppContext";
+
+import ProtectedRoute from "./components/ProtectedRoute";
+import Sidebar from "./components/Sidebar";
+import Header from "./components/Header";
+
+import Login from "./pages/Login";
+import Dashboard from "./pages/Dashboard";
+import POS from "./pages/POS";
+import Inventory from "./pages/Inventory";
+import ImeiChecker from "./pages/ImeiChecker";
+import Customers from "./pages/Customers";
+import Bills from "./pages/Bills";
+import PendingPayments from "./pages/PendingPayments";
+import Warranties from "./pages/Warranties";
+import SalesReports from "./pages/SalesReports";
+import InventoryValuation from "./pages/InventoryValuation";
+import ZakatCalculator from "./pages/ZakatCalculator";
+import Settings from "./pages/Settings";
+import Ledger from "./pages/Ledger";
+import MobileIssues from "./pages/MobileIssues";
+import Expenses from "./pages/Expenses";
+import Sellers from "./pages/Sellers";
+
+// Main App Layout Wrapper
+const MainLayout = ({ children }) => {
+  return (
+    <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden print:h-auto print:bg-white print:overflow-visible print:block">
+      <Sidebar />
+      <div className="flex-1 flex flex-col min-w-0 overflow-y-auto print:overflow-visible print:bg-white print:block">
+        <Header />
+        <main className="flex-1 overflow-y-auto print:overflow-visible print:bg-white print:block">{children}</main>
+      </div>
+    </div>
+  );
+};
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppProvider>
+        <Router>
+          <Routes>
+            {/* Public Login Route */}
+            <Route path="/login" element={<Login />} />
+
+            {/* Protected Routes for Cashier & Admin */}
+            <Route element={<ProtectedRoute allowedRoles={["admin", "cashier"]} />}>
+              <Route
+                path="/dashboard"
+                element={
+                  <MainLayout>
+                    <Dashboard />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/pos"
+                element={
+                  <MainLayout>
+                    <POS />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/inventory"
+                element={
+                  <MainLayout>
+                    <Inventory />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/products"
+                element={<Navigate to="/inventory" replace />}
+              />
+              <Route
+                path="/imei-checker"
+                element={
+                  <MainLayout>
+                    <ImeiChecker />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/customers"
+                element={
+                  <MainLayout>
+                    <Customers />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/bills"
+                element={
+                  <MainLayout>
+                    <Bills />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/pending-payments"
+                element={
+                  <MainLayout>
+                    <PendingPayments />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/warranties"
+                element={
+                  <MainLayout>
+                    <Warranties />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/mobile-issues"
+                element={
+                  <MainLayout>
+                    <MobileIssues />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/ledger"
+                element={
+                  <MainLayout>
+                    <Ledger />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/expenses"
+                element={
+                  <MainLayout>
+                    <Expenses />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/sellers"
+                element={
+                  <MainLayout>
+                    <Sellers />
+                  </MainLayout>
+                }
+              />
+            </Route>
+
+            {/* Admin-Only Protected Routes */}
+            <Route element={<ProtectedRoute allowedRoles={["admin"]} />}>
+              <Route
+                path="/reports"
+                element={
+                  <MainLayout>
+                    <SalesReports />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/valuation"
+                element={
+                  <MainLayout>
+                    <InventoryValuation />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/zakat"
+                element={
+                  <MainLayout>
+                    <ZakatCalculator />
+                  </MainLayout>
+                }
+              />
+              <Route
+                path="/settings"
+                element={
+                  <MainLayout>
+                    <Settings />
+                  </MainLayout>
+                }
+              />
+            </Route>
+
+            {/* Fallback Redirect */}
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+          </Routes>
+        </Router>
+      </AppProvider>
+    </AuthProvider>
+  );
+}
+
+export default App;
