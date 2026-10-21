@@ -103,13 +103,15 @@ exports.createSale = async (req, res) => {
       }
     }
 
-    const { data: saleData, error: saleError } = await supabase
-      .from("sales")
-      .insert([payload])
-      .select()
-      .single();
-
-    if (saleError) throw new Error(saleError.message);
+    // Insert the sale; if the bill number is already taken, add a suffix instead of losing the sale
+    let saleData = null;
+    for (let attempt = 0; attempt < 5 && !saleData; attempt++) {
+      if (attempt > 0) payload.bill_number = `${billNumber}-${attempt + 1}`;
+      const { data, error: saleError } = await supabase.from("sales").insert([payload]).select().single();
+      if (!saleError) saleData = data;
+      else if (saleError.code !== "23505") throw new Error(saleError.message);
+    }
+    if (!saleData) throw new Error(`Could not save bill ${billNumber}: bill number already exists.`);
 
     // 2. Update IMEI status to sold AND deduct quantity in products table
     for (const item of body.items || []) {
@@ -207,15 +209,25 @@ exports.createSale = async (req, res) => {
         const currentOutstanding = Number(customer.outstanding_balance || 0);
         const saleGrandTotal = Number(payload.grand_total || 0);
         const saleDueAmount = Number(payload.due_amount || 0);
-        
-        await supabase
+
+        // An Udhaar settlement is a payment against the balance, not a purchase
+        const newOutstanding =
+          payload.payment_method === "Udhaar Settlement"
+            ? Math.max(0, currentOutstanding - Number(payload.paid_amount || 0))
+            : currentOutstanding + saleDueAmount;
+
+        const { error: custError } = await supabase
           .from("customers")
           .update({
             total_purchases: currentPurchases + saleGrandTotal,
-            outstanding_balance: currentOutstanding + saleDueAmount,
+            outstanding_balance: newOutstanding,
             updated_at: new Date().toISOString()
           })
           .eq("id", payload.customer_id);
+
+        if (custError) {
+          console.error(`[Sale ${saleData.bill_number}] Customer balance update failed:`, custError.message);
+        }
       }
     }
 

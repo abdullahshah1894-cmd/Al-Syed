@@ -243,7 +243,7 @@ const Inventory = () => {
     }
   };
 
-  const handleAddSubmit = (e) => {
+  const handleAddSubmit = async (e) => {
     e.preventDefault();
     if (!name || !brand || !purchasePrice || !supplierName) return;
 
@@ -303,7 +303,7 @@ const Inventory = () => {
       }
     }
 
-    addProduct({
+    const saved = await addProduct({
       name,
       brand,
       model,
@@ -315,6 +315,8 @@ const Inventory = () => {
       imeis: imeisArr,
       supplier: { name: supplierName },
     });
+    // Keep the form filled if the database did not save it
+    if (!saved) return;
 
     setShowAddModal(false);
     // Reset Form State

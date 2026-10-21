@@ -30,6 +30,7 @@ app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/issues", require("./routes/issueRoutes"));
 app.use("/api/upload", require("./routes/uploadRoutes"));
 app.use("/api/expenses", require("./routes/expenseRoutes"));
+app.use("/api/settings", require("./routes/settingsRoutes"));
 
 // Health Check
 app.get("/api/health", (req, res) => {
