@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
+import { localDate } from "../utils/dates";
 import {
   Wallet, Plus, Trash2, Edit3, X, Search, Filter,
   Calendar, Tag, User, TrendingDown, DollarSign, CheckCircle2,
@@ -12,7 +13,7 @@ const CATEGORIES = [
 
 const PAYMENT_METHODS = ["Cash", "Card", "Easypaisa", "JazzCash", "Bank Transfer"];
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => localDate();
 
 const Expenses = () => {
   const { expenses, addExpense, updateExpense, deleteExpense, shopSettings } = useApp();
@@ -109,14 +110,14 @@ const Expenses = () => {
   const startOfWeek = (() => {
     const d = new Date();
     d.setDate(d.getDate() - d.getDay());
-    return d.toISOString().slice(0, 10);
+    return localDate(d);
   })();
-  const startOfMonth = new Date().toISOString().slice(0, 7) + "-01";
+  const startOfMonth = todayStr.slice(0, 7) + "-01";
 
   const totalAll = expenses.reduce((s, e) => s + e.amount, 0);
   const totalToday = expenses.filter((e) => e.expenseDate === todayStr).reduce((s, e) => s + e.amount, 0);
-  const totalWeek = expenses.filter((e) => e.expenseDate >= startOfWeek).reduce((s, e) => s + e.amount, 0);
-  const totalMonth = expenses.filter((e) => e.expenseDate >= startOfMonth).reduce((s, e) => s + e.amount, 0);
+  const totalWeek = expenses.filter((e) => e.expenseDate >= startOfWeek && e.expenseDate <= todayStr).reduce((s, e) => s + e.amount, 0);
+  const totalMonth = expenses.filter((e) => e.expenseDate >= startOfMonth && e.expenseDate <= todayStr).reduce((s, e) => s + e.amount, 0);
 
   // Per-seller totals
   const sellerTotals = SELLERS.map((seller) => ({

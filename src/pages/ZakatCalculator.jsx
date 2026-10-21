@@ -1,25 +1,25 @@
 import React, { useState } from "react";
-import { useApp } from "../context/AppContext";
+import { useApp, getProductStock } from "../context/AppContext";
 import { Calculator, DollarSign, ShieldCheck, Heart, Info } from "lucide-react";
 
 const ZakatCalculator = () => {
   const { products, customers, shopSettings } = useApp();
 
   // Auto-calculated inventory & receivable values
-  const defaultInventoryValue = products.reduce((sum, p) => {
-    const qty = p.imeis && p.imeis.length > 0 ? p.imeis.filter((i) => i.status === "in_stock").length : (p.quantity || 0);
-    return sum + p.purchasePrice * qty;
-  }, 0);
+  const defaultInventoryValue = products.reduce((sum, p) => sum + Number(p.purchasePrice || 0) * getProductStock(p), 0);
 
-  const defaultReceivablesValue = customers.reduce((sum, c) => sum + c.totalPending, 0);
+  const defaultReceivablesValue = customers.reduce((sum, c) => sum + Number(c.totalPending || 0), 0);
 
   // Editable Assets & Liabilities Inputs
-  const [cashInHand, setCashInHand] = useState(150000);
-  const [bankBalance, setBankBalance] = useState(350000);
+  const [cashInHand, setCashInHand] = useState(0);
+  const [bankBalance, setBankBalance] = useState(0);
   const [goldSilverValue, setGoldSilverValue] = useState(0);
-  const [inventoryValue, setInventoryValue] = useState(defaultInventoryValue);
-  const [receivables, setReceivables] = useState(defaultReceivablesValue);
-  const [liabilitiesDeductions, setLiabilitiesDeductions] = useState(50000);
+  // Inventory / receivables follow the loaded data until the user types their own value (null = not edited)
+  const [inventoryEdit, setInventoryValue] = useState(null);
+  const [receivablesEdit, setReceivables] = useState(null);
+  const inventoryValue = inventoryEdit ?? defaultInventoryValue;
+  const receivables = receivablesEdit ?? defaultReceivablesValue;
+  const [liabilitiesDeductions, setLiabilitiesDeductions] = useState(0);
 
   const totalZakatableAssets = Number(cashInHand) + Number(bankBalance) + Number(goldSilverValue) + Number(inventoryValue) + Number(receivables);
   const netZakatableAssets = Math.max(0, totalZakatableAssets - Number(liabilitiesDeductions));

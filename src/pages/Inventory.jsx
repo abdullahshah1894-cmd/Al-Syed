@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { useApp } from "../context/AppContext";
+import { useSearchParams } from "react-router-dom";
+import { useApp, getProductStock } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
 import {
   Boxes,
@@ -16,11 +17,33 @@ import {
   SmartphoneNfc,
 } from "lucide-react";
 
-const Inventory = () => {
-  const { products, addProduct, updateProduct, deleteProduct, shopSettings } = useApp();
-  const { isAdmin } = useAuth();
+// Categories whose units are tracked by IMEI (Smartphones must have at least one)
+const IMEI_CATEGORIES = ["Smartphones", "Tablets & iPads", "Wearables"];
+const WARRANTY_TYPES = ["Official Brand Warranty", "Shop Warranty", "No Warranty"];
 
-  const [searchTerm, setSearchTerm] = useState("");
+// Build one in-stock unit. A dual-SIM unit always carries `imei` (= imei1),
+// because POS and the server match on imei / imei1 / imei2.
+const makeUnit = (first, second, ptaStatus) =>
+  second
+    ? { imei: first, imei1: first, imei2: second, status: "in_stock", ptaStatus }
+    : { imei: first, status: "in_stock", ptaStatus };
+
+// Products whose stock is counted from IMEI units rather than a plain quantity
+const isImeiProduct = (p) => (p.imeis && p.imeis.length > 0) || p.category === "Smartphones";
+
+const Inventory = () => {
+  const { products, addProduct, updateProduct, deleteProduct, addStock, shopSettings } = useApp();
+  const { isAdmin } = useAuth();
+  const [searchParams] = useSearchParams();
+
+  // Search starts from ?search= (global header search) and follows it when the URL changes
+  const urlSearch = searchParams.get("search") || "";
+  const [searchTerm, setSearchTerm] = useState(urlSearch);
+  const [lastUrlSearch, setLastUrlSearch] = useState(urlSearch);
+  if (urlSearch !== lastUrlSearch) {
+    setLastUrlSearch(urlSearch);
+    setSearchTerm(urlSearch);
+  }
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [showAddModal, setShowAddModal] = useState(false);
 
@@ -44,14 +67,30 @@ const Inventory = () => {
   const [pasteRawInput, setPasteRawInput] = useState("");
   const [ptaStatus, setPtaStatus] = useState("Approved");
   const [supplierName, setSupplierName] = useState("");
+  const [warrantyDuration, setWarrantyDuration] = useState(12);
+  const [warrantyType, setWarrantyType] = useState("Official Brand Warranty");
+
+  // Edit Product modal state
+  const [editProduct, setEditProduct] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  // Add Stock modal state
+  const [stockProduct, setStockProduct] = useState(null);
+  const [stockImeiText, setStockImeiText] = useState("");
+  const [stockQty, setStockQty] = useState(1);
+  const [stockPta, setStockPta] = useState("Approved");
+  const [savingStock, setSavingStock] = useState(false);
 
   const categories = ["All", "Smartphones", "Tablets & iPads", "Accessories", "Spare Parts", "Wearables"];
+  const usesImeis = IMEI_CATEGORIES.includes(category);
 
   const filteredProducts = products.filter((p) => {
     const qLower = searchTerm.toLowerCase();
     const matchesSearch =
-      p.name.toLowerCase().includes(qLower) ||
-      p.brand.toLowerCase().includes(qLower) ||
+      (p.name || "").toLowerCase().includes(qLower) ||
+      (p.brand || "").toLowerCase().includes(qLower) ||
+      (p.model || "").toLowerCase().includes(qLower) ||
       (p.barcode && p.barcode.includes(searchTerm)) ||
       (p.imeis &&
         p.imeis.some(
@@ -193,41 +232,76 @@ const Inventory = () => {
     setImeiLines(imeiLines.filter((_, i) => i !== index));
   };
 
-  // Bulk Paste Helper
-  const parseBulkImeis = (raw) => {
-    let tokens = [];
+  // Bulk Paste Helpers
+  // Lines of the pasted text (a JSON array gives one line per element)
+  const parseBulkLines = (raw) => {
     const trimmed = raw.trim();
     if (trimmed.startsWith("[")) {
       try {
         const parsed = JSON.parse(trimmed);
-        if (Array.isArray(parsed)) {
-          tokens = parsed.map(String);
-        }
-      } catch (_) {}
+        if (Array.isArray(parsed)) return parsed.map(String);
+      } catch {
+        // not JSON, read it as plain text
+      }
     }
-    if (tokens.length === 0) {
-      tokens = raw.split(/[,\n;\s]+/);
-    }
-    return tokens
+    return raw.split(/\r?\n/);
+  };
+
+  // Single-SIM: every number is its own IMEI
+  const parseBulkImeis = (raw) =>
+    parseBulkLines(raw)
+      .flatMap((line) => line.split(/[,;\s]+/))
       .map((t) => t.replace(/\D/g, "").trim())
       .filter((t) => t.length > 0);
+
+  // Dual-SIM: one phone per line, "imei1,imei2" (comma / tab / space separated); a single value is IMEI 1 only
+  const parseDualPairs = (raw) =>
+    parseBulkLines(raw)
+      .map((line) => line.split(/[,;\s]+/).map((t) => t.replace(/\D/g, "")).filter((t) => /^\d{15}$/.test(t)))
+      .filter((t) => t.length > 0)
+      .map((t) => ({ imei1: t[0], imei2: t[1] || "" }));
+
+  const pasteCount =
+    imeiMode === "dual"
+      ? parseDualPairs(pasteRawInput).length
+      : parseBulkImeis(pasteRawInput).filter((im) => /^\d{15}$/.test(im)).length;
+
+  // IMEIs already in stock in any product -> product name
+  const inStockImeiOwners = () => {
+    const owners = new Map();
+    products.forEach((p) =>
+      (p.imeis || []).forEach((i) => {
+        if (i.status === "in_stock") [i.imei, i.imei1, i.imei2].filter(Boolean).forEach((k) => owners.set(k, p.name));
+      })
+    );
+    return owners;
+  };
+
+  // IMEIs entered twice, or already in stock somewhere
+  const findDuplicateImeis = (units) => {
+    const owners = inStockImeiOwners();
+    const seen = new Set();
+    const dups = [];
+    units.forEach((u) =>
+      [u.imei1 || u.imei, u.imei2].filter(Boolean).forEach((k) => {
+        if (seen.has(k)) dups.push(`${k} (entered twice)`);
+        else if (owners.has(k)) dups.push(`${k} (already in stock: ${owners.get(k)})`);
+        seen.add(k);
+      })
+    );
+    return dups;
   };
 
   const applyPastedImeis = () => {
-    const parsed = parseBulkImeis(pasteRawInput);
-    if (parsed.length === 0) return;
-
     if (imeiMode === "dual") {
-      const validDigits = parsed.filter((im) => /^\d{15}$/.test(im));
-      const newPairs = [];
-      for (let i = 0; i < validDigits.length; i += 2) {
-        newPairs.push({
-          imei1: validDigits[i] || "",
-          imei2: validDigits[i + 1] || "",
-        });
-      }
-      setDualImeiLines([...newPairs, { imei1: "", imei2: "" }]);
+      const newPairs = parseDualPairs(pasteRawInput);
+      if (newPairs.length === 0) return;
+      // Append after the rows already typed
+      const existing = dualImeiLines.filter((p) => p.imei1 || p.imei2);
+      setDualImeiLines([...existing, ...newPairs, { imei1: "", imei2: "" }]);
     } else {
+      const parsed = parseBulkImeis(pasteRawInput);
+      if (parsed.length === 0) return;
       const existing = imeiLines.filter((im) => /^\d{15}$/.test(im));
       const combined = [...new Set([...existing, ...parsed.filter((im) => /^\d{15}$/.test(im))])];
       setImeiLines([...combined, ""]);
@@ -249,7 +323,7 @@ const Inventory = () => {
 
     let imeisArr = [];
 
-    if (category === "Smartphones") {
+    if (usesImeis) {
       if (imeiMode === "dual") {
         const hasIncomplete = dualImeiLines.some(
           (p) => (p.imei1.length > 0 && p.imei1.length < 15) || (p.imei2.length > 0 && p.imei2.length < 15)
@@ -263,20 +337,16 @@ const Inventory = () => {
           (p) => /^\d{15}$/.test(p.imei1.trim()) || /^\d{15}$/.test(p.imei2.trim())
         );
 
-        if (validPairs.length === 0) {
+        if (validPairs.length === 0 && category === "Smartphones") {
           alert("Please enter at least one valid 15-digit IMEI for the smartphone!");
           return;
         }
 
+        // If only IMEI 2 was typed it becomes IMEI 1, so the unit always has imei = imei1
         imeisArr = validPairs.map((p) => {
-          const main = p.imei1.trim() || p.imei2.trim();
-          return {
-            imei: main,
-            imei1: p.imei1.trim(),
-            imei2: p.imei2.trim(),
-            status: "in_stock",
-            ptaStatus: ptaStatus,
-          };
+          const first = p.imei1.trim() || p.imei2.trim();
+          const second = p.imei1.trim() ? p.imei2.trim() : "";
+          return makeUnit(first, second, ptaStatus);
         });
       } else {
         const hasIncomplete = imeiLines.some((im) => im.length > 0 && im.length < 15);
@@ -290,16 +360,19 @@ const Inventory = () => {
         }
 
         const validImeis = imeiLines.filter((im) => /^\d{15}$/.test(im.trim()));
-        if (validImeis.length === 0) {
+        if (validImeis.length === 0 && category === "Smartphones") {
           alert("Please enter at least one valid 15-digit IMEI for the smartphone!");
           return;
         }
 
-        imeisArr = validImeis.map((im) => ({
-          imei: im.trim(),
-          status: "in_stock",
-          ptaStatus: ptaStatus,
-        }));
+        imeisArr = validImeis.map((im) => makeUnit(im.trim(), "", ptaStatus));
+      }
+
+      // Stop on IMEIs typed twice or already in stock in another product
+      const dups = findDuplicateImeis(imeisArr);
+      if (dups.length > 0) {
+        alert(`These IMEIs are duplicates, please remove them:\n${dups.join("\n")}`);
+        return;
       }
     }
 
@@ -312,6 +385,8 @@ const Inventory = () => {
       salePrice: Number(salePrice),
       quantity: imeisArr.length > 0 ? imeisArr.length : Number(quantity),
       minStockAlert: Number(minStockAlert),
+      warrantyDuration: Number(warrantyDuration),
+      warrantyType,
       imeis: imeisArr,
       supplier: { name: supplierName },
     });
@@ -330,6 +405,112 @@ const Inventory = () => {
     setDualImeiLines([{ imei1: "", imei2: "" }]);
     setTouchedImeis(new Set());
     setSupplierName("");
+    setWarrantyDuration(12);
+    setWarrantyType("Official Brand Warranty");
+  };
+
+  // ── Edit Product (details only; stock changes go through Add Stock) ──
+  const openEditModal = (prod) => {
+    setEditProduct(prod);
+    setEditForm({
+      name: prod.name || "",
+      brand: prod.brand || "",
+      model: prod.model || "",
+      category: prod.category || "Smartphones",
+      purchasePrice: prod.purchasePrice ?? "",
+      salePrice: prod.salePrice ?? "",
+      minStockAlert: prod.minStockAlert ?? 2,
+      warrantyDuration: prod.warrantyDuration ?? 12,
+      warrantyType: prod.warrantyType || "Official Brand Warranty",
+      supplierName: prod.supplier?.name || "",
+      supplierPhone: prod.supplier?.phone || "",
+    });
+  };
+
+  const setEditField = (field, value) => setEditForm((prev) => ({ ...prev, [field]: value }));
+
+  const handleEditSubmit = async (e) => {
+    e.preventDefault();
+    if (!editProduct || savingEdit || !editForm.name.trim() || !editForm.brand.trim()) return;
+    const fields = {
+      name: editForm.name.trim(),
+      brand: editForm.brand.trim(),
+      model: editForm.model.trim(),
+      category: editForm.category,
+      salePrice: Number(editForm.salePrice),
+      minStockAlert: Number(editForm.minStockAlert),
+      warrantyDuration: Number(editForm.warrantyDuration),
+      warrantyType: editForm.warrantyType,
+      supplierName: editForm.supplierName.trim(),
+      supplierPhone: editForm.supplierPhone.trim(),
+    };
+    // Cashiers cannot see the cost, so they do not change it
+    if (isAdmin) fields.purchasePrice = Number(editForm.purchasePrice);
+
+    setSavingEdit(true);
+    const ok = await updateProduct(editProduct.id, fields);
+    setSavingEdit(false);
+    if (ok) setEditProduct(null);
+  };
+
+  // ── Add Stock (server appends the new units to the current stock) ──
+  const openStockModal = (prod) => {
+    setStockProduct(prod);
+    setStockImeiText("");
+    setStockQty(1);
+    setStockPta("Approved");
+  };
+
+  const handleAddStockSubmit = async (e) => {
+    e.preventDefault();
+    if (!stockProduct || savingStock) return;
+
+    let payload;
+    if (isImeiProduct(stockProduct)) {
+      // One phone per line: "imei" or dual-SIM "imei1,imei2"
+      const units = [];
+      const invalid = [];
+      stockImeiText.split(/\r?\n/).forEach((line) => {
+        const tokens = line.split(/[,;\s]+/).filter(Boolean);
+        if (tokens.length === 0) return;
+        if (tokens.length > 2 || tokens.some((t) => !/^\d{15}$/.test(t))) {
+          invalid.push(line.trim());
+          return;
+        }
+        units.push(makeUnit(tokens[0], tokens[1] || "", stockPta));
+      });
+      if (invalid.length > 0) {
+        alert(`These lines are not valid 15-digit IMEIs:\n${invalid.join("\n")}`);
+        return;
+      }
+      if (units.length === 0) {
+        alert("Please enter at least one IMEI.");
+        return;
+      }
+      const dups = findDuplicateImeis(units);
+      if (dups.length > 0) {
+        alert(`These IMEIs are duplicates, please remove them:\n${dups.join("\n")}`);
+        return;
+      }
+      payload = { imeis: units };
+    } else {
+      const qty = Math.floor(Number(stockQty));
+      if (!qty || qty < 1) {
+        alert("Please enter a quantity of at least 1.");
+        return;
+      }
+      payload = { quantity: qty };
+    }
+
+    setSavingStock(true);
+    const saved = await addStock(stockProduct.id, payload);
+    setSavingStock(false);
+    if (saved) setStockProduct(null);
+  };
+
+  const handleDelete = (prod) => {
+    if (!window.confirm(`Delete ${prod.name}? ${getProductStock(prod)} unit(s) in stock`)) return;
+    deleteProduct(prod.id);
   };
 
   return (
@@ -477,7 +658,21 @@ const Inventory = () => {
                     <td className="p-3.5 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button
-                          onClick={() => deleteProduct(prod.id)}
+                          onClick={() => openStockModal(prod)}
+                          className="p-2 text-slate-400 hover:text-emerald-400 hover:bg-slate-800 rounded-lg transition-colors"
+                          title="Add Stock"
+                        >
+                          <PlusCircle size={16} />
+                        </button>
+                        <button
+                          onClick={() => openEditModal(prod)}
+                          className="p-2 text-slate-400 hover:text-indigo-400 hover:bg-slate-800 rounded-lg transition-colors"
+                          title="Edit Product"
+                        >
+                          <Edit2 size={16} />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(prod)}
                           className="p-2 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors"
                           title="Delete Product"
                         >
@@ -589,7 +784,7 @@ const Inventory = () => {
                 </div>
               </div>
 
-              {category === "Smartphones" ? (
+              {usesImeis && (
                 <div className="space-y-3 p-3.5 bg-indigo-950/30 border border-indigo-900/40 rounded-2xl">
                   {/* Mode & Toolbar */}
                   <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-indigo-900/40 pb-2.5">
@@ -646,17 +841,23 @@ const Inventory = () => {
                         value={pasteRawInput}
                         onChange={(e) => setPasteRawInput(e.target.value)}
                         className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs font-mono text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyan-500 resize-none"
-                        placeholder={`Paste IMEIs in any format:
+                        placeholder={
+                          imeiMode === "dual"
+                            ? `One phone per line, IMEI 1 and IMEI 2:
+358921098471201,358921098471219
+358921098471227 (IMEI 1 only)`
+                            : `Paste IMEIs in any format:
 ["358921098471201","358921098471202"]
-or newline/comma separated...`}
+or newline/comma separated...`
+                        }
                       />
                       <button
                         type="button"
                         onClick={applyPastedImeis}
-                        disabled={parseBulkImeis(pasteRawInput).filter((im) => /^\d{15}$/.test(im)).length === 0}
+                        disabled={pasteCount === 0}
                         className="w-full py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white font-bold rounded-xl text-xs transition-all shadow"
                       >
-                        Import {parseBulkImeis(pasteRawInput).filter((im) => /^\d{15}$/.test(im)).length} IMEI(s)
+                        Import {pasteCount} {imeiMode === "dual" ? "Phone(s)" : "IMEI(s)"}
                       </button>
                     </div>
                   ) : imeiMode === "dual" ? (
@@ -808,10 +1009,14 @@ or newline/comma separated...`}
                     </select>
                   </div>
                 </div>
-              ) : (
-                <div className="grid grid-cols-2 gap-3">
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                {category !== "Smartphones" && (
                   <div>
-                    <label className="font-semibold text-slate-400">Quantity Stock</label>
+                    <label className="font-semibold text-slate-400">
+                      {usesImeis ? "Quantity Stock (if no IMEIs)" : "Quantity Stock"}
+                    </label>
                     <input
                       type="number"
                       min="1"
@@ -820,19 +1025,48 @@ or newline/comma separated...`}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1"
                     />
                   </div>
+                )}
 
-                  <div>
-                    <label className="font-semibold text-slate-400">Min Stock Alert Level</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={minStockAlert}
-                      onChange={(e) => setMinStockAlert(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1"
-                    />
-                  </div>
+                <div>
+                  <label className="font-semibold text-slate-400">Min Stock Alert Level</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={minStockAlert}
+                    onChange={(e) => setMinStockAlert(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1"
+                  />
                 </div>
-              )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="font-semibold text-slate-400">Warranty Duration (Months)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={warrantyDuration}
+                    onChange={(e) => setWarrantyDuration(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-400">Warranty Type</label>
+                  <select
+                    value={warrantyType}
+                    onChange={(e) => {
+                      setWarrantyType(e.target.value);
+                      if (e.target.value === "No Warranty") setWarrantyDuration(0);
+                    }}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  >
+                    {WARRANTY_TYPES.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
 
               <div>
                 <label className="font-semibold text-slate-400">
@@ -862,6 +1096,266 @@ or newline/comma separated...`}
                   className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-500 shadow"
                 >
                   Save Product
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Product Modal */}
+      {editProduct && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 w-full max-w-xl rounded-3xl p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="font-bold text-slate-100 text-base">Edit Product</h3>
+                <p className="text-[11px] text-slate-400">Details only. Use Add Stock to add new units.</p>
+              </div>
+              <button onClick={() => setEditProduct(null)} className="text-slate-400 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleEditSubmit} onKeyDown={handleFormKeyDown} className="space-y-3 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="font-semibold text-slate-400">Product Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={editForm.name}
+                    onChange={(e) => setEditField("name", e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-400">Brand *</label>
+                  <input
+                    type="text"
+                    required
+                    value={editForm.brand}
+                    onChange={(e) => setEditField("brand", e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="font-semibold text-slate-400">Model / Variant</label>
+                  <input
+                    type="text"
+                    value={editForm.model}
+                    onChange={(e) => setEditField("model", e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-400">Category *</label>
+                  <select
+                    value={editForm.category}
+                    onChange={(e) => setEditField("category", e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  >
+                    {categories.filter((c) => c !== "All").map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                {isAdmin && (
+                  <div>
+                    <label className="font-semibold text-slate-400">Purchase Price (Cost) *</label>
+                    <input
+                      type="number"
+                      required
+                      min="0"
+                      value={editForm.purchasePrice}
+                      onChange={(e) => setEditField("purchasePrice", e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label className="font-semibold text-slate-400">Sale Price</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editForm.salePrice}
+                    onChange={(e) => setEditField("salePrice", e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-400">Min Stock Alert Level</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editForm.minStockAlert}
+                    onChange={(e) => setEditField("minStockAlert", e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="font-semibold text-slate-400">Warranty Duration (Months)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editForm.warrantyDuration}
+                    onChange={(e) => setEditField("warrantyDuration", e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-400">Warranty Type</label>
+                  <select
+                    value={editForm.warrantyType}
+                    onChange={(e) => {
+                      setEditField("warrantyType", e.target.value);
+                      if (e.target.value === "No Warranty") setEditField("warrantyDuration", 0);
+                    }}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  >
+                    {WARRANTY_TYPES.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="font-semibold text-slate-400">Supplier Name</label>
+                  <input
+                    type="text"
+                    value={editForm.supplierName}
+                    onChange={(e) => setEditField("supplierName", e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-400">Supplier Phone</label>
+                  <input
+                    type="text"
+                    value={editForm.supplierPhone}
+                    onChange={(e) => setEditField("supplierPhone", e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-3 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditProduct(null)}
+                  className="px-4 py-2 bg-slate-800 text-slate-300 font-bold rounded-xl"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingEdit}
+                  className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-500 disabled:opacity-50 shadow"
+                >
+                  {savingEdit ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Add Stock Modal */}
+      {stockProduct && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="font-bold text-slate-100 text-base">Add Stock</h3>
+                <p className="text-[11px] text-slate-400">
+                  {stockProduct.name} • {getProductStock(stockProduct)} unit(s) in stock now
+                </p>
+              </div>
+              <button onClick={() => setStockProduct(null)} className="text-slate-400 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddStockSubmit} className="space-y-3 text-xs">
+              {isImeiProduct(stockProduct) ? (
+                <>
+                  <div>
+                    <label className="font-semibold text-slate-400 flex items-center gap-1.5">
+                      <Smartphone size={14} />
+                      <span>New IMEIs (one phone per line)</span>
+                    </label>
+                    <textarea
+                      rows={6}
+                      value={stockImeiText}
+                      onChange={(e) => setStockImeiText(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs font-mono text-slate-100 placeholder-slate-600 mt-1 focus:outline-none focus:border-indigo-500 resize-none"
+                      placeholder={`358921098471201
+Dual-SIM: imei1,imei2
+358921098471219,358921098471227`}
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      {stockImeiText.split(/\r?\n/).filter((l) => l.trim()).length} phone(s) entered
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-slate-400">PTA Approval Status:</span>
+                    <select
+                      value={stockPta}
+                      onChange={(e) => setStockPta(e.target.value)}
+                      className="bg-slate-950 border border-slate-800 rounded-lg p-1 text-cyan-400 font-bold"
+                    >
+                      <option value="Approved">PTA Approved</option>
+                      <option value="Non-PTA">Non-PTA</option>
+                      <option value="CPID">CPID Approved</option>
+                    </select>
+                  </div>
+                </>
+              ) : (
+                <div>
+                  <label className="font-semibold text-slate-400">Quantity to Add</label>
+                  <input
+                    type="number"
+                    min="1"
+                    required
+                    value={stockQty}
+                    onChange={(e) => setStockQty(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              )}
+
+              <div className="pt-3 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setStockProduct(null)}
+                  className="px-4 py-2 bg-slate-800 text-slate-300 font-bold rounded-xl"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingStock}
+                  className="px-5 py-2 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-500 disabled:opacity-50 shadow"
+                >
+                  {savingStock ? "Saving..." : "Add Stock"}
                 </button>
               </div>
             </form>

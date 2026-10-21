@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useApp, SELLERS } from "../context/AppContext";
+import { useApp, SELLERS, getProductStock } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
 import {
   Search,
@@ -18,9 +18,7 @@ const Header = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [showNotifications, setShowNotifications] = useState(false);
 
-  const lowStockItems = products.filter(
-    (p) => (p.imeis && p.imeis.length > 0 ? p.imeis.filter((i) => i.status === "in_stock").length : (p.quantity || 0)) <= p.minStockAlert
-  );
+  const lowStockItems = products.filter((p) => getProductStock(p) <= p.minStockAlert);
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
@@ -30,6 +28,12 @@ const Header = () => {
     // Check if input looks like a 15 digit IMEI
     if (/^\d{15}$/.test(query)) {
       navigate(`/imei-checker?imei=${query}`);
+      return;
+    }
+
+    // Bill / payment receipt numbers go to the Bills page
+    if (/^(INV|PAY)-/i.test(query)) {
+      navigate(`/bills?search=${encodeURIComponent(query)}`);
       return;
     }
 
@@ -124,9 +128,7 @@ const Header = () => {
                   </div>
                 ) : (
                   lowStockItems.map((item) => {
-                    const currentStock = item.imeis
-                      ? item.imeis.filter((i) => i.status === "in_stock").length
-                      : item.quantity;
+                    const currentStock = getProductStock(item);
 
                     return (
                       <div

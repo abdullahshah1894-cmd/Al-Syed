@@ -1,5 +1,18 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { api } from "../services/api";
+import { useAuth } from "./AuthContext";
+import { localDate } from "../utils/dates";
+
+// Warranty status from its expiry date: Expired, Expiring Soon (30 days), Active. Void stays Void.
+const warrantyStatus = (w) => {
+  if (w.status === "Void") return "Void";
+  const expiry = w.warranty_expiry_date || w.warrantyExpiryDate;
+  if (!expiry) return w.status || "Active";
+  const today = localDate();
+  if (expiry < today) return "Expired";
+  if (expiry <= localDate(Date.now() + 30 * 24 * 60 * 60 * 1000)) return "Expiring Soon";
+  return "Active";
+};
 
 const AppContext = createContext();
 
@@ -50,9 +63,9 @@ const normalizeProduct = (p) => {
     salePrice: Number(p.sale_price || p.salePrice || 0),
     quantity,
     stock: quantity,
-    minStockAlert: p.min_stock_alert || p.minStockAlert || 2,
+    minStockAlert: Number(p.min_stock_alert ?? p.minStockAlert ?? 2),
     barcode: p.barcode || "",
-    warrantyDuration: p.warranty_duration || p.warrantyDuration || 12,
+    warrantyDuration: Number(p.warranty_duration ?? p.warrantyDuration ?? 12),
     warrantyType: p.warranty_type || p.warrantyType || "Official Brand Warranty",
     supplier: { name: p.supplier_name || "", phone: p.supplier_phone || "" },
     specs: p.specs || {},
@@ -84,6 +97,7 @@ const normalizeProduct = (p) => {
     cashierName: s.cashier_name || s.cashierName,
     sellerName: s.seller_name || s.sellerName || s.cashier_name || s.cashierName || "",
     notes: s.notes || "",
+    dueDate: s.due_date || s.dueDate || null,
     createdAt: s.created_at || s.createdAt || new Date().toISOString(),
   });
 
@@ -118,11 +132,11 @@ const normalizeProduct = (p) => {
     customerName: w.customer_name || w.customerName,
     customerPhone: w.customer_phone || w.customerPhone,
     purchaseDate: w.purchase_date || w.purchaseDate,
-    warrantyDuration: w.warranty_duration || w.warrantyDuration || 12,
+    warrantyDuration: Number(w.warranty_duration ?? w.warrantyDuration ?? 12),
     warrantyStartDate: w.warranty_start_date || w.warrantyStartDate,
     warrantyExpiryDate: w.warranty_expiry_date || w.warrantyExpiryDate,
     warrantyType: w.warranty_type || w.warrantyType,
-    status: w.status || "Active",
+    status: warrantyStatus(w),
     claims: w.claims || [],
     createdAt: w.created_at || new Date().toISOString(),
   });
@@ -170,8 +184,22 @@ const normalizeProduct = (p) => {
     if (Array.isArray(data)) setWarranties(data.map(normalizeWarranty));
   };
 
-  // Fetch all data from Supabase-backed backend
+  // Fetch all data from Supabase-backed backend once someone is logged in; clear it on logout
+  const { token } = useAuth();
+  const [dataToken, setDataToken] = useState(token);
+  if (dataToken !== token) {
+    setDataToken(token);
+    if (!token) {
+      setProducts([]);
+      setSales([]);
+      setCustomers([]);
+      setWarranties([]);
+      setIssues([]);
+      setExpenses([]);
+    }
+  }
   useEffect(() => {
+    if (!token) return;
     const fetchAllData = async () => {
       try {
         const [dbProducts, dbSales, dbCustomers, dbWarranties, dbIssues, dbExpenses, dbSettings] = await Promise.all([
@@ -213,7 +241,7 @@ const normalizeProduct = (p) => {
       }
     };
     fetchAllData();
-  }, []);
+  }, [token]);
 
   // Add new sale — saved to Supabase first; the screen only shows it once the database has it.
   // The backend marks IMEIs sold, reduces stock, creates warranties and updates the customer balance.
@@ -313,6 +341,65 @@ const normalizeProduct = (p) => {
       return normalized;
     } catch (err) {
       notifyError(`Customer "${customerData.name}"`, err);
+      return null;
+    }
+  };
+
+  // Edit a customer's details (never the balance — only sales and payments change that)
+  const updateCustomer = async (id, data) => {
+    try {
+      const saved = await api.updateCustomer(id, {
+        name: data.name,
+        phone: data.phone,
+        email: data.email,
+        address: data.address,
+        cnic: data.cnic,
+        seller_name: data.sellerName ?? data.seller_name,
+      });
+      const normalized = normalizeCustomer(saved);
+      setCustomers((prev) => prev.map((c) => (c.id === id ? normalized : c)));
+      return normalized;
+    } catch (err) {
+      notifyError("Customer update", err);
+      return null;
+    }
+  };
+
+  // Soft-delete a customer (their sales stay)
+  const deleteCustomer = async (id) => {
+    try {
+      await api.deleteCustomer(id);
+      setCustomers((prev) => prev.filter((c) => c.id !== id));
+      return true;
+    } catch (err) {
+      notifyError("Customer delete", err);
+      return false;
+    }
+  };
+
+  // Restock: add new IMEI units ([{imei, imei1, imei2, ptaStatus}]) or a quantity for non-IMEI items.
+  // The server appends to the current stock, so units sold meanwhile are never put back in stock.
+  const addStock = async (productId, { imeis = [], quantity = 0 } = {}) => {
+    try {
+      const saved = await api.addStock(productId, { imeis, quantity });
+      const normalized = normalizeProduct(saved);
+      setProducts((prev) => prev.map((p) => (p.id === productId ? normalized : p)));
+      return normalized;
+    } catch (err) {
+      notifyError("Stock update", err);
+      return null;
+    }
+  };
+
+  // Log a warranty claim ({ issue, claimType, status, notes })
+  const addWarrantyClaim = async (imei, claim) => {
+    try {
+      const saved = await api.addWarrantyClaim(imei, claim);
+      const normalized = normalizeWarranty(saved);
+      setWarranties((prev) => prev.map((w) => (w.id === normalized.id ? normalized : w)));
+      return normalized;
+    } catch (err) {
+      notifyError("Warranty claim", err);
       return null;
     }
   };
@@ -470,7 +557,6 @@ const normalizeProduct = (p) => {
       : customers.filter(
           (c) =>
             (c.sellerName || "").toLowerCase() === activeSeller.toLowerCase() ||
-            (c.name || "").toLowerCase().includes(activeSeller.toLowerCase()) ||
             sales.some(
               (s) =>
                 (s.customerId === c.id || s.customer === c.id) &&
@@ -519,6 +605,12 @@ const normalizeProduct = (p) => {
         addIssue,
         updateIssueStatus,
         deleteIssue,
+        updateCustomer,
+        deleteCustomer,
+        addStock,
+        addWarrantyClaim,
+        refreshProducts,
+        refreshCustomers,
       }}
     >
       {children}

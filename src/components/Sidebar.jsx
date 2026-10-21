@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 
 const Sidebar = () => {
-  const { user, logout, switchRole, isAdmin } = useAuth();
+  const { user, logout, isAdmin } = useAuth();
   const navigate = useNavigate();
 
   const handleLogout = () => {
@@ -124,7 +124,7 @@ const Sidebar = () => {
         })}
       </div>
 
-      {/* User Profile Footer & Fast Demo Role Switcher */}
+      {/* User Profile Footer (switching role = log out and log in as the other user) */}
       <div className="p-3 bg-slate-950/60 border-t border-slate-800 space-y-3">
         <div className="bg-slate-900/80 p-2.5 rounded-xl border border-slate-800/80 flex items-center justify-between">
           <div className="flex items-center gap-2.5 overflow-hidden">
@@ -156,15 +156,6 @@ const Sidebar = () => {
             <LogOut size={16} />
           </button>
         </div>
-
-        {/* Demo Fast Switcher Button */}
-        <button
-          onClick={() => switchRole(isAdmin ? "cashier" : "admin")}
-          className="w-full text-xs py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg flex items-center justify-center gap-2 transition-all border border-slate-700/60"
-        >
-          <UserCheck size={14} className="text-indigo-400" />
-          <span>Switch to {isAdmin ? "Cashier Mode" : "Admin Owner"}</span>
-        </button>
       </div>
     </aside>
   );

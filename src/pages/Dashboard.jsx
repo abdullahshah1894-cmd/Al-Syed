@@ -1,5 +1,7 @@
 import React from "react";
-import { useApp } from "../context/AppContext";
+import { useApp, getProductStock } from "../context/AppContext";
+import { isToday, localDate } from "../utils/dates";
+import { isSettlement, realSales, totalProfit, itemCount } from "../utils/sales";
 import { useAuth } from "../context/AuthContext";
 import { useNavigate } from "react-router-dom";
 import {
@@ -19,40 +21,36 @@ import {
 } from "lucide-react";
 
 const Dashboard = () => {
-  const { products, sales, customers, warranties, shopSettings } = useApp();
+  const { products, sales, customers, warranties, expenses, shopSettings } = useApp();
   const { user, isAdmin } = useAuth();
   const navigate = useNavigate();
 
-  // Metrics Calculations
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const todaySales = sales.filter((s) => s.createdAt.slice(0, 10) === todayStr);
+  // Metrics Calculations (local date, settlements are payments not bills)
+  const todayRecords = sales.filter((s) => isToday(s.createdAt));
+  const todaySales = realSales(todayRecords);
+  const todayUdhaarCollected = todayRecords.filter(isSettlement).reduce((sum, s) => sum + Number(s.paidAmount || 0), 0);
 
-  const todayTotalRevenue = todaySales.reduce((sum, s) => sum + s.grandTotal, 0);
-  const todayTotalProfit = todaySales.reduce((sum, s) => sum + (s.netProfit || (s.grandTotal - (s.items || []).reduce((acc, i) => acc + i.unitPurchasePrice * i.quantity, 0))), 0);
+  const todayTotalRevenue = todaySales.reduce((sum, s) => sum + Number(s.grandTotal || 0), 0);
+  const todayGrossProfit = totalProfit(todaySales);
+  const todayExpenses = expenses
+    .filter((e) => e.expenseDate === localDate() || (!e.expenseDate && isToday(e.createdAt)))
+    .reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  const todayTotalProfit = todayGrossProfit - todayExpenses;
 
   // Total Inventory Purchase Valuation & Potential Sales Value
-  const totalInventoryPurchaseCost = products.reduce((sum, p) => {
-    const qty = p.imeis && p.imeis.length > 0 ? p.imeis.filter((i) => i.status === "in_stock").length : (p.quantity || 0);
-    return sum + p.purchasePrice * qty;
-  }, 0);
+  const totalInventoryPurchaseCost = products.reduce((sum, p) => sum + Number(p.purchasePrice || 0) * getProductStock(p), 0);
+  const totalInventoryRetailValue = products.reduce((sum, p) => sum + Number(p.salePrice || 0) * getProductStock(p), 0);
 
-  const totalInventoryRetailValue = products.reduce((sum, p) => {
-    const qty = p.imeis && p.imeis.length > 0 ? p.imeis.filter((i) => i.status === "in_stock").length : (p.quantity || 0);
-    return sum + p.salePrice * qty;
-  }, 0);
+  const lowStockProducts = products.filter((p) => getProductStock(p) <= p.minStockAlert);
+  const lowStockCount = lowStockProducts.length;
 
-  const lowStockCount = products.filter(
-    (p) => (p.imeis && p.imeis.length > 0 ? p.imeis.filter((i) => i.status === "in_stock").length : (p.quantity || 0)) <= p.minStockAlert
-  ).length;
-
-  const totalUdhaarPending = customers.reduce((sum, c) => sum + c.totalPending, 0);
+  const totalUdhaarPending = customers.reduce((sum, c) => sum + Number(c.totalPending || 0), 0);
   const activeWarrantiesCount = warranties.filter((w) => w.status === "Active" || w.status === "Expiring Soon").length;
 
-  // Estimated Zakat calculation (2.5% on Net Assets)
-  const cashInHand = 150000;
-  const bankBalance = 350000;
-  const netAssets = cashInHand + bankBalance + totalInventoryPurchaseCost + totalUdhaarPending;
+  // Estimated Zakat (2.5%) on inventory + receivables only; cash / bank are entered on the Zakat page
+  const netAssets = totalInventoryPurchaseCost + totalUdhaarPending;
   const estimatedZakat = Math.round(netAssets * 0.025);
+  const recentBills = realSales(sales).slice(0, 3);
 
   return (
     <div className="p-6 space-y-6">
@@ -103,7 +101,7 @@ const Dashboard = () => {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
         {/* Card 1: Today's Sales */}
         <div 
-          onClick={() => navigate("/sales-reports")}
+          onClick={() => navigate("/reports")}
           className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm hover:border-indigo-500/50 hover:shadow-indigo-500/10 transition-all cursor-pointer"
         >
           <div className="flex items-center justify-between text-slate-400 mb-2">
@@ -117,11 +115,16 @@ const Dashboard = () => {
             <TrendingUp size={12} />
             <span>{todaySales.length} Bill(s) Today</span>
           </div>
+          {todayUdhaarCollected > 0 && (
+            <div className="text-[11px] text-slate-400 mt-0.5">
+              Udhaar collected: {shopSettings.currencySymbol} {todayUdhaarCollected.toLocaleString()}
+            </div>
+          )}
         </div>
 
         {/* Card 2: Today's Profit (Admin viewable) */}
         <div 
-          onClick={() => isAdmin ? navigate("/sales-reports") : null}
+          onClick={() => isAdmin ? navigate("/reports") : null}
           className={`bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm transition-all ${isAdmin ? "cursor-pointer hover:border-indigo-500/50 hover:shadow-indigo-500/10" : ""}`}
         >
           <div className="flex items-center justify-between text-slate-400 mb-2">
@@ -134,13 +137,15 @@ const Dashboard = () => {
             {isAdmin ? `${shopSettings.currencySymbol} ${todayTotalProfit.toLocaleString()}` : "••••••"}
           </div>
           <div className="text-[11px] text-slate-400 mt-1">
-            {isAdmin ? "Net profit margin" : "Restricted for Cashier"}
+            {isAdmin
+              ? `Gross ${shopSettings.currencySymbol} ${todayGrossProfit.toLocaleString()} - Expenses ${shopSettings.currencySymbol} ${todayExpenses.toLocaleString()}`
+              : "Restricted for Cashier"}
           </div>
         </div>
 
         {/* Card 3: Inventory Value */}
         <div 
-          onClick={() => navigate("/inventory-valuation")}
+          onClick={() => navigate("/valuation")}
           className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm hover:border-cyan-500/50 hover:shadow-cyan-500/10 transition-all cursor-pointer"
         >
           <div className="flex items-center justify-between text-slate-400 mb-2">
@@ -195,7 +200,7 @@ const Dashboard = () => {
 
         {/* Card 6: Estimated Zakat (Admin) */}
         <div 
-          onClick={() => isAdmin ? navigate("/zakat-calculator") : null}
+          onClick={() => isAdmin ? navigate("/zakat") : null}
           className={`bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm transition-all ${isAdmin ? "cursor-pointer hover:border-purple-500/50 hover:shadow-purple-500/10" : ""}`}
         >
           <div className="flex items-center justify-between text-slate-400 mb-2">
@@ -208,7 +213,7 @@ const Dashboard = () => {
             {isAdmin ? `${shopSettings.currencySymbol} ${estimatedZakat.toLocaleString()}` : "••••••"}
           </div>
           <div className="text-[11px] text-purple-400 mt-1 font-medium">
-            {isAdmin ? "Calculated on Net Assets" : "Admin view only"}
+            {isAdmin ? "Inventory + receivables only" : "Admin view only"}
           </div>
         </div>
       </div>
@@ -234,7 +239,7 @@ const Dashboard = () => {
             </button>
           </div>
 
-          {sales.length === 0 ? (
+          {recentBills.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-10 text-slate-500 gap-2">
               <Receipt size={32} className="opacity-30" />
               <p className="text-sm font-medium">No bills created yet</p>
@@ -247,7 +252,7 @@ const Dashboard = () => {
             </div>
           ) : (
             <div className="space-y-3">
-              {sales.slice(0, 3).map((sale, idx) => (
+              {recentBills.map((sale, idx) => (
                 <div
                   key={sale.id}
                   className="flex items-center gap-4 p-4 bg-slate-950/50 border border-slate-800 rounded-2xl hover:border-slate-700 transition-all group"
@@ -273,17 +278,17 @@ const Dashboard = () => {
                     </div>
                     <p className="text-sm font-semibold text-slate-200 mt-0.5 truncate">{sale.customerName}</p>
                     <p className="text-[11px] text-slate-500 truncate">
-                      {sale.items.map((i) => i.productName).join(", ")}
+                      {(sale.items || []).map((i) => i.productName).join(", ")}
                     </p>
                   </div>
 
                   {/* Amount */}
                   <div className="text-right shrink-0">
                     <div className="text-base font-bold text-slate-100">
-                      {shopSettings.currencySymbol} {sale.grandTotal.toLocaleString()}
+                      {shopSettings.currencySymbol} {Number(sale.grandTotal || 0).toLocaleString()}
                     </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">
-                      {sale.items.reduce((s, i) => s + i.quantity, 0)} item(s)
+                      {itemCount(sale)} item(s)
                     </div>
                   </div>
                 </div>
@@ -305,28 +310,26 @@ const Dashboard = () => {
           </div>
 
           <div className="space-y-3">
-            {products
-              .filter((p) => (p.imeis && p.imeis.length > 0 ? p.imeis.filter((i) => i.status === "in_stock").length : (p.quantity || 0)) <= p.minStockAlert)
-              .map((prod) => {
-                const stock = prod.imeis && prod.imeis.length > 0 ? prod.imeis.filter((i) => i.status === "in_stock").length : (prod.quantity || 0);
-                return (
-                  <div
-                    key={prod.id}
-                    className="p-3 bg-slate-950/60 rounded-2xl border border-slate-800 flex items-center justify-between"
-                  >
-                    <div>
-                      <p className="text-xs font-bold text-slate-200">{prod.name}</p>
-                      <p className="text-[11px] text-slate-400">{prod.brand} • {prod.category}</p>
-                    </div>
-                    <div className="text-right">
-                      <span className="px-2 py-1 rounded-lg text-xs font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                        {stock} left
-                      </span>
-                      <p className="text-[10px] text-slate-500 mt-0.5">Min Alert: {prod.minStockAlert}</p>
-                    </div>
+            {lowStockProducts.map((prod) => {
+              const stock = getProductStock(prod);
+              return (
+                <div
+                  key={prod.id}
+                  className="p-3 bg-slate-950/60 rounded-2xl border border-slate-800 flex items-center justify-between"
+                >
+                  <div>
+                    <p className="text-xs font-bold text-slate-200">{prod.name}</p>
+                    <p className="text-[11px] text-slate-400">{prod.brand} • {prod.category}</p>
                   </div>
-                );
-              })}
+                  <div className="text-right">
+                    <span className="px-2 py-1 rounded-lg text-xs font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                      {stock} left
+                    </span>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Min Alert: {prod.minStockAlert}</p>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           <button
