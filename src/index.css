@@ -1,0 +1,239 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-100 font-sans antialiased selection:bg-indigo-500 selection:text-white;
+  }
+}
+
+/* Custom Scrollbar for sleek dark mode */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(51, 65, 85, 0.8);
+  border-radius: 9999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.8);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   PRINT STYLES — BlackCopper 80mm Thermal Receipt Printer
+   Paper: 80mm wide | Printable: ~72mm
+══════════════════════════════════════════════════════════════════ */
+@media print {
+  @page {
+    size: 80mm 200mm;
+    margin: 0;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box !important;
+  }
+
+  html,
+  body {
+    width: 80mm !important;
+    max-width: 80mm !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Hide app navigation, sidebar, header, buttons and print:hidden elements */
+  aside,
+  header,
+  nav,
+  button,
+  .print\:hidden,
+  [class*="print:hidden"],
+  .no-print {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    width: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    overflow: hidden !important;
+  }
+
+  /* Reset layout wrappers so they don't add height, overflow or background */
+  #root,
+  main,
+  .fixed,
+  .fixed.inset-0 {
+    display: block !important;
+    position: static !important;
+    inset: auto !important;
+    width: 80mm !important;
+    max-width: 80mm !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  /* Modal card wrappers: strip fixed bounds and shadow */
+  .max-w-sm,
+  .max-w-\[340px\],
+  .max-w-md,
+  .max-w-lg,
+  .max-w-xl,
+  .max-w-2xl,
+  .rounded-2xl,
+  .rounded-3xl,
+  .shadow-2xl {
+    display: block !important;
+    width: 80mm !important;
+    max-width: 80mm !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    overflow: visible !important;
+  }
+
+  /* Primary receipt container */
+  .print-target,
+  #receipt-content,
+  #invoice-print-area,
+  #statement-print-area,
+  #bill-slip-content {
+    display: block !important;
+    visibility: visible !important;
+    position: static !important;
+    width: 72mm !important;
+    max-width: 72mm !important;
+    min-width: 72mm !important;
+    margin: 0 auto !important;
+    padding: 2mm 1mm 5mm 1mm !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    border: none !important;
+    box-shadow: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    box-sizing: border-box !important;
+    page-break-before: avoid !important;
+    break-before: avoid !important;
+    page-break-after: auto !important;
+    break-after: auto !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, monospace !important;
+    font-size: 11px !important;
+    line-height: 1.35 !important;
+  }
+
+  /* All children inside receipt */
+  .print-target *,
+  #receipt-content *,
+  #invoice-print-area *,
+  #statement-print-area *,
+  #bill-slip-content * {
+    visibility: visible !important;
+    color: #000000 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    overflow: visible !important;
+    max-height: none !important;
+    height: auto !important;
+  }
+
+  /* Flex elements within the receipt */
+  .print-target .flex,
+  #receipt-content .flex,
+  #invoice-print-area .flex,
+  #statement-print-area .flex,
+  #bill-slip-content .flex {
+    display: flex !important;
+    height: auto !important;
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  /* Tables */
+  .print-target table,
+  #receipt-content table,
+  #invoice-print-area table,
+  #statement-print-area table,
+  #bill-slip-content table {
+    width: 100% !important;
+    max-width: 100% !important;
+    border-collapse: collapse !important;
+    font-size: 10.5px !important;
+  }
+
+  .print-target tr,
+  #receipt-content tr,
+  #invoice-print-area tr,
+  #statement-print-area tr,
+  #bill-slip-content tr {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* Dashed dividers */
+  .print-target .border-dashed,
+  #receipt-content .border-dashed,
+  #invoice-print-area .border-dashed,
+  #statement-print-area .border-dashed,
+  #bill-slip-content .border-dashed {
+    border-color: #000000 !important;
+    border-top: 1.5px dashed #000000 !important;
+  }
+
+  .print-target .border-t-2,
+  #receipt-content .border-t-2,
+  #invoice-print-area .border-t-2,
+  #statement-print-area .border-t-2,
+  #bill-slip-content .border-t-2 {
+    border-color: #000000 !important;
+    border-top: 2px dashed #000000 !important;
+  }
+
+  .print-target .border-b,
+  #receipt-content .border-b,
+  #invoice-print-area .border-b,
+  #statement-print-area .border-b,
+  #bill-slip-content .border-b,
+  .print-target .border-t,
+  #receipt-content .border-t,
+  #invoice-print-area .border-t,
+  #statement-print-area .border-t,
+  #bill-slip-content .border-t {
+    border-color: #000000 !important;
+  }
+}
