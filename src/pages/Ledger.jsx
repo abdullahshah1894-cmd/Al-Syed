@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from "react";
+import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
 import { api } from "../services/api";
 import html2canvas from "html2canvas";
@@ -46,8 +46,48 @@ const fmtTimestamp = () => {
   );
 };
 
-let _nextId = 1;
-const uid = () => _nextId++;
+// Rows get their database id up front, so the row on screen and the row in Supabase are the same record
+const uid = () => crypto.randomUUID();
+
+// Screen row ⇄ ledger_entries row. The full screen row is kept in `extra.ui` so it reloads exactly as shown.
+const toDbEntry = (e) => ({
+  id: e.id,
+  type: e.type,
+  date: e.date,
+  description: e.description,
+  qty: e.qty,
+  rate: e.rate,
+  amount: e.type === "item" ? Number(e.qty || 0) * Number(e.rate || 0) : 0,
+  debit: e.debit,
+  credit: e.credit,
+  parentInvoiceId: e.parentInvoiceId || null,
+  productId: e.productId || null,
+  saleId: e.saleId || null,
+  imeis: e.imeisArray && e.imeisArray.length > 0 ? e.imeisArray : e.imei ? [e.imei] : [],
+  extra: { ui: e },
+});
+
+const fromDbEntry = (r) => {
+  const ui = (r.extra && r.extra.ui) || {};
+  return {
+    type: r.type,
+    date: r.date,
+    description: r.description || "",
+    qty: r.type === "item" ? Number(r.qty) : "",
+    rate: r.type === "item" ? Number(r.rate) : "",
+    dis: "",
+    deal: "",
+    lp: "",
+    debit: r.type === "item" ? null : Number(r.debit),
+    credit: r.type === "payment" ? Number(r.credit) : null,
+    parentInvoiceId: r.parent_invoice_id || undefined,
+    productId: r.product_id || undefined,
+    imeisArray: r.imeis || [],
+    ...ui,
+    id: r.id,
+    saleId: r.sale_id || ui.saleId || undefined,
+  };
+};
 
 // ── Component ────────────────────────────────────────────────────────────────
 const Ledger = () => {
@@ -108,6 +148,7 @@ const Ledger = () => {
       address: "",
       cnic: ""
     });
+    if (!newCust) return;
     setSelectedCustomer(newCust.id);
     setShowQuickAddCustomer(false);
     setNewCustomerName("");
@@ -154,20 +195,133 @@ const Ledger = () => {
     }
   }, [scanStatus]);
 
-  // ── Load ledger entries from Supabase on mount ────────────────────────────
+  // ── Persistence: every row on screen is saved to Supabase ─────────────────
+  // syncedRef holds the last saved version of each row; the sync saves new rows,
+  // changed rows and deletions, so a refresh reloads exactly what was on screen.
+  const syncedRef = useRef(new Map());
+  const entriesRef = useRef(entries);
+  const syncQueueRef = useRef(Promise.resolve());
+  const [saveState, setSaveState] = useState("saved"); // "saved" | "saving" | "error"
+  const [loadError, setLoadError] = useState(null);
+
+  const doSync = useCallback(async () => {
+    const current = entriesRef.current;
+    const currentIds = new Set(current.map((e) => e.id));
+    const pending =
+      current.some((e) => syncedRef.current.get(e.id) !== JSON.stringify(e)) ||
+      [...syncedRef.current.keys()].some((id) => !currentIds.has(id));
+    if (!pending) return;
+
+    setSaveState("saving");
+    let failed = false;
+
+    for (const e of current) {
+      const json = JSON.stringify(e);
+      const prev = syncedRef.current.get(e.id);
+      if (prev === json) continue;
+      try {
+        if (prev === undefined) await api.addLedgerEntry(toDbEntry(e));
+        else await api.updateLedgerEntry(e.id, toDbEntry(e));
+        syncedRef.current.set(e.id, json);
+      } catch (err) {
+        failed = true;
+        console.error("[Ledger] Save failed:", err.message);
+      }
+    }
+
+    // Only rows that were saved before can be deleted, so a failed load never wipes the database
+    for (const id of [...syncedRef.current.keys()]) {
+      if (currentIds.has(id)) continue;
+      try {
+        await api.deleteLedgerEntry(id);
+        syncedRef.current.delete(id);
+      } catch (err) {
+        failed = true;
+        console.error("[Ledger] Delete failed:", err.message);
+      }
+    }
+
+    setSaveState(failed ? "error" : "saved");
+  }, []);
+
+  // Saves run one after another, never in parallel
+  const syncLedger = useCallback(() => {
+    syncQueueRef.current = syncQueueRef.current.then(doSync, doSync);
+    return syncQueueRef.current;
+  }, [doSync]);
+
+  // Save shortly after every change
   useEffect(() => {
-    // The user requested NOT to load the massive default list of all past ledger entries 
-    // when opening the tab, so we start with an empty session.
-    /*
+    entriesRef.current = entries;
+    const t = setTimeout(syncLedger, 300);
+    return () => clearTimeout(t);
+  }, [entries, syncLedger]);
+
+  // Keep retrying while something is unsaved (e.g. internet dropped)
+  useEffect(() => {
+    if (saveState !== "error") return;
+    const t = setInterval(syncLedger, 10000);
+    return () => clearInterval(t);
+  }, [saveState, syncLedger]);
+
+  // Warn before closing / refreshing while changes are still unsaved
+  useEffect(() => {
+    const handler = (e) => {
+      if (saveState === "saved") return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [saveState]);
+
+  // ── Load the ledger sheet for the selected dates from Supabase ────────────
+  useEffect(() => {
+    let cancelled = false;
     const loadLedger = async () => {
-      const data = await api.getLedger();
-      if (data && Array.isArray(data) && data.length > 0) {
-        ...
+      // Let pending saves finish before the sheet is replaced
+      await syncQueueRef.current;
+      try {
+        const data = await api.getLedger(dateFrom, dateTo);
+        if (cancelled) return;
+
+        const opening = data.find((r) => r.type === "opening" && r.date === dateFrom);
+        const loaded = data.filter((r) => r.type !== "opening").map(fromDbEntry);
+
+        // Rows scanned while the sheet was loading stay on screen
+        const loadedIds = new Set(loaded.map((e) => e.id));
+        const localOnly = entriesRef.current.filter(
+          (e) => !loadedIds.has(e.id) && e.date >= dateFrom && e.date <= dateTo
+        );
+        const prevSynced = syncedRef.current;
+        syncedRef.current = new Map(loaded.map((e) => [e.id, JSON.stringify(e)]));
+        localOnly.forEach((e) => {
+          if (prevSynced.has(e.id)) syncedRef.current.set(e.id, prevSynced.get(e.id));
+        });
+
+        const merged = [...loaded, ...localOnly];
+        entriesRef.current = merged;
+        setEntries(merged);
+
+        const ob = opening ? Number(opening.debit) : 0;
+        setOpeningBalance(ob);
+        setObInput(String(ob));
+
+        // Re-open the last invoice that was not checked out yet
+        const invoices = merged.filter((e) => e.type === "invoice");
+        const openInvoice = [...invoices].reverse().find((e) => !e.saleId);
+        setCurrentInvoiceId(openInvoice ? openInvoice.id : null);
+        setInvoiceCounter(invoices.length + 1);
+        setLoadError(null);
+      } catch (err) {
+        if (!cancelled) setLoadError(err.message);
       }
     };
     loadLedger();
-    */
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [dateFrom, dateTo]);
 
   // ── Lookup product by IMEI or barcode (local first, then backend) ──────────
   const lookupProduct = async (query) => {
@@ -355,29 +509,7 @@ const Ledger = () => {
         return updateInvoiceTotals(updated, invId);
       });
 
-      const itemRate = Number(
-        product.salePrice ??
-        product.sale_price ??
-        product.purchasePrice ??
-        product.purchase_price ??
-        0
-      );
-
-      // Persist item to Supabase backend
-      api.addLedgerEntry({
-        type: "item",
-        date: todayISO(),
-        description: `${product.name}${imei ? ` (${(imei.imei1 || imei.imei).slice(-6)})` : ""}`,
-        qty: 1,
-        rate: itemRate,
-        discount: 0,
-        amount: itemRate,
-        debit: itemRate,
-        credit: 0,
-        parentInvoiceId: invId,
-        productId: product.id,
-      });
-
+      // Saved to Supabase by the ledger sync (see "Persistence" above)
       successCount++;
       lastAdded = product.name;
     }
@@ -530,6 +662,11 @@ const Ledger = () => {
 
     // This records the sale (reducing stock in backend) and updates local states
     const recorded = await recordSale(saleData);
+    // Not saved: keep the invoice open so it can be checked out again
+    if (!recorded) return;
+
+    // Link the ledger invoice to its saved sale so it is not re-opened after a refresh
+    setEntries((prev) => prev.map((e) => (e.id === invoiceHeader.id ? { ...e, saleId: recorded.id } : e)));
 
     setCompletedSaleInvoice(recorded);
     setShowCheckoutModal(false);
@@ -764,9 +901,15 @@ const Ledger = () => {
   };
 
   // ── Save opening balance ──────────────────────────────────────────────────
-  const saveOB = () => {
-    setOpeningBalance(Number(obInput) || 0);
-    setEditingOB(false);
+  const saveOB = async () => {
+    const amount = Number(obInput) || 0;
+    try {
+      await api.setOpeningBalance(dateFrom, amount);
+      setOpeningBalance(amount);
+      setEditingOB(false);
+    } catch (err) {
+      alert(`Opening balance was NOT saved.\n\n${err.message}`);
+    }
   };
 
   // ── Running balance computation ───────────────────────────────────────────
@@ -816,6 +959,15 @@ const Ledger = () => {
           <div>
             <h1 className="text-base font-bold text-slate-100">Billing Ledger</h1>
             <p className="text-[11px] text-slate-400">Scan IMEI / barcode to add products to the current bill</p>
+            <p className={`text-[11px] font-semibold ${loadError || saveState === "error" ? "text-rose-400" : saveState === "saving" ? "text-amber-400" : "text-emerald-400"}`}>
+              {loadError
+                ? `Could not load saved ledger: ${loadError}`
+                : saveState === "error"
+                ? "Not saved yet — retrying every 10s. Don't close this page."
+                : saveState === "saving"
+                ? "Saving…"
+                : "All changes saved to database"}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">

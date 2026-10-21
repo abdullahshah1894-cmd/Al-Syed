@@ -151,18 +151,42 @@ const normalizeProduct = (p) => {
     createdAt: e.created_at || new Date().toISOString(),
   });
 
+  // Tell the user plainly when something did not reach the database
+  const notifyError = (what, err) => {
+    console.error(`[AppContext] ${what} failed:`, err);
+    alert(`${what} was NOT saved.\n\n${err.message}\n\nNothing was lost on screen — please try again.`);
+  };
+
+  const refreshProducts = async () => {
+    const data = await api.getProducts();
+    if (Array.isArray(data)) setProducts(data.map(normalizeProduct));
+  };
+  const refreshCustomers = async () => {
+    const data = await api.getCustomers();
+    if (Array.isArray(data)) setCustomers(data.map(normalizeCustomer));
+  };
+  const refreshWarranties = async () => {
+    const data = await api.getWarranties();
+    if (Array.isArray(data)) setWarranties(data.map(normalizeWarranty));
+  };
+
   // Fetch all data from Supabase-backed backend
   useEffect(() => {
     const fetchAllData = async () => {
       try {
-        const [dbProducts, dbSales, dbCustomers, dbWarranties, dbIssues, dbExpenses] = await Promise.all([
+        const [dbProducts, dbSales, dbCustomers, dbWarranties, dbIssues, dbExpenses, dbSettings] = await Promise.all([
           api.getProducts(),
           api.getSales(),
           api.getCustomers(),
           api.getWarranties(),
           api.getMobileIssues ? api.getMobileIssues() : Promise.resolve([]),
           api.getExpenses ? api.getExpenses() : Promise.resolve([]),
+          api.getSettings(),
         ]);
+
+        if (dbSettings && typeof dbSettings === "object" && Object.keys(dbSettings).length > 0) {
+          setShopSettings((prev) => ({ ...prev, ...dbSettings }));
+        }
 
         if (Array.isArray(dbProducts)) {
           setProducts(dbProducts.map(normalizeProduct));
@@ -191,236 +215,119 @@ const normalizeProduct = (p) => {
     fetchAllData();
   }, []);
 
-  // Add new sale — saves to Supabase & updates local state
+  // Add new sale — saved to Supabase first; the screen only shows it once the database has it.
+  // The backend marks IMEIs sold, reduces stock, creates warranties and updates the customer balance.
   const recordSale = async (newSaleData) => {
-    const saleId = `s_${Date.now()}`;
     const billNumber =
       newSaleData.billNumber ||
       `INV-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(sales.length + 1).padStart(3, "0")}`;
 
+    // Carry each item's cost so profit is stored with the sale
+    const items = (newSaleData.items || []).map((item) => {
+      const prod = products.find((p) => p.id === (item.productId || item.product || item.id));
+      const unitPurchasePrice = Number(item.unitPurchasePrice ?? prod?.purchasePrice ?? 0);
+      return { ...item, unitPurchasePrice };
+    });
+    const cost = items.reduce((sum, i) => sum + i.unitPurchasePrice * Number(i.quantity || i.qty || 1), 0);
+
     const formattedSale = {
       ...newSaleData,
-      id: saleId,
+      items,
+      netProfit: newSaleData.netProfit || Number(newSaleData.grandTotal || 0) - cost,
       customerId: newSaleData.customer || newSaleData.customerId || null,
       customerName: newSaleData.customerName || "Walk-in Customer",
       sellerName: newSaleData.sellerName || newSaleData.cashierName || "",
       billNumber,
-      createdAt: new Date().toISOString(),
     };
 
-    // Optimistic update
-    setSales((prev) => [formattedSale, ...prev]);
-
-    // Update products IMEI status and stock quantity locally
-    setProducts((prevProducts) =>
-      prevProducts.map((prod) => {
-        const soldItemsForProd = (newSaleData.items || []).filter(
-          (item) => item.product === prod.id || item.productId === prod.id || item.id === prod.id
-        );
-        if (soldItemsForProd.length === 0) return prod;
-
-        let updatedQuantity = Number(prod.quantity || 0);
-        let updatedImeis = [...(prod.imeis || [])];
-
-        soldItemsForProd.forEach((soldItem) => {
-          const qty = Number(soldItem.quantity || soldItem.qty || 1);
-          let imeiList =
-            soldItem.imeisArray && soldItem.imeisArray.length > 0
-              ? [...soldItem.imeisArray]
-              : soldItem.imei
-              ? [soldItem.imei]
-              : [];
-
-          // If product has IMEIs but none provided in the sale item, auto-take first N in-stock IMEIs
-          if (imeiList.length === 0 && updatedImeis.length > 0) {
-            const inStock = updatedImeis.filter((i) => i.status === "in_stock");
-            const take = inStock.slice(0, qty);
-            imeiList = take.map((i) => i.imei || i.imei1 || i.imei2).filter(Boolean);
-          }
-
-          if (updatedImeis.length > 0 && imeiList.length > 0) {
-            updatedImeis = updatedImeis.map((imObj) => {
-              const isSold = imeiList.some(
-                (im) => im === imObj.imei || im === imObj.imei1 || im === imObj.imei2
-              );
-              return isSold
-                ? { ...imObj, status: "sold", soldInSale: billNumber, soldAt: new Date().toISOString() }
-                : imObj;
-            });
-            updatedQuantity = updatedImeis.filter((i) => i.status === "in_stock").length;
-
-            // Auto-create warranty locally
-            const expiryDate = new Date();
-            expiryDate.setMonth(expiryDate.getMonth() + (prod.warrantyDuration || 12));
-
-            imeiList.forEach((imeiStr) => {
-              const newWarranty = {
-                id: `w_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
-                imei: imeiStr,
-                product: prod.id,
-                productName: prod.name,
-                brand: prod.brand,
-                model: prod.model,
-                customerName: newSaleData.customerName,
-                customerPhone: newSaleData.customerPhone,
-                purchaseDate: new Date().toISOString().slice(0, 10),
-                warrantyDuration: prod.warrantyDuration || 12,
-                warrantyStartDate: new Date().toISOString().slice(0, 10),
-                warrantyExpiryDate: expiryDate.toISOString().slice(0, 10),
-                warrantyType: prod.warrantyType || "Official Brand Warranty",
-                status: "Active",
-                claims: [],
-              };
-              setWarranties((prevW) => [newWarranty, ...prevW]);
-            });
-          } else {
-            updatedQuantity = Math.max(0, updatedQuantity - qty);
-          }
-        });
-
-        return { ...prod, quantity: updatedQuantity, stock: updatedQuantity, imeis: updatedImeis };
-      })
-    );
-
-    // Persist to Supabase backend & refresh products from server
-    api.createSale(formattedSale).then(async (saved) => {
-      if (saved) {
-        setSales((prev) => prev.map((s) => (s.id === saleId ? normalizeSale(saved) : s)));
-        try {
-          const freshProducts = await api.getProducts();
-          if (Array.isArray(freshProducts)) {
-            setProducts(freshProducts.map(normalizeProduct));
-          }
-        } catch (_) {}
-      }
-    });
-
-    // Update customer balance locally
-    if (newSaleData.customer || newSaleData.customerId) {
-      const custId = newSaleData.customer || newSaleData.customerId;
-      const isCredit = (newSaleData.paymentMethod || "").toLowerCase().includes("credit") ||
-        (newSaleData.paymentMethod || "").toLowerCase().includes("udhaar") ||
-        (newSaleData.paymentMethod || "") === "Pending Bill";
-
-      setCustomers((prevCusts) =>
-        prevCusts.map((cust) => {
-          if (cust.id === custId) {
-            const saleTotal = Number(newSaleData.grandTotal || 0);
-            const paidNow = Number(newSaleData.paidAmount || 0);
-            const totalPurchases = Number(cust.totalPurchases || 0) + saleTotal;
-
-            let totalPaid, newPending;
-            if (isCredit) {
-              const addedPending = Math.max(0, saleTotal - paidNow);
-              totalPaid = Number(cust.totalPaid || 0) + paidNow;
-              newPending = Number(cust.totalPending || 0) + addedPending;
-            } else {
-              totalPaid = Number(cust.totalPaid || 0) + saleTotal;
-              newPending = Number(cust.totalPending || 0);
-            }
-
-            // Sync with backend immediately
-            api.updateCustomer(cust.id, {
-              total_purchases: totalPurchases,
-              outstanding_balance: newPending,
-            });
-
-            return { ...cust, totalPurchases, totalPaid, totalPending: newPending };
-          }
-          return cust;
-        })
-      );
+    let saved;
+    try {
+      saved = await api.createSale(formattedSale);
+    } catch (err) {
+      notifyError(`Sale ${billNumber}`, err);
+      return null;
     }
 
-    return formattedSale;
+    const normalized = { ...formattedSale, ...normalizeSale(saved) };
+    setSales((prev) => [normalized, ...prev]);
+    await Promise.all([refreshProducts(), refreshCustomers(), refreshWarranties()]);
+    return normalized;
   };
 
-  // Add Product — saves to Supabase
+  // Add Product — shown only after Supabase saves it
   const addProduct = async (productData) => {
-    const newProd = {
+    const payload = {
       ...productData,
-      id: `p_${Date.now()}`,
       barcode: productData.barcode || `888462${Math.floor(10000 + Math.random() * 90000)}`,
     };
-    setProducts((prev) => [newProd, ...prev]);
-
-    api.createProduct(productData).then((saved) => {
-      if (saved) {
-        setProducts((prev) => prev.map((p) => (p.id === newProd.id ? normalizeProduct(saved) : p)));
-      }
-    });
-    return newProd;
+    try {
+      const saved = await api.createProduct(payload);
+      const normalized = normalizeProduct(saved);
+      setProducts((prev) => [normalized, ...prev]);
+      return normalized;
+    } catch (err) {
+      notifyError(`Product "${productData.name}"`, err);
+      return null;
+    }
   };
 
   // Update Product — saves to Supabase
-  const updateProduct = (id, updatedFields) => {
-    setProducts((prev) => prev.map((p) => (p.id === id ? { ...p, ...updatedFields } : p)));
-    api.updateProduct(id, updatedFields);
+  const updateProduct = async (id, updatedFields) => {
+    try {
+      const saved = await api.updateProduct(id, updatedFields);
+      setProducts((prev) =>
+        prev.map((p) => (p.id === id ? (saved && saved.id ? normalizeProduct(saved) : { ...p, ...updatedFields }) : p))
+      );
+      return true;
+    } catch (err) {
+      notifyError("Product update", err);
+      return false;
+    }
   };
 
   // Delete Product — soft delete in Supabase
-  const deleteProduct = (id) => {
-    setProducts((prev) => prev.filter((p) => p.id !== id));
-    api.deleteProduct(id);
+  const deleteProduct = async (id) => {
+    try {
+      await api.deleteProduct(id);
+      setProducts((prev) => prev.filter((p) => p.id !== id));
+      return true;
+    } catch (err) {
+      notifyError("Product delete", err);
+      return false;
+    }
   };
 
-  // Add Customer — saves to Supabase (with seller association)
+  // Add Customer — shown only after Supabase saves it (with seller association)
   const addCustomer = async (customerData) => {
-    const newCust = {
-      ...customerData,
-      id: `c_${Date.now()}`,
-      totalPurchases: 0,
-      totalPaid: 0,
-      totalPending: 0,
-      sellerName: customerData.sellerName || customerData.seller_name || "",
-      sales: [],
-    };
-    setCustomers((prev) => [newCust, ...prev]);
-
-    api.createCustomer({
-      name: customerData.name,
-      phone: customerData.phone,
-      email: customerData.email,
-      address: customerData.address,
-      cnic: customerData.cnic,
-      seller_name: customerData.sellerName || customerData.seller_name || null,
-    }).then((saved) => {
-      if (saved) {
-        setCustomers((prev) => prev.map((c) => (c.id === newCust.id ? normalizeCustomer(saved) : c)));
-      }
-    });
-    return newCust;
+    try {
+      const saved = await api.createCustomer({
+        name: customerData.name,
+        phone: customerData.phone,
+        email: customerData.email,
+        address: customerData.address,
+        cnic: customerData.cnic,
+        seller_name: customerData.sellerName || customerData.seller_name || null,
+      });
+      const normalized = normalizeCustomer(saved);
+      setCustomers((prev) => [normalized, ...prev]);
+      return normalized;
+    } catch (err) {
+      notifyError(`Customer "${customerData.name}"`, err);
+      return null;
+    }
   };
 
-  // Settle Customer Pending Payment
+  // Settle Customer Pending Payment — the backend lowers the balance when it saves the receipt
   const payPendingAmount = async (customerId, amountPaid, sellerName = "") => {
-    let updatedCustomer = null;
+    const customer = customers.find((c) => c.id === customerId);
 
-    // 1. Update Customer Locally
-    setCustomers((prev) =>
-      prev.map((c) => {
-        if (c.id === customerId) {
-          const newPaid = (c.totalPaid || 0) + Number(amountPaid);
-          updatedCustomer = { ...c, totalPaid: newPaid, totalPending: Math.max(0, (c.totalPurchases || 0) - newPaid) };
-          return updatedCustomer;
-        }
-        return c;
-      })
-    );
-
-    if (updatedCustomer) {
-      // 2. Persist Customer Balance in Supabase
-      api.updateCustomer(updatedCustomer.id, {
-        outstanding_balance: updatedCustomer.totalPending,
-      });
-
-      // 3. Record Payment History as a Settlement Receipt in Sales
+    if (customer) {
       const settlementRecord = {
         billNumber: `PAY-${Date.now().toString().slice(-6)}`,
-        customerId: updatedCustomer.id,
-        customerName: updatedCustomer.name,
-        customerPhone: updatedCustomer.phone,
-        sellerName: sellerName || updatedCustomer.sellerName || "",
+        customerId: customer.id,
+        customerName: customer.name,
+        customerPhone: customer.phone,
+        sellerName: sellerName || customer.sellerName || "",
         items: [],
         subtotalAmount: 0,
         discountAmount: 0,
@@ -435,86 +342,115 @@ const normalizeProduct = (p) => {
         notes: `Received payment of Rs.${amountPaid} for Udhaar balance.`,
       };
 
-      const recorded = await api.createSale(settlementRecord);
-      if (recorded) {
+      try {
+        const recorded = await api.createSale(settlementRecord);
         const normalized = normalizeSale(recorded);
-        setSales(prev => [normalized, ...prev]);
+        setSales((prev) => [normalized, ...prev]);
+        await refreshCustomers();
         return normalized;
+      } catch (err) {
+        notifyError(`Payment of Rs.${amountPaid} from ${customer.name}`, err);
+        return null;
       }
-      return settlementRecord;
     }
     return null;
   };
 
   // ── Expense Actions ────────────────────────────────────────────────────────
   const addExpense = async (expenseData) => {
-    const tempId = `exp_${Date.now()}`;
-    const newExpense = { ...normalizeExpense({ ...expenseData, id: tempId, created_at: new Date().toISOString() }) };
-    setExpenses((prev) => [newExpense, ...prev]);
-
-    const saved = await api.createExpense({
-      title: expenseData.title,
-      amount: expenseData.amount,
-      category: expenseData.category || "Other",
-      description: expenseData.description || null,
-      seller_name: expenseData.sellerName || null,
-      payment_method: expenseData.paymentMethod || "Cash",
-      expense_date: expenseData.expenseDate || new Date().toISOString().slice(0, 10),
-    });
-    if (saved) {
-      setExpenses((prev) => prev.map((e) => (e.id === tempId ? normalizeExpense(saved) : e)));
-      return normalizeExpense(saved);
+    try {
+      const saved = await api.createExpense({
+        title: expenseData.title,
+        amount: expenseData.amount,
+        category: expenseData.category || "Other",
+        description: expenseData.description || null,
+        seller_name: expenseData.sellerName || null,
+        payment_method: expenseData.paymentMethod || "Cash",
+        expense_date: expenseData.expenseDate || new Date().toISOString().slice(0, 10),
+      });
+      const normalized = normalizeExpense(saved);
+      setExpenses((prev) => [normalized, ...prev]);
+      return normalized;
+    } catch (err) {
+      notifyError(`Expense "${expenseData.title}"`, err);
+      return null;
     }
-    return newExpense;
   };
 
   const updateExpense = async (id, data) => {
-    setExpenses((prev) => prev.map((e) => (e.id === id ? { ...e, ...data } : e)));
-    const saved = await api.updateExpense(id, {
-      title: data.title,
-      amount: data.amount,
-      category: data.category,
-      description: data.description,
-      seller_name: data.sellerName,
-      payment_method: data.paymentMethod,
-      expense_date: data.expenseDate,
-    });
-    if (saved) {
+    try {
+      const saved = await api.updateExpense(id, {
+        title: data.title,
+        amount: data.amount,
+        category: data.category,
+        description: data.description,
+        seller_name: data.sellerName,
+        payment_method: data.paymentMethod,
+        expense_date: data.expenseDate,
+      });
       setExpenses((prev) => prev.map((e) => (e.id === id ? normalizeExpense(saved) : e)));
+      return true;
+    } catch (err) {
+      notifyError("Expense update", err);
+      return false;
     }
   };
 
   const deleteExpense = async (id) => {
-    setExpenses((prev) => prev.filter((e) => e.id !== id));
-    await api.deleteExpense(id);
+    try {
+      await api.deleteExpense(id);
+      setExpenses((prev) => prev.filter((e) => e.id !== id));
+      return true;
+    } catch (err) {
+      notifyError("Expense delete", err);
+      return false;
+    }
   };
 
   // ── Mobile Issues Actions ──────────────────────────────────────────────────
   const addIssue = async (data) => {
-    const newIssue = await api.addMobileIssue(data);
-    if (newIssue) {
+    try {
+      const newIssue = await api.addMobileIssue(data);
       setIssues((prev) => [normalizeIssue(newIssue), ...prev]);
       return normalizeIssue(newIssue);
+    } catch (err) {
+      notifyError("Repair ticket", err);
+      return null;
     }
-    return null;
   };
 
   const updateIssueStatus = async (id, status) => {
-    const updated = await api.updateMobileIssueStatus(id, status);
-    if (updated) {
+    try {
+      const updated = await api.updateMobileIssueStatus(id, status);
       setIssues((prev) => prev.map((i) => (i.id === id ? normalizeIssue(updated) : i)));
       return true;
+    } catch (err) {
+      notifyError("Repair status change", err);
+      return false;
     }
-    return false;
   };
 
   const deleteIssue = async (id) => {
-    const res = await api.deleteMobileIssue(id);
-    if (res) {
+    try {
+      await api.deleteMobileIssue(id);
       setIssues((prev) => prev.filter((i) => i.id !== id));
       return true;
+    } catch (err) {
+      notifyError("Repair ticket delete", err);
+      return false;
     }
-    return false;
+  };
+
+  // ── Shop Settings ──────────────────────────────────────────────────────────
+  const saveShopSettings = async (newSettings) => {
+    try {
+      const saved = await api.updateSettings(newSettings);
+      setShopSettings((prev) => ({ ...prev, ...saved }));
+      return true;
+    } catch (err) {
+      notifyError("Shop settings", err);
+      return false;
+    }
   };
 
   const [activeSeller, setActiveSeller] = useState("All Sellers");
@@ -567,6 +503,7 @@ const normalizeProduct = (p) => {
         setExpenses,
         shopSettings,
         setShopSettings,
+        saveShopSettings,
         activeSeller,
         setActiveSeller,
         backendOnline,

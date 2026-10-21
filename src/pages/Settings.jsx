@@ -4,7 +4,7 @@ import { useAuth } from "../context/AuthContext";
 import { Settings as SettingsIcon, Save, Store, ShieldCheck, UserCheck } from "lucide-react";
 
 const Settings = () => {
-  const { shopSettings, setShopSettings } = useApp();
+  const { shopSettings, saveShopSettings } = useApp();
   const { user } = useAuth();
 
   const [shopName, setShopName] = useState(shopSettings.shopName);
@@ -14,15 +14,26 @@ const Settings = () => {
 
   const [savedSuccess, setSavedSuccess] = useState(false);
 
-  const handleSave = (e) => {
+  // Settings arrive from the database after the page may already be open
+  const [loadedSettings, setLoadedSettings] = useState(shopSettings);
+  if (loadedSettings !== shopSettings) {
+    setLoadedSettings(shopSettings);
+    setShopName(shopSettings.shopName);
+    setAddress(shopSettings.address);
+    setPhone(shopSettings.phone);
+    setTaxRate(shopSettings.taxRate);
+  }
+
+  const handleSave = async (e) => {
     e.preventDefault();
-    setShopSettings({
+    const ok = await saveShopSettings({
       ...shopSettings,
       shopName,
       address,
       phone,
       taxRate: Number(taxRate),
     });
+    if (!ok) return;
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
   };

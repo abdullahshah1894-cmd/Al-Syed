@@ -261,7 +261,8 @@ const POS = () => {
   const currentSaleTotal = Math.max(0, subtotal + taxAmount - Number(discount));
   const previousBalance = selectedCustomer ? Number(selectedCustomer.totalPending || 0) : 0;
   const netTotalToPay = currentSaleTotal + previousBalance;
-  const effectivePaid = paidAmountInput !== "" ? Number(paidAmountInput) : (paymentMethod === "Cash" ? currentSaleTotal : 0);
+  // Only Udhaar defaults to unpaid; Cash / Card / Easypaisa are paid in full unless an amount is typed
+  const effectivePaid = paidAmountInput !== "" ? Number(paidAmountInput) : (paymentMethod === "Credit (Udhaar)" ? 0 : currentSaleTotal);
   const dueAmount = Math.max(0, currentSaleTotal - effectivePaid);
 
   // ── Checkout ──────────────────────────────────────────────────
@@ -306,6 +307,8 @@ const POS = () => {
     };
 
     const recorded = await recordSale(saleData);
+    // Not saved: keep the cart and the checkout open so nothing is lost
+    if (!recorded) return;
     setCompletedSaleInvoice({ ...recorded, sellerName: selectedSeller });
 
     setCart([]);
@@ -330,6 +333,7 @@ const POS = () => {
       address: newCustAddress,
       sellerName: selectedSeller,
     });
+    if (!created) return;
     setSelectedCustomer(created);
     setCustomerSearch(newCustName);
     setNewCustName("");

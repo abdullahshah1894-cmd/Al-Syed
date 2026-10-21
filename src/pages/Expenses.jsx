@@ -75,11 +75,11 @@ const Expenses = () => {
       expenseDate: form.expenseDate || today(),
     };
 
-    if (editingExpense) {
-      await updateExpense(editingExpense.id, data);
-    } else {
-      await addExpense(data);
-    }
+    const ok = editingExpense
+      ? await updateExpense(editingExpense.id, data)
+      : await addExpense(data);
+    // Keep the form filled if the database did not save it
+    if (!ok) return;
 
     resetForm();
     setShowForm(false);

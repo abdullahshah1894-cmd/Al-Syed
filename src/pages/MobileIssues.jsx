@@ -41,8 +41,6 @@ const MobileIssues = () => {
       setImei("");
       setPhoneIssue("");
       setCompanyName("");
-    } else {
-      alert("Failed to register the issue. Check connection.");
     }
   };
 
