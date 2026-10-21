@@ -102,7 +102,15 @@ A comprehensive, full-stack Point of Sale (POS), Inventory, Customer Khata / Led
    # Create database tables and initial admin user
    node scripts/setupSupabase.js
    node scripts/setupMobileIssues.js
+   node apply_migration.js            # expenses table, seller columns
+   node scripts/migratePersistence.js # ledger, settings, customers.updated_at
+   node scripts/migrateSales.js       # create_sale / add_stock (one transaction per sale)
    ```
+   All migrations are safe to run again. If `db.<project>.supabase.co` does not resolve on your network
+   (IPv6 only), use the Session pooler connection string from Supabase → Connect as `DATABASE_URL`.
+
+   Optional: add `JWT_SECRET=<long random string>` to `backend/.env`. Without it the login tokens are
+   signed with the service role key.
 
 5. **Running Locally:**
    - **Start the backend server:**
@@ -116,7 +124,11 @@ A comprehensive, full-stack Point of Sale (POS), Inventory, Customer Khata / Led
      # From project root
      npm run dev
      ```
-   - Open your browser at `http://localhost:5173`.
+   - Open your browser at `http://localhost:5173` and log in with a user from the `users` table
+     (seeded: `admin` / `admin123`, `cashier` / `cashier123` — change these). Vite forwards `/api` to the
+     backend on port 5000; for a backend on another machine set `VITE_API_URL` in `.env`.
+   - **Production:** `npm run build`, then run the backend with `NODE_ENV=production`; it serves the app and
+     the API from the same address.
 
 ---
 

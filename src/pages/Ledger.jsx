@@ -3,6 +3,8 @@ import { useApp, SELLERS } from "../context/AppContext";
 import { api } from "../services/api";
 import html2canvas from "html2canvas";
 import { formatWAPhone } from "./POS";
+import { localDate } from "../utils/dates";
+import { itemImeis } from "../utils/sales";
 import {
   BookOpen,
   Plus,
@@ -27,7 +29,8 @@ const fmt = (n, decimals = 0) =>
     maximumFractionDigits: decimals,
   });
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
+// Local (Pakistan) date — toISOString() is UTC and gives yesterday's date before 5 AM
+const todayISO = () => localDate();
 
 const fmtDate = (iso) => {
   if (!iso) return "";
@@ -91,7 +94,8 @@ const fromDbEntry = (r) => {
 
 // ── Component ────────────────────────────────────────────────────────────────
 const Ledger = () => {
-  const { products, shopSettings, customers, recordSale, addCustomer } = useApp();
+  // allCustomers (not the header-filtered list) so a customer added here is always found
+  const { products, shopSettings, allCustomers, recordSale, addCustomer } = useApp();
 
   // ── State ─────────────────────────────────────────────────────────────────
   const [entries, setEntries] = useState([]);
@@ -126,7 +130,8 @@ const Ledger = () => {
   const [paidAmountInput, setPaidAmountInput] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [completedSaleInvoice, setCompletedSaleInvoice] = useState(null);
-  
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // Custom Customer Search Dropdown State
   const [customerSearch, setCustomerSearch] = useState("");
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
@@ -146,29 +151,14 @@ const Ledger = () => {
       name: newCustomerName,
       phone: newCustomerPhone,
       address: "",
-      cnic: ""
+      cnic: "",
+      sellerName: selectedSeller
     });
     if (!newCust) return;
     setSelectedCustomer(newCust.id);
     setShowQuickAddCustomer(false);
     setNewCustomerName("");
     setNewCustomerPhone("");
-  };
-
-  const selectCustomerByName = async (targetName) => {
-    let found = customers.find(c => c.name && c.name.toLowerCase().trim() === targetName.toLowerCase().trim());
-    if (found) {
-      setSelectedCustomer(found.id);
-    } else {
-      const created = await addCustomer({
-        name: targetName,
-        phone: targetName === "Aziz" ? "0300-1111111" : "0300-2222222",
-        address: "Shop Partner Account"
-      });
-      if (created) {
-        setSelectedCustomer(created.id);
-      }
-    }
   };
 
   // Handle clicks outside customer dropdown
@@ -205,11 +195,13 @@ const Ledger = () => {
   const [loadError, setLoadError] = useState(null);
 
   const doSync = useCallback(async () => {
+    // Work on the map as it is now; if a reload swaps it while we save, we stop before deleting anything
+    const synced = syncedRef.current;
     const current = entriesRef.current;
     const currentIds = new Set(current.map((e) => e.id));
     const pending =
-      current.some((e) => syncedRef.current.get(e.id) !== JSON.stringify(e)) ||
-      [...syncedRef.current.keys()].some((id) => !currentIds.has(id));
+      current.some((e) => synced.get(e.id) !== JSON.stringify(e)) ||
+      [...synced.keys()].some((id) => !currentIds.has(id));
     if (!pending) return;
 
     setSaveState("saving");
@@ -217,12 +209,11 @@ const Ledger = () => {
 
     for (const e of current) {
       const json = JSON.stringify(e);
-      const prev = syncedRef.current.get(e.id);
-      if (prev === json) continue;
+      if (synced.get(e.id) === json) continue;
       try {
-        if (prev === undefined) await api.addLedgerEntry(toDbEntry(e));
-        else await api.updateLedgerEntry(e.id, toDbEntry(e));
-        syncedRef.current.set(e.id, json);
+        // Upsert by id: also restores a row another till deleted, instead of failing forever
+        await api.addLedgerEntry(toDbEntry(e));
+        synced.set(e.id, json);
       } catch (err) {
         failed = true;
         console.error("[Ledger] Save failed:", err.message);
@@ -230,14 +221,16 @@ const Ledger = () => {
     }
 
     // Only rows that were saved before can be deleted, so a failed load never wipes the database
-    for (const id of [...syncedRef.current.keys()]) {
-      if (currentIds.has(id)) continue;
-      try {
-        await api.deleteLedgerEntry(id);
-        syncedRef.current.delete(id);
-      } catch (err) {
-        failed = true;
-        console.error("[Ledger] Delete failed:", err.message);
+    if (syncedRef.current === synced) {
+      for (const id of [...synced.keys()]) {
+        if (currentIds.has(id)) continue;
+        try {
+          await api.deleteLedgerEntry(id);
+          synced.delete(id);
+        } catch (err) {
+          failed = true;
+          console.error("[Ledger] Delete failed:", err.message);
+        }
       }
     }
 
@@ -279,8 +272,6 @@ const Ledger = () => {
   useEffect(() => {
     let cancelled = false;
     const loadLedger = async () => {
-      // Let pending saves finish before the sheet is replaced
-      await syncQueueRef.current;
       try {
         const data = await api.getLedger(dateFrom, dateTo);
         if (cancelled) return;
@@ -288,12 +279,14 @@ const Ledger = () => {
         const opening = data.find((r) => r.type === "opening" && r.date === dateFrom);
         const loaded = data.filter((r) => r.type !== "opening").map(fromDbEntry);
 
-        // Rows scanned while the sheet was loading stay on screen
+        // Keep on screen: rows of these dates scanned while loading, and any row not saved yet (any date)
         const loadedIds = new Set(loaded.map((e) => e.id));
-        const localOnly = entriesRef.current.filter(
-          (e) => !loadedIds.has(e.id) && e.date >= dateFrom && e.date <= dateTo
-        );
         const prevSynced = syncedRef.current;
+        const localOnly = entriesRef.current.filter(
+          (e) =>
+            !loadedIds.has(e.id) &&
+            ((e.date >= dateFrom && e.date <= dateTo) || prevSynced.get(e.id) !== JSON.stringify(e))
+        );
         syncedRef.current = new Map(loaded.map((e) => [e.id, JSON.stringify(e)]));
         localOnly.forEach((e) => {
           if (prevSynced.has(e.id)) syncedRef.current.set(e.id, prevSynced.get(e.id));
@@ -317,7 +310,8 @@ const Ledger = () => {
         if (!cancelled) setLoadError(err.message);
       }
     };
-    loadLedger();
+    // Loading takes its turn in the save queue, so a save never runs while the sheet is being replaced
+    syncQueueRef.current = syncQueueRef.current.then(loadLedger, loadLedger);
     return () => {
       cancelled = true;
     };
@@ -362,6 +356,29 @@ const Ledger = () => {
     return null;
   };
 
+  // ── Create a new invoice header row and make it the current invoice ───────
+  const createInvoice = () => {
+    const invNumber = `INV-${todayISO().replace(/-/g, "")}-${String(invoiceCounter).padStart(3, "0")}`;
+    const invId = uid();
+    const invoiceEntry = {
+      id: invId,
+      type: "invoice",
+      date: todayISO(),
+      description: `Sales-${invNumber}-Ptc.;TPcs:0`,
+      qty: "",
+      rate: "",
+      dis: "",
+      deal: "",
+      lp: "",
+      debit: 0,
+      credit: null,
+    };
+    setEntries((prev) => [...prev, invoiceEntry]);
+    setCurrentInvoiceId(invId);
+    setInvoiceCounter((c) => c + 1);
+    return invId;
+  };
+
   // ── Handle IMEI / barcode scan ────────────────────────────────────────────
   const handleScan = async (e) => {
     if (e.key !== "Enter") return;
@@ -380,6 +397,10 @@ const Ledger = () => {
     let localQtyTracker = {};
     let localImeiTracker = new Set();
 
+    // One invoice for the whole scan / paste. currentInvoiceId state does not change inside
+    // this loop, so the id is kept here; it is created on the first item found.
+    let invId = currentInvoiceId;
+
     for (const query of queries) {
       const result = await lookupProduct(query);
 
@@ -388,15 +409,35 @@ const Ledger = () => {
         continue;
       }
 
-      const { product, imei, matchType } = result;
+      const { product, matchType } = result;
+      let { imei } = result;
+
+      // Barcode scan of a phone model: take the next in-stock unit, so every phone on the bill has its IMEI
+      // (otherwise a line could say qty 2 while only one IMEI leaves stock)
+      if (!imei && product.imeis && product.imeis.length > 0) {
+        const usedInInvoice = new Set(
+          entries
+            .filter((e) => invId && e.parentInvoiceId === invId)
+            .flatMap((e) => itemImeis(e))
+        );
+        imei = product.imeis.find((u) => {
+          const key = u.imei || u.imei1;
+          return u.status === "in_stock" && !usedInInvoice.has(key) && !localImeiTracker.has(key);
+        });
+        if (!imei) {
+          setScanStatus({ type: "error", message: `No more in-stock units of ${product.name} to add.` });
+          continue;
+        }
+      }
 
       // Ensure this exact IMEI hasn't already been added to the active invoice
       if (imei) {
-        const actualImei = imei.imei1 || imei.imei;
+        // Same key the row stores below, so a re-scan of this unit is always caught
+        const actualImei = imei.imei || imei.imei1;
         
         // Has it been added in a previous scan to this active invoice?
         const alreadyInEntries = entries.find(
-          (e) => e.parentInvoiceId === currentInvoiceId && (e.imei === actualImei || (e.imeisArray && e.imeisArray.includes(actualImei)))
+          (e) => invId && e.parentInvoiceId === invId && (e.imei === actualImei || (e.imeisArray && e.imeisArray.includes(actualImei)))
         );
         
         // Or has it been added in the CURRENT bulk scan loop?
@@ -411,7 +452,7 @@ const Ledger = () => {
       // Enforce stock limits for bulk (non-IMEI) items
       if (!imei) {
         // Calculate how many are currently in the active invoice
-        const existingEntry = entries.find((e) => e.parentInvoiceId === currentInvoiceId && e.productId === product.id && !e.imei);
+        const existingEntry = entries.find((e) => invId && e.parentInvoiceId === invId && e.productId === product.id && !e.imei);
         const currentQty = existingEntry ? Number(existingEntry.qty || 0) : 0;
         // Calculate how many have been added in THIS specific scan loop
         const alreadyAddedInLoop = localQtyTracker ? (localQtyTracker[product.id] || 0) : 0;
@@ -425,33 +466,14 @@ const Ledger = () => {
         localQtyTracker[product.id] = alreadyAddedInLoop + 1;
       }
 
-      // Ensure we have an active invoice
-      let invId = currentInvoiceId;
-      if (!invId) {
-        const invNumber = `INV-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(invoiceCounter).padStart(3, "0")}`;
-        invId = uid();
-        const invoiceEntry = {
-          id: invId,
-          type: "invoice",
-          date: todayISO(),
-          description: `Sales-${invNumber}-Ptc.;TPcs:0`,
-          qty: "",
-          rate: "",
-          dis: "",
-          deal: "",
-          lp: "",
-          debit: 0,
-          credit: null,
-        };
-        setEntries((prev) => [...prev, invoiceEntry]);
-        setCurrentInvoiceId(invId);
-        setInvoiceCounter((c) => c + 1);
-      }
+      // Ensure we have an active invoice (created once, reused for the rest of the loop)
+      if (!invId) invId = createInvoice();
+      const itemInvId = invId;
 
       // Add or update item in local state
       setEntries((prev) => {
         const existingIdx = prev.findIndex(
-          (e) => e.parentInvoiceId === invId && e.productId === product.id
+          (e) => e.parentInvoiceId === itemInvId && e.productId === product.id
         );
 
         let updated;
@@ -499,14 +521,14 @@ const Ledger = () => {
             lp: "",
             debit: null,
             credit: null,
-            parentInvoiceId: invId,
+            parentInvoiceId: itemInvId,
             imei: imei?.imei || imei?.imei1 || null,
             imeisArray: imei ? [imei.imei || imei.imei1] : [],
             productId: product.id,
           };
           updated = [...prev, itemEntry];
         }
-        return updateInvoiceTotals(updated, invId);
+        return updateInvoiceTotals(updated, itemInvId);
       });
 
       // Saved to Supabase by the ledger sync (see "Persistence" above)
@@ -542,11 +564,19 @@ const Ledger = () => {
     });
   };
 
+  // ── Rows of a checked-out invoice (invoice has a saleId) are locked ───────
+  const isLockedEntry = (allEntries, entry) => {
+    const invId = entry.type === "invoice" ? entry.id : entry.parentInvoiceId;
+    return !!invId && allEntries.some((e) => e.id === invId && e.saleId);
+  };
+
   // ── Delete an entry ───────────────────────────────────────────────────────
   const handleDelete = (id) => {
     setEntries((prev) => {
       const entry = prev.find((e) => e.id === id);
       if (!entry) return prev;
+      // Checked-out invoices must keep matching their saved sale
+      if (isLockedEntry(prev, entry)) return prev;
 
       // If deleting an invoice, remove all its children too
       if (entry.type === "invoice") {
@@ -565,25 +595,21 @@ const Ledger = () => {
 
   // ── New invoice (finalize current, start fresh) ───────────────────────────
   const handleNewInvoice = () => {
-    const invNumber = `INV-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(invoiceCounter).padStart(3, "0")}`;
-    const invId = uid();
-    const invoiceEntry = {
-      id: invId,
-      type: "invoice",
-      date: todayISO(),
-      description: `Sales-${invNumber}-Ptc.;TPcs:0`,
-      qty: "",
-      rate: "",
-      dis: "",
-      deal: "",
-      lp: "",
-      debit: 0,
-      credit: null,
-    };
-    setEntries((prev) => [...prev, invoiceEntry]);
-    setCurrentInvoiceId(invId);
-    setInvoiceCounter((c) => c + 1);
-    
+    const current = currentInvoiceId && entries.find((e) => e.id === currentInvoiceId);
+    const hasItems = !!current && entries.some((e) => e.type === "item" && e.parentInvoiceId === current.id);
+
+    // Current invoice is still empty: keep using it instead of adding another empty one
+    if (current && !hasItems && !current.saleId) {
+      setScanInput("");
+      scanRef.current?.focus();
+      return;
+    }
+    if (current && hasItems && !current.saleId &&
+      !window.confirm("This invoice has items that were not checked out. Start a new invoice anyway?")) {
+      return;
+    }
+
+    createInvoice();
     setScanInput("");
     scanRef.current?.focus();
   };
@@ -605,15 +631,26 @@ const Ledger = () => {
     setShowCheckoutModal(true);
   };
 
+  // Paid / due for the checkout. Pending Bill: only what is paid now (default 0).
+  // Cash / Card: the full total unless a different amount is typed.
+  const checkoutAmounts = (total) => {
+    const typed = Math.max(0, Number(paidAmountInput) || 0);
+    const paid = paymentMethod === "Pending Bill" ? typed : paidAmountInput !== "" ? typed : total;
+    return { paid, due: Math.max(0, total - paid) };
+  };
+
   const finalizeCheckout = async () => {
+    // Ignore a second click while the first sale is still saving
+    if (isSubmitting) return;
+
     const invoiceHeader = entries.find(e => e.id === currentInvoiceId);
     const invoiceItems = entries.filter(e => e.type === "item" && e.parentInvoiceId === currentInvoiceId);
-    
+
     if (!invoiceHeader || invoiceItems.length === 0) return;
 
     let customerObj = null;
     if (selectedCustomer) {
-      customerObj = customers.find(c => c.id === selectedCustomer);
+      customerObj = allCustomers.find(c => c.id === selectedCustomer);
     }
 
     // Map ledger items to standard cart items format for backend
@@ -636,8 +673,13 @@ const Ledger = () => {
     });
 
     const currentSaleTotal = cartItems.reduce((sum, i) => sum + i.subtotal, 0);
-    const effectivePaid = Number(paidAmountInput) || 0;
-    const dueAmount = Math.max(0, currentSaleTotal - effectivePaid);
+    const { paid: effectivePaid, due: dueAmount } = checkoutAmounts(currentSaleTotal);
+
+    // Money still due goes on a customer's Udhaar, so a walk-in cannot leave a balance
+    if (dueAmount > 0 && !selectedCustomer) {
+      alert(`Rs ${fmt(dueAmount)} is still due. Please select a customer to record it as Udhaar.`);
+      return;
+    }
 
     const saleData = {
       items: cartItems,
@@ -646,11 +688,11 @@ const Ledger = () => {
       taxPercent: 0,
       taxAmount: 0,
       grandTotal: currentSaleTotal,
-      paidAmount: paymentMethod === "Pending Bill" ? 0 : currentSaleTotal,
-      dueAmount: paymentMethod === "Pending Bill" ? currentSaleTotal : 0,
+      paidAmount: effectivePaid,
+      dueAmount,
       netProfit: 0,
       paymentMethod: paymentMethod === "Pending Bill" ? "Credit (Udhaar)" : paymentMethod,
-      paymentStatus: paymentMethod === "Pending Bill" ? "pending" : "paid",
+      paymentStatus: dueAmount === 0 ? "paid" : effectivePaid > 0 ? "partial" : "unpaid",
       cashierName: selectedSeller || "Admin",
       customer: selectedCustomer || null,
       customerName: customerObj ? customerObj.name : "Walk-in Customer",
@@ -661,7 +703,13 @@ const Ledger = () => {
     };
 
     // This records the sale (reducing stock in backend) and updates local states
-    const recorded = await recordSale(saleData);
+    setIsSubmitting(true);
+    let recorded;
+    try {
+      recorded = await recordSale(saleData);
+    } finally {
+      setIsSubmitting(false);
+    }
     // Not saved: keep the invoice open so it can be checked out again
     if (!recorded) return;
 
@@ -670,12 +718,30 @@ const Ledger = () => {
 
     setCompletedSaleInvoice(recorded);
     setShowCheckoutModal(false);
-    
-    // Clear out current invoice so Ledger can start fresh
-    handleNewInvoice();
+
+    // Reset the checkout form for the next bill
+    setPaymentMethod("Cash");
+    setSelectedCustomer("");
+    setPaidAmountInput("");
+    setDueDate("");
+    setCustomerSearch("");
+
+    // No current invoice now; the next scan starts a new one (no empty invoice left behind)
+    setCurrentInvoiceId(null);
+    setScanInput("");
   };
 
-  const generateTextReceipt = (inv, previousBalance, includeWhatsAppFormatting = false) => {
+  // Customer's Udhaar for the receipt. Customers are refreshed from the server before recordSale
+  // returns, so totalPending already includes this sale; previous = total minus what this sale added.
+  const receiptUdhaar = (inv) => {
+    const cust = inv?.customerId ? allCustomers.find((c) => c.id === inv.customerId) : null;
+    if (!cust) return { previous: 0, total: 0 };
+    const total = Math.max(0, Number(cust.totalPending || 0));
+    const added = Number(inv.dueAmount || 0) - Math.max(0, Number(inv.paidAmount || 0) - Number(inv.grandTotal || 0));
+    return { previous: Math.max(0, total - added), total };
+  };
+
+  const generateTextReceipt = (inv, previousBalance, includeWhatsAppFormatting = false, totalUdhaar = 0) => {
     const bold = includeWhatsAppFormatting ? "*" : "";
     let text = `${includeWhatsAppFormatting ? '🧾 ' : ''}${bold}${shopSettings.shopName || "MOBILE SHOP"}${bold}\n`;
     text += `==============================\n`;
@@ -709,6 +775,9 @@ const Ledger = () => {
     if ((inv.dueAmount || 0) > 0) {
       text += `⚠️ ${bold}DUE / UDHAAR: Rs ${inv.dueAmount.toLocaleString()}${bold}\n`;
     }
+    if (totalUdhaar > 0) {
+      text += `${bold}Total Udhaar: Rs ${totalUdhaar.toLocaleString()}${bold}\n`;
+    }
     text += `==============================\n`;
     text += `Thank you for your business!\n`;
     return text;
@@ -717,8 +786,8 @@ const Ledger = () => {
   const handleWhatsAppShareModal = async () => {
     if (!completedSaleInvoice) return;
     const receiptElement = document.getElementById("invoice-print-area");
-    const prevBal = selectedCustomer && Number(selectedCustomer.totalPending || 0) > 0 ? Number(selectedCustomer.totalPending || 0) : 0;
-    const waText = generateTextReceipt(completedSaleInvoice, prevBal, true);
+    const udhaar = receiptUdhaar(completedSaleInvoice);
+    const waText = generateTextReceipt(completedSaleInvoice, udhaar.previous, true, udhaar.total);
     const formattedPhone = formatWAPhone(completedSaleInvoice.customerPhone);
     const waUrl = formattedPhone
       ? `https://wa.me/${formattedPhone}?text=${encodeURIComponent(waText)}`
@@ -835,6 +904,7 @@ const Ledger = () => {
   const handleRateChange = (targetRow, newRateStr) => {
     const newRate = Math.max(0, Number(newRateStr) || 0);
     setEntries((prev) => {
+      if (isLockedEntry(prev, targetRow)) return prev;
       const updated = prev.map((e) => {
         if (targetRow.groupIds ? targetRow.groupIds.includes(e.id) : e.id === targetRow.id) {
           return { ...e, rate: newRate };
@@ -847,8 +917,11 @@ const Ledger = () => {
 
   // ── Qty Change Handler for Ledger Rows ──
   const handleQtyChange = (targetRow, newQtyStr) => {
+    // Phone rows count their IMEIs: scan or delete units instead of typing a quantity
+    if (itemImeis(targetRow).length > 0) return;
     const newQty = Math.max(1, Number(newQtyStr) || 1);
     setEntries((prev) => {
+      if (isLockedEntry(prev, targetRow)) return prev;
       const updated = prev.map((e) => {
         if (targetRow.groupIds ? targetRow.groupIds.includes(e.id) : e.id === targetRow.id) {
           return { ...e, qty: newQty };
@@ -865,19 +938,7 @@ const Ledger = () => {
 
     if (manualForm.type === "item") {
       // Create invoice header if needed
-      let invId = currentInvoiceId;
-      if (!invId) {
-        const invNumber = `INV-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(invoiceCounter).padStart(3, "0")}`;
-        invId = uid();
-        const invoiceEntry = {
-          id: invId, type: "invoice", date: todayISO(),
-          description: `Sales-${invNumber}-Ptc.;TPcs:0`,
-          qty: "", rate: "", dis: "", deal: "", lp: "", debit: 0, credit: null,
-        };
-        setEntries((prev) => [...prev, invoiceEntry]);
-        setCurrentInvoiceId(invId);
-        setInvoiceCounter((c) => c + 1);
-      }
+      const invId = currentInvoiceId || createInvoice();
 
       const itemEntry = {
         id: uid(), type: "item", date: manualForm.date,
@@ -939,6 +1000,18 @@ const Ledger = () => {
   const totalDebit = rows.reduce((s, r) => s + Number(r.debit || 0), 0);
   const totalCredit = rows.reduce((s, r) => s + Number(r.credit || 0), 0);
   const finalBalance = rows.length > 0 ? rows[rows.length - 1].runningBalance : openingBalance;
+
+  // Invoices that were checked out (linked to a saved sale) can no longer be edited or deleted
+  const lockedInvoiceIds = new Set(entries.filter((e) => e.type === "invoice" && e.saleId).map((e) => e.id));
+
+  // Live paid / due preview for the checkout modal
+  const checkoutTotal = entries
+    .filter((e) => e.type === "item" && e.parentInvoiceId === currentInvoiceId)
+    .reduce((s, e) => s + Number(e.qty || 1) * Number(e.rate || 0), 0);
+  const checkoutDue = checkoutAmounts(checkoutTotal).due;
+  const needsCustomer = checkoutDue > 0 && !selectedCustomer;
+
+  const completedUdhaar = receiptUdhaar(completedSaleInvoice);
 
   // ── Print ─────────────────────────────────────────────────────────────────
   const handlePrint = () => window.print();
@@ -1104,14 +1177,15 @@ const Ledger = () => {
                   if (row.type === "item" && row.parentInvoiceId && row.productId) {
                     const key = `${row.parentInvoiceId}_${row.productId}`;
                     if (!invoiceGroups[key]) {
-                      const newRow = { ...row, imeisArray: row.imei ? [row.imei] : [], groupIds: [row.id] };
+                      // All IMEIs of the row (imeisArray), not only the first one in row.imei
+                      const newRow = { ...row, imeisArray: [...itemImeis(row)], groupIds: [row.id] };
                       invoiceGroups[key] = newRow;
                       groupedRows.push(newRow);
                     } else {
                       const g = invoiceGroups[key];
                       g.qty = Number(g.qty) + Number(row.qty || 1);
                       g.computedAmount = (g.computedAmount || 0) + (row.computedAmount || 0);
-                      if (row.imei) g.imeisArray.push(row.imei);
+                      g.imeisArray.push(...itemImeis(row));
                       g.groupIds.push(row.id);
                     }
                   } else {
@@ -1122,7 +1196,8 @@ const Ledger = () => {
                 return groupedRows.map((row, idx) => {
                   const isInvoice = row.type === "invoice";
                   const isPayment = row.type === "payment";
-                  const isActive = row.id === currentInvoiceId || row.parentInvoiceId === currentInvoiceId;
+                  const isActive = !!currentInvoiceId && (row.id === currentInvoiceId || row.parentInvoiceId === currentInvoiceId);
+                  const locked = lockedInvoiceIds.has(isInvoice ? row.id : row.parentInvoiceId);
 
                   let displayDesc = row.description;
                   if (row.type === "item") {
@@ -1156,8 +1231,9 @@ const Ledger = () => {
                             min="1"
                             value={row.qty !== undefined && row.qty !== null ? row.qty : 1}
                             onChange={(e) => handleQtyChange(row, e.target.value)}
-                            className="w-12 bg-slate-100 font-bold text-center text-slate-900 border border-slate-300 rounded px-1 py-0.5 focus:bg-white focus:outline-none focus:border-indigo-500 transition-colors print:bg-transparent print:border-none print:w-auto"
-                            title="Edit Quantity"
+                            readOnly={locked}
+                            className={`w-12 font-bold text-center text-slate-900 rounded px-1 py-0.5 focus:outline-none transition-colors print:bg-transparent print:border-none print:w-auto ${locked ? "bg-transparent border border-transparent cursor-default" : "bg-slate-100 border border-slate-300 focus:bg-white focus:border-indigo-500"}`}
+                            title={locked ? "Checked out — cannot be edited" : "Edit Quantity"}
                           />
                         ) : !isInvoice && !isPayment ? (
                           row.qty || 1
@@ -1172,10 +1248,11 @@ const Ledger = () => {
                             min="0"
                             value={row.rate !== undefined && row.rate !== null ? row.rate : ""}
                             onChange={(e) => handleRateChange(row, e.target.value)}
-                            onFocus={(e) => e.target.select()}
-                            className="w-24 bg-amber-50 font-extrabold text-center text-slate-900 border-2 border-amber-400 rounded-lg px-1.5 py-1 focus:bg-yellow-200 focus:outline-none focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 transition-all shadow-sm print:bg-transparent print:border-none print:w-auto"
+                            onFocus={(e) => !locked && e.target.select()}
+                            readOnly={locked}
+                            className={`w-24 font-extrabold text-center text-slate-900 rounded-lg px-1.5 py-1 focus:outline-none transition-all print:bg-transparent print:border-none print:w-auto ${locked ? "bg-transparent border-2 border-transparent cursor-default" : "bg-amber-50 border-2 border-amber-400 focus:bg-yellow-200 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 shadow-sm"}`}
                             placeholder="Rate"
-                            title="Click to edit custom rate required"
+                            title={locked ? "Checked out — cannot be edited" : "Click to edit custom rate required"}
                           />
                         ) : (
                           ""
@@ -1197,10 +1274,12 @@ const Ledger = () => {
                         {fmt(row.runningBalance)}
                       </td>
                       <td className={`${cell} text-center print:hidden`}>
-                        <button onClick={() => row.groupIds.forEach(id => handleDelete(id))}
-                          className="text-rose-400 hover:text-rose-600 transition-colors p-0.5" title="Delete">
-                          <Trash2 size={10} />
-                        </button>
+                        {!locked && (
+                          <button onClick={() => row.groupIds.forEach(id => handleDelete(id))}
+                            className="text-rose-400 hover:text-rose-600 transition-colors p-0.5" title="Delete">
+                            <Trash2 size={10} />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
@@ -1244,7 +1323,13 @@ const Ledger = () => {
       {/* ━━ Summary Cards ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Opening Balance</p>
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Opening Balance</p>
+            <button onClick={() => { setObInput(String(openingBalance)); setEditingOB(true); }}
+              className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 bg-slate-800 hover:bg-slate-700 px-2 py-0.5 rounded transition-colors">
+              Edit
+            </button>
+          </div>
           <p className="text-lg font-extrabold text-slate-300">Rs {fmt(openingBalance, 2)}</p>
         </div>
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
@@ -1441,7 +1526,7 @@ const Ledger = () => {
               <div>
                 <div className="flex justify-between items-center mb-2">
                   <label className="text-sm font-bold text-slate-700 block">
-                    Select Customer {paymentMethod === "Pending Bill" && <span className="text-rose-500">*</span>}
+                    Select Customer {(paymentMethod === "Pending Bill" || checkoutDue > 0) && <span className="text-rose-500">*</span>}
                   </label>
                   <button 
                     onClick={() => setShowQuickAddCustomer(!showQuickAddCustomer)}
@@ -1483,7 +1568,7 @@ const Ledger = () => {
                       <span>
                         {selectedCustomer 
                           ? (() => {
-                              const c = customers.find(c => c.id === selectedCustomer);
+                              const c = allCustomers.find(c => c.id === selectedCustomer);
                               return c ? `${c.name} (${c.phone || 'No Phone'})` : "Unknown";
                             })()
                           : "-- Walk-in Customer --"
@@ -1511,7 +1596,7 @@ const Ledger = () => {
                           >
                             -- Walk-in Customer --
                           </div>
-                          {customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || (c.phone && c.phone.includes(customerSearch))).map(c => (
+                          {allCustomers.filter(c => (c.name || "").toLowerCase().includes(customerSearch.toLowerCase()) || (c.phone && c.phone.includes(customerSearch))).map(c => (
                             <div 
                               key={c.id} 
                               onClick={() => { setSelectedCustomer(c.id); setShowCustomerDropdown(false); }}
@@ -1526,25 +1611,31 @@ const Ledger = () => {
                     )}
                   </div>
                 )}
-                {paymentMethod === "Pending Bill" && !selectedCustomer && (
+                {needsCustomer && (
                   <p className="text-rose-500 text-xs font-semibold mt-2 px-1 flex items-center gap-1">
                     <AlertCircle size={12}/> A registered customer is required for Udhaar.
                   </p>
                 )}
               </div>
 
-              {paymentMethod !== "Pending Bill" && (
-                <div>
-                  <label className="text-sm font-bold text-slate-700 mb-2 block">Amount Received (Cash/Card)</label>
-                  <input
-                    type="number"
-                    value={paidAmountInput}
-                    onChange={(e) => setPaidAmountInput(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-300 rounded-2xl p-3.5 text-slate-900 font-bold text-lg focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
-                    placeholder="Enter amount..."
-                  />
+              {/* Paid now — Cash/Card default to the full total, Pending Bill to 0 */}
+              <div>
+                <label className="text-sm font-bold text-slate-700 mb-2 block">
+                  {paymentMethod === "Pending Bill" ? "Amount Paid Now (Optional)" : "Amount Received (Cash/Card)"}
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={paidAmountInput}
+                  onChange={(e) => setPaidAmountInput(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-2xl p-3.5 text-slate-900 font-bold text-lg focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
+                  placeholder={paymentMethod === "Pending Bill" ? "0" : `Full amount: Rs ${fmt(checkoutTotal)}`}
+                />
+                <div className="flex justify-between text-xs font-semibold mt-2 px-1">
+                  <span className="text-slate-500">Bill Total: Rs {fmt(checkoutTotal)}</span>
+                  {checkoutDue > 0 && <span className="text-rose-500">Udhaar: Rs {fmt(checkoutDue)}</span>}
                 </div>
-              )}
+              </div>
 
               {paymentMethod === "Pending Bill" && (
                 <div>
@@ -1562,11 +1653,11 @@ const Ledger = () => {
             <div className="p-6 bg-slate-50 border-t border-slate-100 flex gap-4">
               <button
                 onClick={finalizeCheckout}
-                disabled={paymentMethod === "Pending Bill" && !selectedCustomer}
+                disabled={isSubmitting || needsCustomer}
                 className="flex-1 py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-2xl flex items-center justify-center gap-2 shadow-xl shadow-emerald-600/30 transition-all disabled:opacity-50 disabled:shadow-none"
               >
                 <CheckCircle2 size={20} />
-                CONFIRM & GENERATE INVOICE
+                {isSubmitting ? "Saving…" : "CONFIRM & GENERATE INVOICE"}
               </button>
             </div>
           </div>
@@ -1654,9 +1745,14 @@ const Ledger = () => {
                   </div>
                 )}
                 
-                {selectedCustomer && Number(selectedCustomer.totalPending || 0) > 0 && (
+                {(completedUdhaar.previous > 0 || completedUdhaar.total > 0) && (
                   <div className="mt-2 pt-2 border-t border-dashed border-black text-rose-600">
-                     <div className="flex justify-between text-sm font-bold"><span>Total Udhaar</span><span>Rs. {Number(selectedCustomer.totalPending || 0).toLocaleString()}</span></div>
+                    {completedUdhaar.previous > 0 && (
+                      <div className="flex justify-between text-sm"><span>Previous Udhaar</span><span>Rs. {completedUdhaar.previous.toLocaleString()}</span></div>
+                    )}
+                    {completedUdhaar.total > 0 && (
+                      <div className="flex justify-between text-sm font-bold"><span>Total Udhaar</span><span>Rs. {completedUdhaar.total.toLocaleString()}</span></div>
+                    )}
                   </div>
                 )}
               </div>

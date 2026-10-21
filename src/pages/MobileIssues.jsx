@@ -1,9 +1,9 @@
 import React, { useState } from "react";
 import { useApp } from "../context/AppContext";
-import { Wrench, Plus, X, Search, FileText, CheckCircle2, Clock, AlertTriangle, Info } from "lucide-react";
+import { Wrench, Plus, X, Search, FileText, CheckCircle2, Clock, AlertTriangle, Info, Trash2 } from "lucide-react";
 
 const MobileIssues = () => {
-  const { issues, addIssue, updateIssueStatus } = useApp();
+  const { issues, addIssue, updateIssueStatus, deleteIssue } = useApp();
   const [searchTerm, setSearchTerm] = useState("");
   const [showAddModal, setShowAddModal] = useState(false);
 
@@ -46,6 +46,12 @@ const MobileIssues = () => {
 
   const handleStatusChange = (id, newStatus) => {
     updateIssueStatus(id, newStatus);
+  };
+
+  // deleteIssue alerts the user itself if the database refuses
+  const handleDelete = (issue) => {
+    if (!window.confirm(`Delete repair ticket ${issue.ticketNumber || ""} for ${issue.customerName || "customer"}?`)) return;
+    deleteIssue(issue.id);
   };
 
   const filteredIssues = issues.filter(issue => {
@@ -113,12 +119,13 @@ const MobileIssues = () => {
                 <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800">Issue Description</th>
                 <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800">Date Registered</th>
                 <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800">Status</th>
+                <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
               {filteredIssues.length === 0 ? (
                 <tr>
-                  <td colSpan="6" className="px-4 py-12 text-center text-slate-500 text-sm">
+                  <td colSpan="7" className="px-4 py-12 text-center text-slate-500 text-sm">
                     <div className="flex flex-col items-center gap-2">
                       <FileText size={32} className="opacity-30" />
                       <p>No mobile issues found.</p>
@@ -160,6 +167,15 @@ const MobileIssues = () => {
                         <option value="Delivered">Delivered</option>
                         <option value="Rejected">Rejected</option>
                       </select>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        onClick={() => handleDelete(issue)}
+                        className="p-2 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors"
+                        title="Delete Ticket"
+                      >
+                        <Trash2 size={16} />
+                      </button>
                     </td>
                   </tr>
                 ))

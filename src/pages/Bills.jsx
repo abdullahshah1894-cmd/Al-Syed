@@ -1,13 +1,25 @@
 import React, { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useApp } from "../context/AppContext";
 import { Receipt, Search, Printer, Eye, Calendar, User, X, Smartphone, CheckCircle2 } from "lucide-react";
 import html2canvas from "html2canvas";
 import { formatWAPhone } from "./POS";
 import { printElement } from "../services/printReceipt";
+import { itemImeis } from "../utils/sales";
+
+const billSeller = (bill) => bill.sellerName || bill.cashierName || "Store";
 
 const Bills = () => {
   const { sales, shopSettings } = useApp();
-  const [searchTerm, setSearchTerm] = useState("");
+  const [searchParams] = useSearchParams();
+  // Search box starts from /bills?search=..., and follows the URL when it changes
+  const urlSearch = searchParams.get("search") || "";
+  const [searchTerm, setSearchTerm] = useState(urlSearch);
+  const [prevUrlSearch, setPrevUrlSearch] = useState(urlSearch);
+  if (urlSearch !== prevUrlSearch) {
+    setPrevUrlSearch(urlSearch);
+    setSearchTerm(urlSearch);
+  }
   const [selectedBillModal, setSelectedBillModal] = useState(null);
   const [isCapturingImage, setIsCapturingImage] = useState(false);
 
@@ -30,7 +42,7 @@ const Bills = () => {
     text += `*Date:* ${new Date(bill.createdAt || Date.now()).toLocaleDateString()}\n`;
     text += `*Customer:* ${bill.customerName || "Walk-in Customer"}\n`;
     if (bill.customerPhone) text += `*Phone:* ${bill.customerPhone}\n`;
-    text += `*Seller:* ${bill.cashierName || "Store"}\n`;
+    text += `*Seller:* ${billSeller(bill)}\n`;
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
     if (bill.items && bill.items.length > 0) {
       text += `*ITEMS:*\n`;
@@ -38,10 +50,14 @@ const Bills = () => {
         const qty = item.quantity || item.qty || 1;
         const price = item.unitSalePrice || item.price || 0;
         const sub = item.subtotal || qty * price;
-        text += `${index + 1}. *${item.productName || item.name}* (x${qty}) - ${currency} ${sub.toLocaleString()}\n`;
-        if (item.imei) text += `   IMEI: ${item.imei}\n`;
+        text += `${index + 1}. *${item.productName || item.name}* (x${qty}) - ${currency} ${Number(sub).toLocaleString()}\n`;
+        const imeis = itemImeis(item);
+        if (imeis.length > 0) text += `   IMEI: ${imeis.join(", ")}\n`;
       });
       text += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    }
+    if (Number(bill.taxAmount || 0) > 0) {
+      text += `*Tax${bill.taxPercent ? ` (${bill.taxPercent}%)` : ""}:* ${currency} ${Number(bill.taxAmount).toLocaleString()}\n`;
     }
     text += `*Total:* ${currency} ${Number(bill.grandTotal || 0).toLocaleString()}\n`;
     text += `*Paid:* ${currency} ${Number(bill.paidAmount || 0).toLocaleString()}\n`;
@@ -206,11 +222,11 @@ const Bills = () => {
 
                   <td className="p-3.5">
                     <div className="text-slate-200">
-                      {sale.items.map((i) => i.productName).join(", ")}
+                      {(sale.items || []).map((i) => i.productName).join(", ")}
                     </div>
-                    {sale.items.some((i) => i.imei) && (
+                    {(sale.items || []).some((i) => itemImeis(i).length > 0) && (
                       <div className="font-mono text-[10px] text-cyan-400 mt-0.5">
-                        IMEI: {sale.items.filter((i) => i.imei).map((i) => i.imei).join(", ")}
+                        IMEI: {(sale.items || []).flatMap(itemImeis).join(", ")}
                       </div>
                     )}
                   </td>
@@ -222,13 +238,13 @@ const Bills = () => {
                   </td>
 
                   <td className="p-3.5 font-extrabold text-slate-100">
-                    {shopSettings.currencySymbol} {sale.grandTotal.toLocaleString()}
+                    {shopSettings.currencySymbol} {Number(sale.grandTotal || 0).toLocaleString()}
                   </td>
 
                   <td className="p-3.5">
-                    <div className="text-emerald-400 font-bold">Paid: {shopSettings.currencySymbol} {sale.paidAmount.toLocaleString()}</div>
+                    <div className="text-emerald-400 font-bold">Paid: {shopSettings.currencySymbol} {Number(sale.paidAmount || 0).toLocaleString()}</div>
                     {sale.dueAmount > 0 && (
-                      <div className="text-rose-400 font-bold text-[11px]">Due: {shopSettings.currencySymbol} {sale.dueAmount.toLocaleString()}</div>
+                      <div className="text-rose-400 font-bold text-[11px]">Due: {shopSettings.currencySymbol} {Number(sale.dueAmount).toLocaleString()}</div>
                     )}
                   </td>
 
@@ -298,15 +314,18 @@ const Bills = () => {
                 <span className="text-slate-500">Payment:</span>
                 <span className="font-bold text-slate-800">{selectedBillModal.paymentMethod}</span>
               </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Seller:</span>
+                <span className="text-slate-900">{billSeller(selectedBillModal)}</span>
+              </div>
             </div>
 
             {/* Items Table */}
             {selectedBillModal.items && selectedBillModal.items.length > 0 && (
               <div className="border-b border-dashed border-slate-300 pb-2">
-                <div className="grid grid-cols-12 font-bold text-[10px] text-slate-500 uppercase border-b border-slate-200 pb-1 mb-1">
-                  <span className="col-span-6">Item</span>
-                  <span className="col-span-2 text-center">Qty</span>
-                  <span className="col-span-4 text-right">Subtotal</span>
+                <div className="flex justify-between font-bold text-[10px] text-slate-500 uppercase border-b border-slate-200 pb-1 mb-1">
+                  <span>Item / Qty</span>
+                  <span className="text-right">Subtotal</span>
                 </div>
                 <div className="space-y-1.5">
                   {selectedBillModal.items.map((item, index) => (
@@ -314,9 +333,9 @@ const Bills = () => {
                       <div className="flex justify-between font-bold text-slate-900">
                         <span>{item.productName || item.name}</span>
                       </div>
-                      {item.imei && (
+                      {itemImeis(item).length > 0 && (
                         <div className="text-[9.5px] text-slate-600 bg-slate-50 p-1 rounded font-mono border border-slate-100 my-0.5">
-                          IMEI: {item.imei}
+                          IMEI: {itemImeis(item).join(", ")}
                         </div>
                       )}
                       <div className="flex justify-between text-slate-600 text-[10.5px]">
@@ -330,20 +349,64 @@ const Bills = () => {
             )}
 
             {/* Financial Summary */}
-            <div className="space-y-1 text-[11px] pt-1">
-              <div className="flex justify-between text-slate-950 font-black text-sm pt-1 border-t border-slate-900">
-                <span>{selectedBillModal.paymentMethod === "Udhaar Settlement" ? "AMOUNT RECEIVED:" : "GRAND TOTAL:"}</span>
-                <span>Rs {(selectedBillModal.paymentMethod === "Udhaar Settlement" ? selectedBillModal.paidAmount : selectedBillModal.grandTotal || 0).toLocaleString()}</span>
+            {selectedBillModal.paymentMethod === "Udhaar Settlement" ? (
+              <div className="space-y-1 text-[11px] pt-1">
+                <div className="flex justify-between text-slate-950 font-black text-sm pt-1 border-t border-slate-900">
+                  <span>AMOUNT RECEIVED:</span>
+                  <span>Rs {Number(selectedBillModal.paidAmount || 0).toLocaleString()}</span>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-1 text-[11px] pt-1">
+                <div className="flex justify-between text-slate-600">
+                  <span>Subtotal:</span>
+                  <span>
+                    Rs {Number(
+                      selectedBillModal.subtotalAmount ||
+                        (selectedBillModal.items || []).reduce(
+                          (sum, i) => sum + Number(i.subtotal || (i.quantity || i.qty || 1) * (i.unitSalePrice || i.price || 0)),
+                          0
+                        )
+                    ).toLocaleString()}
+                  </span>
+                </div>
+                {Number(selectedBillModal.taxAmount || 0) > 0 && (
+                  <div className="flex justify-between text-slate-600">
+                    <span>Tax{selectedBillModal.taxPercent ? ` (${selectedBillModal.taxPercent}%)` : ""}:</span>
+                    <span>+ Rs {Number(selectedBillModal.taxAmount).toLocaleString()}</span>
+                  </div>
+                )}
+                {Number(selectedBillModal.discountAmount || 0) > 0 && (
+                  <div className="flex justify-between text-slate-600">
+                    <span>Discount:</span>
+                    <span>- Rs {Number(selectedBillModal.discountAmount).toLocaleString()}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-slate-950 font-black text-sm pt-1 border-t border-slate-900">
+                  <span>GRAND TOTAL:</span>
+                  <span>Rs {Number(selectedBillModal.grandTotal || 0).toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-slate-800">
+                  <span>Paid:</span>
+                  <span className="font-bold">Rs {Number(selectedBillModal.paidAmount || 0).toLocaleString()}</span>
+                </div>
+                {Number(selectedBillModal.dueAmount || 0) > 0 && (
+                  <div className="flex justify-between text-slate-950 font-bold">
+                    <span>BALANCE DUE:</span>
+                    <span>Rs {Number(selectedBillModal.dueAmount).toLocaleString()}</span>
+                  </div>
+                )}
+                {selectedBillModal.dueDate && (
+                  <div className="flex justify-between text-slate-600">
+                    <span>Due Date:</span>
+                    <span>{new Date(selectedBillModal.dueDate).toLocaleDateString()}</span>
+                  </div>
+                )}
+              </div>
+            )}
 
-            {/* Barcode SVG Graphic */}
+            {/* Footer */}
             <div className="text-center pt-2 border-t border-dashed border-slate-300 space-y-1.5">
-              <div className="flex justify-center items-center gap-0.5 opacity-80 py-1">
-                {[...Array(28)].map((_, i) => (
-                  <div key={i} className={`bg-slate-950 h-6 ${i % 3 === 0 ? 'w-1' : 'w-0.5'}`} />
-                ))}
-              </div>
               <p className="text-[9px] text-slate-400 font-mono tracking-widest uppercase">
                 *{selectedBillModal.billNumber || "INV-001"}*
               </p>
