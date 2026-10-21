@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useApp } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
+import { itemImeis } from "../utils/sales";
 import {
   Search,
   ShieldCheck,
@@ -35,14 +36,14 @@ const validateLuhnIMEI = (imeiStr) => {
 };
 
 const ImeiChecker = () => {
-  const { products, sales, warranties, shopSettings } = useApp();
+  const { products, allSales, warranties, shopSettings } = useApp();
   const { isAdmin } = useAuth();
   const [searchParams] = useSearchParams();
   const [imeiInput, setImeiInput] = useState(searchParams.get("imei") || "");
   const [searchResult, setSearchResult] = useState(null);
   const [hasSearched, setHasSearched] = useState(false);
 
-  const performLookup = (targetImei) => {
+  const performLookup = useCallback((targetImei) => {
     if (!targetImei.trim()) return;
     setHasSearched(true);
 
@@ -65,16 +66,28 @@ const ImeiChecker = () => {
       }
     }
 
-    // Search through sales to find bill details if sold
+    // Every IMEI of the matched unit (a dual-SIM phone may be billed / warrantied under either one)
+    const keys = matchedImeiObj
+      ? [matchedImeiObj.imei, matchedImeiObj.imei1, matchedImeiObj.imei2].filter(Boolean)
+      : [targetImei.trim()];
+
+    // Search all sales (not only the selected seller's) to find bill details if sold:
+    // the unit's own sale link first, then any bill item carrying one of its IMEIs
     let matchedSale = null;
-    if (matchedImeiObj) {
-      matchedSale = sales.find((s) =>
-        s.items && s.items.some((item) => item.imei === targetImei.trim() || item.imei1 === targetImei.trim() || item.imei2 === targetImei.trim())
-      );
+    if (matchedImeiObj?.soldInSale) {
+      matchedSale = (allSales || []).find((s) => s.id === matchedImeiObj.soldInSale) || null;
+    }
+    if (!matchedSale) {
+      matchedSale =
+        (allSales || []).find((s) =>
+          (s.items || []).some((item) =>
+            [...itemImeis(item), item.imei1, item.imei2].some((k) => k && keys.includes(k))
+          )
+        ) || null;
     }
 
     // Search warranty records
-    const matchedWarranty = warranties.find((w) => w.imei === targetImei.trim());
+    const matchedWarranty = (warranties || []).find((w) => keys.includes(w.imei)) || null;
 
     setSearchResult({
       imei: targetImei.trim(),
@@ -84,15 +97,64 @@ const ImeiChecker = () => {
       matchedSale,
       matchedWarranty,
     });
-  };
+  }, [products, allSales, warranties]);
 
+  // Rerun the ?imei= lookup once products / sales / warranties have loaded
   useEffect(() => {
     const urlImei = searchParams.get("imei");
     if (urlImei) {
       setImeiInput(urlImei);
       performLookup(urlImei);
     }
-  }, [searchParams]);
+  }, [searchParams, performLookup]);
+
+  const warrantyBadge = (status) =>
+    status === "Active"
+      ? "bg-emerald-500/20 text-emerald-300"
+      : status === "Expiring Soon"
+      ? "bg-amber-500/20 text-amber-300"
+      : "bg-rose-500/20 text-rose-300";
+
+  // Bill details block (shared by the product-found and product-deleted views)
+  const renderSaleDetails = (sale) => (
+    <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-1">
+      <div className="flex justify-between text-xs">
+        <span className="text-slate-400">Bill Number:</span>
+        <span className="font-mono font-bold text-indigo-400">{sale.billNumber}</span>
+      </div>
+      <div className="flex justify-between text-xs">
+        <span className="text-slate-400">Customer Name:</span>
+        <span className="font-bold text-slate-200">{sale.customerName || "Walk-in Customer"}</span>
+      </div>
+      <div className="flex justify-between text-xs">
+        <span className="text-slate-400">Phone:</span>
+        <span className="text-slate-200">{sale.customerPhone || "N/A"}</span>
+      </div>
+      <div className="flex justify-between text-xs">
+        <span className="text-slate-400">Sale Date:</span>
+        <span className="text-slate-200">{new Date(sale.createdAt).toLocaleDateString()}</span>
+      </div>
+    </div>
+  );
+
+  // Warranty status block — shown whenever a warranty exists for this IMEI
+  const renderWarranty = (w) => (
+    <div className="bg-indigo-950/30 p-3 rounded-2xl border border-indigo-900/50 space-y-1">
+      <div className="flex justify-between text-xs items-center">
+        <span className="font-bold text-indigo-300">Warranty Status:</span>
+        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${warrantyBadge(w.status)}`}>
+          {w.status}
+        </span>
+      </div>
+      {w.warrantyType && <p className="text-xs text-slate-400">Type: {w.warrantyType}</p>}
+      <p className="text-xs text-slate-400">Expiry Date: {w.warrantyExpiryDate}</p>
+      {(w.claims || []).length > 0 && (
+        <p className="text-xs text-slate-400">
+          Claims: {w.claims.length} (latest: {w.claims[w.claims.length - 1].status || "Pending"})
+        </p>
+      )}
+    </div>
+  );
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -280,47 +342,45 @@ const ImeiChecker = () => {
                   <FileText size={18} className="text-indigo-400" />
                 </div>
 
-                {searchResult.matchedSale ? (
-                  <div className="space-y-3">
-                    <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-1">
-                      <div className="flex justify-between text-xs">
-                        <span className="text-slate-400">Bill Number:</span>
-                        <span className="font-mono font-bold text-indigo-400">{searchResult.matchedSale.billNumber}</span>
-                      </div>
-                      <div className="flex justify-between text-xs">
-                        <span className="text-slate-400">Customer Name:</span>
-                        <span className="font-bold text-slate-200">{searchResult.matchedSale.customerName}</span>
-                      </div>
-                      <div className="flex justify-between text-xs">
-                        <span className="text-slate-400">Phone:</span>
-                        <span className="text-slate-200">{searchResult.matchedSale.customerPhone || "N/A"}</span>
-                      </div>
-                      <div className="flex justify-between text-xs">
-                        <span className="text-slate-400">Sale Date:</span>
-                        <span className="text-slate-200">{new Date(searchResult.matchedSale.createdAt).toLocaleDateString()}</span>
-                      </div>
+                <div className="space-y-3">
+                  {searchResult.matchedSale ? (
+                    renderSaleDetails(searchResult.matchedSale)
+                  ) : (
+                    <div className="text-center p-6 text-slate-400 text-xs space-y-2">
+                      <AlertCircle size={32} className="mx-auto text-slate-600" />
+                      <p>
+                        {searchResult.matchedImeiObj?.status === "sold"
+                          ? "This IMEI is marked sold, but its bill record could not be found."
+                          : "This IMEI is currently unsold in shop inventory. No bill or customer log associated yet."}
+                      </p>
                     </div>
+                  )}
 
-                    {/* Warranty Status */}
-                    {searchResult.matchedWarranty && (
-                      <div className="bg-indigo-950/30 p-3 rounded-2xl border border-indigo-900/50 space-y-1">
-                        <div className="flex justify-between text-xs items-center">
-                          <span className="font-bold text-indigo-300">Warranty Status:</span>
-                          <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 rounded text-[10px] font-bold">
-                            {searchResult.matchedWarranty.status}
-                          </span>
-                        </div>
-                        <p className="text-xs text-slate-400">Expiry Date: {searchResult.matchedWarranty.warrantyExpiryDate}</p>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="text-center p-6 text-slate-400 text-xs space-y-2">
-                    <AlertCircle size={32} className="mx-auto text-slate-600" />
-                    <p>This IMEI is currently unsold in shop inventory. No bill or customer log associated yet.</p>
-                  </div>
-                )}
+                  {/* Warranty Status */}
+                  {searchResult.matchedWarranty && renderWarranty(searchResult.matchedWarranty)}
+                </div>
               </div>
+            </div>
+          ) : searchResult.matchedSale || searchResult.matchedWarranty ? (
+            /* Sold phone whose product was removed from inventory: still show its bill & warranty */
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <span className="text-xs font-bold uppercase text-slate-400">Sale & Warranty Record</span>
+                <FileText size={18} className="text-indigo-400" />
+              </div>
+              {searchResult.matchedWarranty?.productName && (
+                <div>
+                  <h2 className="text-xl font-bold text-slate-100">{searchResult.matchedWarranty.productName}</h2>
+                  <p className="text-xs text-indigo-400 font-semibold">
+                    {searchResult.matchedWarranty.brand} {searchResult.matchedWarranty.model}
+                  </p>
+                </div>
+              )}
+              <p className="text-[11px] text-amber-400">
+                This IMEI is no longer linked to a product in inventory (the product may have been deleted).
+              </p>
+              {searchResult.matchedSale && renderSaleDetails(searchResult.matchedSale)}
+              {searchResult.matchedWarranty && renderWarranty(searchResult.matchedWarranty)}
             </div>
           ) : (
             <div className="bg-slate-900 border border-slate-800 rounded-3xl p-8 text-center text-slate-400 space-y-3">

@@ -1,58 +1,59 @@
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState } from "react";
+import { api, TOKEN_KEY, USER_KEY, setSessionToken } from "../services/api";
 
 const AuthContext = createContext();
 
+const readStored = () => {
+  try {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const user = JSON.parse(localStorage.getItem(USER_KEY) || "null");
+    return token && user ? { token, user } : { token: null, user: null };
+  } catch {
+    return { token: null, user: null };
+  }
+};
+
 export const AuthProvider = ({ children }) => {
-  // Pre-seed with default admin user for instant demo
-  const [user, setUser] = useState(() => {
-    const savedUser = localStorage.getItem("pos_user");
-    if (savedUser) {
-      try { return JSON.parse(savedUser); } catch (e) {}
-    }
-    return {
-      id: "u1",
-      name: "Syed Admin (Owner)",
-      email: "admin@shop.com",
-      role: "admin", // 'admin' or 'cashier'
-      avatar: "https://api.dicebear.com/7.x/avataaars/svg?seed=Admin",
-    };
+  // Nobody is logged in until the backend accepts a username and password
+  const [session, setSession] = useState(() => {
+    const stored = readStored();
+    setSessionToken(stored.token);
+    return stored;
   });
 
-  const [token, setToken] = useState(() => localStorage.getItem("pos_token") || "mock-jwt-token-xyz");
-
-  const login = (email, password, role = "admin") => {
+  // Checks the username / password against the users table; throws with the server's message on failure
+  const login = async (username, password) => {
+    const { user, token } = await api.login({ username, password });
     const userData = {
-      id: role === "admin" ? "u1" : "u2",
-      name: role === "admin" ? "Syed Owner (Admin)" : "Ali Cashier",
-      email: email,
-      role: role,
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${role}`,
+      ...user,
+      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(user.username)}`,
     };
-    const fakeToken = `jwt-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-    
-    setUser(userData);
-    setToken(fakeToken);
-    localStorage.setItem("pos_user", JSON.stringify(userData));
-    localStorage.setItem("pos_token", fakeToken);
+    setSessionToken(token);
+    try {
+      localStorage.setItem(TOKEN_KEY, token);
+      localStorage.setItem(USER_KEY, JSON.stringify(userData));
+    } catch {
+      // storage blocked: the session lasts until the tab is closed
+    }
+    setSession({ token, user: userData });
     return userData;
   };
 
   const logout = () => {
-    setUser(null);
-    setToken(null);
-    localStorage.removeItem("pos_user");
-    localStorage.removeItem("pos_token");
-  };
-
-  const switchRole = (newRole) => {
-    if (!user) return;
-    const updated = { ...user, role: newRole, name: newRole === 'admin' ? 'Syed Owner (Admin)' : 'Ali Cashier' };
-    setUser(updated);
-    localStorage.setItem("pos_user", JSON.stringify(updated));
+    setSessionToken(null);
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(USER_KEY);
+    } catch {
+      // nothing stored
+    }
+    setSession({ token: null, user: null });
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout, switchRole, isAdmin: user?.role === "admin" }}>
+    <AuthContext.Provider
+      value={{ user: session.user, token: session.token, login, logout, isAdmin: session.user?.role === "admin" }}
+    >
       {children}
     </AuthContext.Provider>
   );

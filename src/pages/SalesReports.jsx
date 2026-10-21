@@ -1,5 +1,7 @@
 import React, { useState, useMemo } from "react";
 import { useApp } from "../context/AppContext";
+import { localDate, isBetween } from "../utils/dates";
+import { realSales, saleProfit, totalProfit as sumProfit, itemCount } from "../utils/sales";
 import {
   BarChart3,
   TrendingUp,
@@ -12,74 +14,85 @@ import {
   Sparkles,
   PieChart,
   Clock,
+  Wallet,
 } from "lucide-react";
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const HOUR_SLOTS = [8, 10, 12, 14, 16, 18, 20, 22];
+
+const saleTime = (s) => s.createdAt || s.date;
+const itemQty = (item) => Number(item.quantity || item.qty || 1);
+const itemRevenue = (item) =>
+  Number(item.subtotal || (item.unitSalePrice || item.price || item.rate || 0) * itemQty(item));
+
+// Local-date bounds (YYYY-MM-DD, inclusive) of a timeframe; never later than today
+const periodRange = (timeframe) => {
+  const now = new Date();
+  const today = localDate(now);
+  if (timeframe === "Today") return { from: today, to: today };
+  if (timeframe === "Weekly") {
+    const start = new Date(now);
+    start.setDate(now.getDate() - 6);
+    return { from: localDate(start), to: today };
+  }
+  if (timeframe === "Monthly") return { from: localDate(new Date(now.getFullYear(), now.getMonth(), 1)), to: today };
+  if (timeframe === "Yearly") return { from: `${now.getFullYear()}-01-01`, to: today };
+  return { from: null, to: null };
+};
+
 const SalesReports = () => {
-  const { sales, products, shopSettings } = useApp();
+  const { sales, expenses, products, shopSettings } = useApp();
   const [timeframe, setTimeframe] = useState("Weekly");
 
-  // Calculate filtered date bounds based on timeframe
-  const filteredSales = useMemo(() => {
-    const now = new Date();
-    const nowTime = now.getTime();
-    return sales.filter((s) => {
-      const saleDate = new Date(s.createdAt || s.date || nowTime);
-      if (timeframe === "Today") {
-        return saleDate.toDateString() === now.toDateString();
-      }
-      if (timeframe === "Weekly") {
-        const sevenDaysAgo = new Date();
-        sevenDaysAgo.setDate(now.getDate() - 7);
-        return saleDate >= sevenDaysAgo;
-      }
-      if (timeframe === "Monthly") {
-        return (
-          saleDate.getMonth() === now.getMonth() &&
-          saleDate.getFullYear() === now.getFullYear()
-        );
-      }
-      if (timeframe === "Yearly") {
-        return saleDate.getFullYear() === now.getFullYear();
-      }
-      return true;
-    });
-  }, [sales, timeframe]);
+  const range = useMemo(() => periodRange(timeframe), [timeframe]);
+
+  // Real sales (no Udhaar settlement receipts) inside the timeframe, by local date
+  const filteredSales = useMemo(
+    () => realSales(sales).filter((s) => isBetween(saleTime(s), range.from, range.to)),
+    [sales, range]
+  );
+
+  // Expenses in the same timeframe, by expenseDate
+  const periodExpenses = useMemo(
+    () =>
+      expenses
+        .filter((e) => {
+          const day = e.expenseDate || (e.createdAt ? localDate(e.createdAt) : null);
+          return !!day && (!range.from || day >= range.from) && (!range.to || day <= range.to);
+        })
+        .reduce((sum, e) => sum + Number(e.amount || 0), 0),
+    [expenses, range]
+  );
 
   // Aggregate metrics
   const totalRevenue = useMemo(
-    () => filteredSales.reduce((sum, s) => sum + (s.grandTotal || s.totalAmount || 0), 0),
+    () => filteredSales.reduce((sum, s) => sum + Number(s.grandTotal || s.totalAmount || 0), 0),
     [filteredSales]
   );
 
-  const totalProfit = useMemo(
-    () => filteredSales.reduce((sum, s) => sum + (s.netProfit || Math.round((s.grandTotal || 0) * 0.15)), 0),
-    [filteredSales]
-  );
+  const grossProfit = useMemo(() => sumProfit(filteredSales), [filteredSales]);
+  const netProfit = grossProfit - periodExpenses;
+  const grossMargin = totalRevenue > 0 ? ((grossProfit / totalRevenue) * 100).toFixed(1) : "0.0";
+  const salesWithoutCost = filteredSales.filter((s) => saleProfit(s) === null).length;
 
   const totalUnitsSold = useMemo(
-    () =>
-      filteredSales.reduce(
-        (sum, s) =>
-          sum +
-          (s.items || []).reduce((acc, item) => acc + (item.quantity || item.qty || 1), 0),
-        0
-      ),
+    () => filteredSales.reduce((sum, s) => sum + itemCount(s), 0),
     [filteredSales]
   );
 
   const avgBillValue = filteredSales.length > 0 ? Math.round(totalRevenue / filteredSales.length) : 0;
 
-  // Top 5 Products Calculation
+  // Top 5 Products Calculation (current timeframe only)
   const topProducts = useMemo(() => {
     const map = {};
-    sales.forEach((s) => {
+    filteredSales.forEach((s) => {
       (s.items || []).forEach((item) => {
         const name = item.productName || item.name || "Unknown Smartphone";
         if (!map[name]) {
           map[name] = { name, qty: 0, revenue: 0, category: item.category || "Smartphones" };
         }
-        map[name].qty += item.quantity || item.qty || 1;
-        map[name].revenue += item.subtotal || (item.price || item.rate || 0) * (item.quantity || item.qty || 1);
+        map[name].qty += itemQty(item);
+        map[name].revenue += itemRevenue(item);
       });
     });
 
@@ -87,42 +100,65 @@ const SalesReports = () => {
     const top5 = sorted.slice(0, 5);
     const maxQty = top5.length > 0 ? top5[0].qty : 1;
     return top5.map((p) => ({ ...p, percent: Math.round((p.qty / maxQty) * 100) }));
-  }, [sales]);
+  }, [filteredSales]);
 
-  // Dynamic Graph Intervals (Daily / Weekly / Monthly / Annual)
+  // Biggest category's share of item revenue (category from the sale item, else the product)
+  const topCategory = useMemo(() => {
+    const productCategory = {};
+    products.forEach((p) => {
+      productCategory[p.name] = p.category;
+    });
+    const map = {};
+    let total = 0;
+    filteredSales.forEach((s) => {
+      (s.items || []).forEach((item) => {
+        const cat = item.category || productCategory[item.productName] || "Other";
+        const rev = itemRevenue(item);
+        map[cat] = (map[cat] || 0) + rev;
+        total += rev;
+      });
+    });
+    const [name, rev] = Object.entries(map).sort((a, b) => b[1] - a[1])[0] || [];
+    return name && total > 0 ? { name, percent: Math.round((rev / total) * 100) } : null;
+  }, [filteredSales, products]);
+
+  // Sales trend buckets from the real sales, in local time
   const graphData = useMemo(() => {
+    let buckets;
+    let bucketOf;
     if (timeframe === "Today") {
-      const hours = ["8 AM", "10 AM", "12 PM", "2 PM", "4 PM", "6 PM", "8 PM", "10 PM"];
-      return hours.map((hour, idx) => ({
-        label: hour,
-        revenue: Math.round(totalRevenue * (0.05 + ((idx * 37) % 20) / 100)),
-        profit: Math.round(totalProfit * (0.05 + ((idx * 37) % 20) / 100)),
-      }));
+      // 2-hour slots from 8 AM to 10 PM; earlier / later hours go to the nearest slot
+      buckets = HOUR_SLOTS.map((h) => ({ label: `${h % 12 || 12} ${h < 12 ? "AM" : "PM"}` }));
+      bucketOf = (d) => Math.min(HOUR_SLOTS.length - 1, Math.max(0, Math.floor((d.getHours() - 8) / 2)));
+    } else if (timeframe === "Weekly") {
+      // Last 7 local dates, oldest first
+      const keys = [];
+      buckets = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        keys.push(localDate(d));
+        buckets.push({ label: d.toLocaleDateString("en-US", { weekday: "short" }) });
+      }
+      bucketOf = (d) => keys.indexOf(localDate(d));
+    } else if (timeframe === "Monthly") {
+      buckets = ["Week 1", "Week 2", "Week 3", "Week 4"].map((label) => ({ label }));
+      bucketOf = (d) => Math.min(3, Math.floor((d.getDate() - 1) / 7));
+    } else {
+      // Annual: months of the current year
+      buckets = MONTHS.map((label) => ({ label }));
+      bucketOf = (d) => d.getMonth();
     }
-    if (timeframe === "Weekly") {
-      const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-      return days.map((day, idx) => ({
-        label: day,
-        revenue: Math.round((totalRevenue / 7) * (0.7 + ((idx * 29) % 60) / 100)),
-        profit: Math.round((totalProfit / 7) * (0.7 + ((idx * 29) % 60) / 100)),
-      }));
-    }
-    if (timeframe === "Monthly") {
-      const weeks = ["Week 1", "Week 2", "Week 3", "Week 4"];
-      return weeks.map((w, idx) => ({
-        label: w,
-        revenue: Math.round((totalRevenue / 4) * (0.8 + ((idx * 43) % 40) / 100)),
-        profit: Math.round((totalProfit / 4) * (0.8 + ((idx * 43) % 40) / 100)),
-      }));
-    }
-    // Annual
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    return months.map((m, idx) => ({
-      label: m,
-      revenue: Math.round((totalRevenue / 12) * (0.6 + ((idx * 19) % 80) / 100)),
-      profit: Math.round((totalProfit / 12) * (0.6 + ((idx * 19) % 80) / 100)),
-    }));
-  }, [timeframe, totalRevenue, totalProfit]);
+
+    const data = buckets.map((b) => ({ ...b, revenue: 0, profit: 0 }));
+    filteredSales.forEach((s) => {
+      const idx = bucketOf(new Date(saleTime(s)));
+      if (idx < 0 || !data[idx]) return;
+      data[idx].revenue += Number(s.grandTotal || s.totalAmount || 0);
+      data[idx].profit += saleProfit(s) || 0;
+    });
+    return data.map((d) => ({ ...d, revenue: Math.round(d.revenue), profit: Math.round(d.profit) }));
+  }, [timeframe, filteredSales]);
 
   const maxGraphRevenue = Math.max(...graphData.map((g) => g.revenue), 1000);
 
@@ -163,7 +199,7 @@ const SalesReports = () => {
       </div>
 
       {/* KPI Cards Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
         {/* Total Revenue */}
         <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-emerald-500/30 transition-all">
           <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-xl group-hover:bg-emerald-500/10 transition-all" />
@@ -182,21 +218,43 @@ const SalesReports = () => {
           </div>
         </div>
 
-        {/* Total Net Profit */}
+        {/* Gross Profit */}
         <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-indigo-500/30 transition-all">
           <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/5 rounded-full blur-xl group-hover:bg-indigo-500/10 transition-all" />
           <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Net Profit</span>
+            <span>Gross Profit</span>
             <div className="p-2 bg-indigo-500/10 rounded-xl text-indigo-400 border border-indigo-500/20">
               <TrendingUp size={16} />
             </div>
           </div>
           <div className="text-2xl font-extrabold text-indigo-400 tracking-tight">
-            {shopSettings.currencySymbol} {totalProfit.toLocaleString()}
+            {shopSettings.currencySymbol} {grossProfit.toLocaleString()}
           </div>
           <div className="flex items-center gap-1 mt-2 text-xs text-indigo-300 font-medium">
             <Sparkles size={14} />
-            <span>Est. ~15% Net Margin</span>
+            <span>{grossMargin}% Gross Margin</span>
+          </div>
+          {salesWithoutCost > 0 && (
+            <div className="mt-1 text-[11px] text-amber-400 font-medium">
+              {salesWithoutCost} sale(s) without cost data
+            </div>
+          )}
+        </div>
+
+        {/* Net Profit (gross profit minus expenses) */}
+        <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-rose-500/30 transition-all">
+          <div className="absolute top-0 right-0 w-24 h-24 bg-rose-500/5 rounded-full blur-xl group-hover:bg-rose-500/10 transition-all" />
+          <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">
+            <span>Net Profit</span>
+            <div className="p-2 bg-rose-500/10 rounded-xl text-rose-400 border border-rose-500/20">
+              <Wallet size={16} />
+            </div>
+          </div>
+          <div className={`text-2xl font-extrabold tracking-tight ${netProfit < 0 ? "text-rose-400" : "text-white"}`}>
+            {shopSettings.currencySymbol} {netProfit.toLocaleString()}
+          </div>
+          <div className="flex items-center gap-1 mt-2 text-xs text-rose-300 font-medium">
+            <span>After {shopSettings.currencySymbol} {periodExpenses.toLocaleString()} expenses</span>
           </div>
         </div>
 
@@ -266,8 +324,8 @@ const SalesReports = () => {
             {/* Custom Bar Chart Visualization */}
             <div className="h-64 flex items-end justify-between gap-2 sm:gap-4 pt-6 pb-2 px-2 border-b border-slate-800/80">
               {graphData.map((item, index) => {
-                const revHeightPercent = Math.max(12, Math.round((item.revenue / maxGraphRevenue) * 100));
-                const profitHeightPercent = Math.max(8, Math.round((item.profit / maxGraphRevenue) * 100));
+                const revHeightPercent = item.revenue > 0 ? Math.max(2, Math.round((item.revenue / maxGraphRevenue) * 100)) : 0;
+                const profitHeightPercent = item.profit > 0 ? Math.max(2, Math.round((item.profit / maxGraphRevenue) * 100)) : 0;
                 return (
                   <div key={index} className="flex-1 flex flex-col items-center gap-2 group h-full justify-end">
                     {/* Bar pair container */}
@@ -324,7 +382,7 @@ const SalesReports = () => {
 
             <div className="space-y-4">
               {topProducts.length === 0 ? (
-                <div className="text-center py-8 text-slate-500 text-xs">No sales recorded yet.</div>
+                <div className="text-center py-8 text-slate-500 text-xs">No sales recorded in this period.</div>
               ) : (
                 topProducts.map((item, index) => (
                   <div key={item.name} className="space-y-1.5">
@@ -372,12 +430,14 @@ const SalesReports = () => {
             </div>
           </div>
 
-          <div className="pt-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
-            <span className="flex items-center gap-1 text-slate-300">
-              <PieChart size={14} className="text-indigo-400" />
-              <span>Smartphones represent 85% of total sales</span>
-            </span>
-          </div>
+          {topCategory && (
+            <div className="pt-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
+              <span className="flex items-center gap-1 text-slate-300">
+                <PieChart size={14} className="text-indigo-400" />
+                <span>{topCategory.name}: {topCategory.percent}% of sales revenue</span>
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </div>

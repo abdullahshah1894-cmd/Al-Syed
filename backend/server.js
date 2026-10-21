@@ -20,28 +20,30 @@ app.use((req, res, next) => {
   next();
 });
 
+// Health Check (public)
+app.get("/api/health", (req, res) => {
+  res.json({ status: "OK", service: "Mobile Shop ERP — Supabase PostgreSQL Backend", timestamp: new Date().toISOString() });
+});
+
+// Login is public; every other API route needs a logged-in user
+const { requireAuth, requireAdmin } = require("./middleware/auth");
+app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api", requireAuth);
+
 // API Routes — Supabase-backed
 app.use("/api/products", require("./routes/productRoutes"));
 app.use("/api/sales", require("./routes/saleRoutes"));
 app.use("/api/ledger", require("./routes/ledgerRoutes"));
 app.use("/api/customers", require("./routes/customerRoutes"));
 app.use("/api/warranties", require("./routes/warrantyRoutes"));
-app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/issues", require("./routes/issueRoutes"));
 app.use("/api/upload", require("./routes/uploadRoutes"));
 app.use("/api/expenses", require("./routes/expenseRoutes"));
+app.put("/api/settings", requireAdmin);
 app.use("/api/settings", require("./routes/settingsRoutes"));
 
-// Health Check
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "OK",
-    service: "Mobile Shop ERP — Supabase PostgreSQL Backend",
-    database: "Supabase (ejfyzkvueqxadxvateyd)",
-    endpoints: ["/api/products", "/api/sales", "/api/ledger", "/api/customers", "/api/warranties", "/api/auth", "/api/issues", "/api/upload"],
-    timestamp: new Date().toISOString(),
-  });
-});
+// Unknown API path: answer instead of hanging
+app.use("/api", (req, res) => res.status(404).json({ error: `Not found: ${req.method} ${req.originalUrl}` }));
 
 // Serve frontend in production
 if (process.env.NODE_ENV === "production") {

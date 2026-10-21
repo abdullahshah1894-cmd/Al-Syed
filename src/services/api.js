@@ -1,18 +1,54 @@
-// Frontend API Service — talks to Express backend at localhost:5000
-// All data is persisted in Supabase PostgreSQL via the backend
+// Frontend API Service — talks to the Express backend.
+// All data is persisted in Supabase PostgreSQL via the backend.
+// Same origin by default (Vite proxies /api in dev, Express serves the app in production);
+// set VITE_API_URL to point at a backend on another machine.
 
-const API_BASE = "http://localhost:5000/api";
+const API_BASE = `${import.meta.env.VITE_API_URL || ""}/api`;
+
+export const TOKEN_KEY = "pos_token";
+export const USER_KEY = "pos_user";
+
+// The token is kept in memory too, so login still works when browser storage is blocked
+let memoryToken = null;
+export const setSessionToken = (token) => {
+  memoryToken = token || null;
+};
+
+const readToken = () => {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || memoryToken;
+  } catch {
+    return memoryToken;
+  }
+};
 
 // Throws on any failure (network down, 4xx/5xx) with the server's error message.
 const request = async (url, options = {}) => {
+  const token = readToken();
   let res;
   try {
     res = await fetch(url, {
-      headers: { "Content-Type": "application/json" },
       ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token && { Authorization: `Bearer ${token}` }),
+        ...options.headers,
+      },
     });
   } catch (e) {
     throw new Error("Cannot reach the server. Check that the backend is running and you are online.", { cause: e });
+  }
+  // Session expired or missing: back to the login screen (not for the login call itself)
+  if (res.status === 401 && !url.endsWith("/auth/login")) {
+    memoryToken = null;
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(USER_KEY);
+    } catch {
+      // storage unavailable; the redirect still logs the user out
+    }
+    if (window.location.pathname !== "/login") window.location.href = "/login";
+    throw new Error("Your session has expired. Please log in again.");
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -42,6 +78,7 @@ export const api = {
   createProduct: (data) => send("POST", `${API_BASE}/products`, data),
   updateProduct: (id, data) => send("PUT", `${API_BASE}/products/${id}`, data),
   deleteProduct: (id) => send("DELETE", `${API_BASE}/products/${id}`),
+  addStock: (id, data) => send("POST", `${API_BASE}/products/${id}/stock`, data),
 
   // ── Sales ─────────────────────────────────────────
   getSales: () => fetchJson(`${API_BASE}/sales`),
@@ -67,8 +104,9 @@ export const api = {
   addWarrantyClaim: (imei, data) => send("POST", `${API_BASE}/warranties/${imei}/claims`, data),
 
   // ── Auth ──────────────────────────────────────────
-  login: (data) => fetchJson(`${API_BASE}/auth/login`, { method: "POST", body: JSON.stringify(data) }),
+  login: (data) => send("POST", `${API_BASE}/auth/login`, data),
   getUsers: () => fetchJson(`${API_BASE}/auth/users`),
+  createUser: (data) => send("POST", `${API_BASE}/auth/users`, data),
 
   // ── Mobile Issues ─────────────────────────────────
   getMobileIssues: () => fetchJson(`${API_BASE}/issues`),

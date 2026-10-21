@@ -23,7 +23,8 @@ export const formatWAPhone = (phone) => {
 // POS Component
 // ─────────────────────────────────────────────────────────────────
 const POS = () => {
-  const { products, customers, recordSale, shopSettings, addCustomer, activeSeller, setActiveSeller } = useApp();
+  // All customers, not the header-filtered list: choosing a seller only sorts their customers first
+  const { products, allCustomers: customers, recordSale, shopSettings, addCustomer, activeSeller, setActiveSeller } = useApp();
   const { user } = useAuth();
 
   const [cart, setCart] = useState([]);
@@ -39,6 +40,7 @@ const POS = () => {
   const [paidAmountInput, setPaidAmountInput] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [notes, setNotes] = useState("");
 
   // Customer creation modal
@@ -216,20 +218,35 @@ const POS = () => {
   };
 
   const updateCartQuantity = (cartId, delta) => {
+    // Check stock before updating, so the alert shows once
+    const current = cart.find((item) => item.cartId === cartId);
+    if (!current || current.imei) return;
+    const newQty = current.quantity + delta;
+    const productRef = products.find((p) => p.id === current.product);
+    if (newQty > 0 && productRef && newQty > productRef.quantity) {
+      alert(`Only ${productRef.quantity} available for ${current.productName}.`);
+      return;
+    }
     setCart((prev) =>
-      prev.map((item) => {
-        if (item.cartId !== cartId) return item;
-        if (item.imei) return item;
-        const newQty = item.quantity + delta;
-        if (newQty <= 0) return null;
-        const productRef = products.find((p) => p.id === item.product);
-        if (productRef && newQty > productRef.quantity) {
-          alert(`Only ${productRef.quantity} available for ${item.productName}.`);
-          return item;
-        }
-        return { ...item, quantity: newQty, subtotal: newQty * item.unitSalePrice };
-      }).filter(Boolean)
+      prev
+        .map((item) => {
+          if (item.cartId !== cartId) return item;
+          if (newQty <= 0) return null;
+          return { ...item, quantity: newQty, subtotal: newQty * item.unitSalePrice };
+        })
+        .filter(Boolean)
     );
+  };
+
+  const openAddToCart = (product) => {
+    setMultiAddImeis([]);
+    setMultiAddQty(1);
+    setProductToAdd(product);
+  };
+  const closeAddToCart = () => {
+    setProductToAdd(null);
+    setMultiAddImeis([]);
+    setMultiAddQty(1);
   };
 
   const removeFromCart = (cartId) => setCart((prev) => prev.filter((i) => i.cartId !== cartId));
@@ -256,14 +273,20 @@ const POS = () => {
   };
 
   const groupedCart = getGroupedItems(cart);
+  const toAmount = (v) => Math.max(0, Number(v) || 0);
   const subtotal = cart.reduce((sum, item) => sum + item.subtotal, 0);
-  const taxAmount = Math.round((subtotal * taxPercent) / 100);
-  const currentSaleTotal = Math.max(0, subtotal + taxAmount - Number(discount));
+  const taxAmount = Math.round((subtotal * toAmount(taxPercent)) / 100);
+  const discountAmount = Math.min(toAmount(discount), subtotal + taxAmount);
+  const currentSaleTotal = subtotal + taxAmount - discountAmount;
   const previousBalance = selectedCustomer ? Number(selectedCustomer.totalPending || 0) : 0;
-  const netTotalToPay = currentSaleTotal + previousBalance;
-  // Only Udhaar defaults to unpaid; Cash / Card / Easypaisa are paid in full unless an amount is typed
-  const effectivePaid = paidAmountInput !== "" ? Number(paidAmountInput) : (paymentMethod === "Credit (Udhaar)" ? 0 : currentSaleTotal);
+  const isUdhaarSale = paymentMethod === "Credit (Udhaar)";
+  // Cash / Card / Easypaisa pay this bill in full. On a Pending Bill the "Paid Now" amount counts;
+  // anything paid above this bill goes against the customer's old Udhaar (done by the backend).
+  const effectivePaid = isUdhaarSale
+    ? Math.min(toAmount(paidAmountInput), currentSaleTotal + previousBalance)
+    : currentSaleTotal;
   const dueAmount = Math.max(0, currentSaleTotal - effectivePaid);
+  const balanceAfterSale = Math.max(0, previousBalance + currentSaleTotal - effectivePaid);
 
   // ── Checkout ──────────────────────────────────────────────────
   const handleCheckoutClick = () => {
@@ -276,7 +299,7 @@ const POS = () => {
   };
 
   const finalizeCheckout = async () => {
-    if (cart.length === 0) return;
+    if (cart.length === 0 || isSubmitting) return;
     if (paymentMethod === "Credit (Udhaar)" && !selectedCustomer) {
       alert("Please select a customer for Udhaar (Credit) sales.");
       return;
@@ -293,8 +316,8 @@ const POS = () => {
         imeisArray: item.imei ? [item.imei] : (item.imeisArray || []),
       })),
       subtotalAmount: subtotal,
-      discountAmount: Number(discount),
-      taxPercent: Number(taxPercent),
+      discountAmount,
+      taxPercent: toAmount(taxPercent),
       taxAmount,
       grandTotal: currentSaleTotal,
       paidAmount: effectivePaid,
@@ -306,10 +329,16 @@ const POS = () => {
       notes,
     };
 
-    const recorded = await recordSale(saleData);
+    setIsSubmitting(true);
+    let recorded;
+    try {
+      recorded = await recordSale(saleData);
+    } finally {
+      setIsSubmitting(false);
+    }
     // Not saved: keep the cart and the checkout open so nothing is lost
     if (!recorded) return;
-    setCompletedSaleInvoice({ ...recorded, sellerName: selectedSeller });
+    setCompletedSaleInvoice({ ...recorded, sellerName: selectedSeller, previousBalance, balanceAfterSale });
 
     setCart([]);
     setSelectedCustomer(null);
@@ -370,13 +399,17 @@ const POS = () => {
       const price = item.unitPrice || item.unitSalePrice || item.price || 0;
       const sub = item.subtotal || qty * price;
       text += `${index + 1}. *${item.productName || item.name}* (x${qty}) - ${currency} ${sub.toLocaleString()}\n`;
-      if (item.imei) {
-        text += `   IMEI: ${item.imei}\n`;
+      const imeis = (item.imeisArray && item.imeisArray.length > 0 ? item.imeisArray : [item.imei]).filter(Boolean);
+      if (imeis.length > 0) {
+        text += `   IMEI: ${imeis.join(", ")}\n`;
       }
     });
 
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
     text += `*Subtotal:* ${currency} ${Number(sale.subtotalAmount || sale.grandTotal || 0).toLocaleString()}\n`;
+    if (sale.taxAmount > 0) {
+      text += `*Tax (${sale.taxPercent}%):* +${currency} ${Number(sale.taxAmount).toLocaleString()}\n`;
+    }
     if (sale.discountAmount > 0) {
       text += `*Discount:* -${currency} ${Number(sale.discountAmount).toLocaleString()}\n`;
     }
@@ -384,6 +417,10 @@ const POS = () => {
     text += `*Paid Amount:* ${currency} ${Number(sale.paidAmount || 0).toLocaleString()}\n`;
     if (Number(sale.dueAmount || 0) > 0) {
       text += `*⚠️ DUE / UDHAAR:* ${currency} ${Number(sale.dueAmount || 0).toLocaleString()}\n`;
+    }
+    if (Number(sale.previousBalance || 0) > 0) {
+      text += `*Previous Udhaar:* ${currency} ${Number(sale.previousBalance).toLocaleString()}\n`;
+      text += `*TOTAL OUTSTANDING:* ${currency} ${Number(sale.balanceAfterSale || 0).toLocaleString()}\n`;
     }
     text += `*Payment:* ${sale.paymentMethod || "Cash"}\n`;
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -551,7 +588,7 @@ const POS = () => {
                 return (
                   <button
                     key={product.id}
-                    onClick={() => !outOfStock && setProductToAdd(product)}
+                    onClick={() => !outOfStock && openAddToCart(product)}
                     disabled={outOfStock}
                     className={`text-left p-3 rounded-2xl border transition-all group ${
                       outOfStock
@@ -770,8 +807,13 @@ const POS = () => {
             )}
             <div className="flex justify-between items-center">
               <span className="text-[11px] text-slate-400 uppercase font-semibold">Total to Pay</span>
-              <span className="text-lg font-extrabold text-indigo-400">Rs. {netTotalToPay.toLocaleString()}</span>
+              <span className="text-lg font-extrabold text-indigo-400">Rs. {currentSaleTotal.toLocaleString()}</span>
             </div>
+            {previousBalance > 0 && (
+              <div className="flex justify-between text-[10px] text-slate-500">
+                <span>Old Udhaar is not included — collect it on a Pending Bill or in Pending Payments</span>
+              </div>
+            )}
           </div>
 
           <button
@@ -830,8 +872,13 @@ const POS = () => {
             <p className="text-center text-xs text-slate-400 mb-6">Seller: <span className="text-indigo-400 font-bold">{selectedSeller}</span></p>
 
             <div className="bg-slate-950 rounded-2xl p-4 mb-6 text-center border border-slate-800">
-              <p className="text-sm text-slate-400 uppercase tracking-wider font-semibold mb-1">Net Total</p>
-              <p className="text-3xl font-black text-indigo-400">Rs. {netTotalToPay.toLocaleString()}</p>
+              <p className="text-sm text-slate-400 uppercase tracking-wider font-semibold mb-1">This Bill</p>
+              <p className="text-3xl font-black text-indigo-400">Rs. {currentSaleTotal.toLocaleString()}</p>
+              {previousBalance > 0 && (
+                <p className="text-xs text-rose-300 font-semibold mt-2">
+                  Old Udhaar: Rs. {previousBalance.toLocaleString()} · Balance after this bill: Rs. {balanceAfterSale.toLocaleString()}
+                </p>
+              )}
               {selectedCustomer && <p className="text-xs text-indigo-300 font-semibold mt-2">Billing to: {selectedCustomer.name}</p>}
             </div>
 
@@ -842,7 +889,7 @@ const POS = () => {
                   const isUdhaar = method === "Credit (Udhaar)";
                   const isSelected = paymentMethod === method;
                   return (
-                    <button key={method} onClick={() => setPaymentMethod(method)}
+                    <button key={method} onClick={() => { setPaymentMethod(method); setPaidAmountInput(""); }}
                       className={`p-3 rounded-xl border text-xs font-bold transition-all flex flex-col items-center justify-center gap-1 ${
                         isSelected
                           ? isUdhaar ? "bg-rose-600 border-rose-500 text-white" : "bg-indigo-600 border-indigo-500 text-white"
@@ -888,10 +935,10 @@ const POS = () => {
 
             <button
               onClick={finalizeCheckout}
-              disabled={paymentMethod === "Credit (Udhaar)" && !selectedCustomer}
+              disabled={isSubmitting || (paymentMethod === "Credit (Udhaar)" && !selectedCustomer)}
               className="w-full mt-6 py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl transition-all shadow-lg shadow-emerald-600/20 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Confirm & Generate Invoice
+              {isSubmitting ? "Saving…" : "Confirm & Generate Invoice"}
             </button>
           </div>
         </div>
@@ -975,16 +1022,27 @@ const POS = () => {
               {/* Totals */}
               <div className="mt-2 space-y-1 text-sm">
                 <div className="flex justify-between"><span>Subtotal</span><span>Rs. {(completedSaleInvoice.subtotalAmount || completedSaleInvoice.grandTotal || 0).toLocaleString()}</span></div>
+                {completedSaleInvoice.taxAmount > 0 && (
+                  <div className="flex justify-between"><span>Tax ({completedSaleInvoice.taxPercent}%)</span><span>+Rs. {completedSaleInvoice.taxAmount.toLocaleString()}</span></div>
+                )}
                 {completedSaleInvoice.discountAmount > 0 && (
                   <div className="flex justify-between"><span>Discount</span><span>−Rs. {completedSaleInvoice.discountAmount.toLocaleString()}</span></div>
                 )}
-                
+
                 <div className="flex justify-between text-lg font-black mt-2 pt-2 border-t border-black"><span>TOTAL</span><span>Rs. {completedSaleInvoice.grandTotal.toLocaleString()}</span></div>
-                
-                {completedSaleInvoice.dueAmount > 0 && (
+
+                {(completedSaleInvoice.dueAmount > 0 || completedSaleInvoice.previousBalance > 0) && (
                   <div className="mt-2 pt-2 border-t border-dashed border-black">
                     <div className="flex justify-between text-sm"><span>Paid</span><span>Rs. {(completedSaleInvoice.paidAmount || 0).toLocaleString()}</span></div>
-                    <div className="flex justify-between text-sm font-bold mt-1"><span>BALANCE DUE</span><span>Rs. {completedSaleInvoice.dueAmount.toLocaleString()}</span></div>
+                    {completedSaleInvoice.dueAmount > 0 && (
+                      <div className="flex justify-between text-sm font-bold mt-1"><span>BALANCE DUE</span><span>Rs. {completedSaleInvoice.dueAmount.toLocaleString()}</span></div>
+                    )}
+                    {completedSaleInvoice.previousBalance > 0 && (
+                      <>
+                        <div className="flex justify-between text-sm mt-1"><span>Previous Udhaar</span><span>Rs. {completedSaleInvoice.previousBalance.toLocaleString()}</span></div>
+                        <div className="flex justify-between text-sm font-bold mt-1"><span>TOTAL OUTSTANDING</span><span>Rs. {(completedSaleInvoice.balanceAfterSale || 0).toLocaleString()}</span></div>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -1024,7 +1082,7 @@ const POS = () => {
           <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-sm shadow-2xl p-5">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-lg font-bold text-slate-100">Add to Cart</h2>
-              <button onClick={() => setProductToAdd(null)} className="text-slate-400 hover:text-white"><X size={20} /></button>
+              <button onClick={closeAddToCart} className="text-slate-400 hover:text-white"><X size={20} /></button>
             </div>
             <h3 className="text-sm font-semibold text-slate-200 mb-0.5">{productToAdd.name}</h3>
             <p className="text-xs text-slate-400 mb-4">{productToAdd.brand} {productToAdd.model}</p>

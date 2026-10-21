@@ -4,6 +4,7 @@ import { useApp, SELLERS } from "../context/AppContext";
 import { formatWAPhone } from "./POS";
 import html2canvas from "html2canvas";
 import { printElement } from "../services/printReceipt";
+import { isSettlement, saleBelongsTo, udhaarAdded as saleUdhaar } from "../utils/sales";
 import {
   Clock,
   CheckCircle2,
@@ -65,8 +66,8 @@ const PendingPayments = () => {
     activeSeller,
   } = useApp();
 
-  const customers = allCustomers || ctxCustomers || [];
-  const sales = allSales || ctxSales || [];
+  const customers = useMemo(() => allCustomers || ctxCustomers || [], [allCustomers, ctxCustomers]);
+  const sales = useMemo(() => allSales || ctxSales || [], [allSales, ctxSales]);
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -74,6 +75,8 @@ const PendingPayments = () => {
   const [viewFilter, setViewFilter] = useState("all"); // "all" | "pending"
   const [selectedCustForPayment, setSelectedCustForPayment] = useState(null);
   const [paymentAmountInput, setPaymentAmountInput] = useState("");
+  const [paymentSeller, setPaymentSeller] = useState("");
+  const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
   const [historyCust, setHistoryCust] = useState(null);
   const [paymentReceipt, setPaymentReceipt] = useState(null);
   const [statementCustomer, setStatementCustomer] = useState(null);
@@ -98,29 +101,30 @@ const PendingPayments = () => {
   const [historySearch, setHistorySearch] = useState("");
   const [historySort, setHistorySort] = useState("newest"); // "newest" | "oldest"
 
-  // Check if a customer record is associated with a specific seller
+  // One seller per customer, so per-seller totals never count a customer twice:
+  // the customer's assigned seller, otherwise the seller of their latest sale or receipt
+  const customerSellerMap = useMemo(() => {
+    const map = new Map();
+    customers.forEach((c) => {
+      let owner = (c.sellerName || "").trim().toLowerCase();
+      if (!owner) {
+        let latest = null;
+        sales.forEach((s) => {
+          const seller = (s.sellerName || s.cashierName || "").trim();
+          if (!seller || !saleBelongsTo(s, c)) return;
+          if (!latest || new Date(s.createdAt) > new Date(latest.createdAt)) latest = { createdAt: s.createdAt, seller };
+        });
+        owner = latest ? latest.seller.toLowerCase() : "";
+      }
+      map.set(c.id, owner);
+    });
+    return map;
+  }, [customers, sales]);
+
+  // Check if a customer record is associated with a specific seller (exact name match only)
   const isCustomerOfSeller = (c, seller) => {
     if (!seller || seller === "All" || seller === "All Sellers") return true;
-    const sLower = seller.trim().toLowerCase();
-
-    // 1. Customer's assigned seller name
-    if ((c.sellerName || "").toLowerCase().includes(sLower)) return true;
-
-    // 2. Customer's own name is or includes the seller (e.g. Aziz or Mubashir account)
-    if ((c.name || "").toLowerCase().includes(sLower)) return true;
-
-    // 3. Customer has sales or receipts handled by this seller
-    const hasSaleWithSeller = sales.some(
-      (sale) =>
-        (sale.customerId === c.id ||
-          sale.customer === c.id ||
-          (c.phone && sale.customerPhone && sale.customerPhone.trim() === c.phone.trim()) ||
-          (c.name && sale.customerName && sale.customerName.trim().toLowerCase() === c.name.trim().toLowerCase())) &&
-        ((sale.sellerName || "").toLowerCase().includes(sLower) ||
-          (sale.cashierName || "").toLowerCase().includes(sLower))
-    );
-
-    return hasSaleWithSeller;
+    return customerSellerMap.get(c.id) === seller.trim().toLowerCase();
   };
 
   // Comprehensive customer search matcher
@@ -145,13 +149,7 @@ const PendingPayments = () => {
 
     // Matching invoice number, item name, or note
     const hasMatchingSale = sales.some((s) => {
-      const isCustSale =
-        s.customerId === c.id ||
-        s.customer === c.id ||
-        (c.phone && s.customerPhone && s.customerPhone.trim() === c.phone.trim()) ||
-        (c.name && s.customerName && s.customerName.trim().toLowerCase() === c.name.trim().toLowerCase());
-
-      if (!isCustSale) return false;
+      if (!saleBelongsTo(s, c)) return false;
 
       if ((s.billNumber || "").toLowerCase().includes(q)) return true;
       if ((s.notes || "").toLowerCase().includes(q)) return true;
@@ -187,61 +185,63 @@ const PendingPayments = () => {
 
       return true;
     });
-  }, [customers, sales, searchTerm, selectedSeller, viewFilter]);
+  }, [customers, sales, searchTerm, selectedSeller, viewFilter, customerSellerMap]);
 
   // Dynamic Statistics based on current seller selection
   const stats = useMemo(() => {
-    const targetCustomers = customers.filter((c) => isCustomerOfSeller(c, selectedSeller));
+    // Each customer counted once, even if listed twice
+    const seen = new Set();
+    const targetCustomers = customers.filter((c) => {
+      if (seen.has(c.id) || !isCustomerOfSeller(c, selectedSeller)) return false;
+      seen.add(c.id);
+      return true;
+    });
 
     const totalPendingAmount = targetCustomers.reduce((sum, c) => sum + (Number(c.totalPending) || 0), 0);
     const pendingCount = targetCustomers.filter((c) => Number(c.totalPending) > 0).length;
-    const totalCollected = targetCustomers.reduce((sum, c) => sum + (Number(c.totalPaid) || 0), 0);
+    // Udhaar money collected: settlement receipts plus the upfront part of sales that left a balance
+    const totalCollected = sales.reduce((sum, s) => {
+      if (!isSettlement(s) && !(Number(s.dueAmount) > 0)) return sum;
+      if (!targetCustomers.some((c) => saleBelongsTo(s, c))) return sum;
+      return sum + (Number(s.paidAmount) || 0);
+    }, 0);
     const allCount = targetCustomers.length;
 
     return { totalPendingAmount, pendingCount, totalCollected, allCount };
-  }, [customers, sales, selectedSeller]);
+  }, [customers, sales, selectedSeller, customerSellerMap]);
 
   // Retrieve and calculate complete chronological ledger for a given customer
   const getCustomerTransactions = (cust) => {
     if (!cust) return [];
 
-    const custSales = sales.filter((s) => {
-      if (s.customerId && s.customerId === cust.id) return true;
-      if (s.customer && s.customer === cust.id) return true;
-      if (cust.phone && s.customerPhone && s.customerPhone.trim() === cust.phone.trim()) return true;
-      if (cust.name && s.customerName && s.customerName.trim().toLowerCase() === cust.name.trim().toLowerCase()) return true;
-      return false;
-    });
+    const custSales = sales.filter((s) => saleBelongsTo(s, cust));
 
     // Sort chronologically (oldest to newest) to accurately compute running Udhaar balance
     const sorted = [...custSales].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
+    // Same rule as the server: a sale adds its due amount, money paid above the bill
+    // goes against the old balance, a settlement lowers it; never below 0
     let runningBalance = 0;
     return sorted.map((record) => {
-      const isPayment = record.paymentMethod === "Udhaar Settlement";
-      const isCredit =
-        (record.paymentMethod || "").toLowerCase().includes("credit") ||
-        (record.paymentMethod || "").toLowerCase().includes("udhaar") ||
-        record.paymentMethod === "Pending Bill";
+      const isPayment = isSettlement(record);
+      const udhaarAdded = saleUdhaar(record);
+      const isCredit = !isPayment && udhaarAdded > 0;
       const isCash = !isPayment && !isCredit;
 
       const grandTotal = Number(record.grandTotal || 0);
       const paidAmount = Number(record.paidAmount || 0);
-      const dueAmount = Number(record.dueAmount || 0);
 
-      let paymentReceived = 0;
-      let udhaarAdded = 0;
+      let paymentReceived;
+      let oldBalancePaid = 0;
 
       if (isPayment) {
         paymentReceived = paidAmount;
         runningBalance = Math.max(0, runningBalance - paymentReceived);
-      } else if (isCredit) {
-        udhaarAdded = dueAmount > 0 ? dueAmount : Math.max(0, grandTotal - paidAmount);
-        paymentReceived = paidAmount; // upfront paid at time of sale
-        runningBalance += udhaarAdded;
       } else {
-        // Cash sale
-        paymentReceived = grandTotal;
+        oldBalancePaid = Math.max(0, paidAmount - grandTotal);
+        // upfront paid at time of sale (a cash sale is paid in full)
+        paymentReceived = isCredit || oldBalancePaid > 0 ? paidAmount : grandTotal;
+        runningBalance = Math.max(0, runningBalance + udhaarAdded - oldBalancePaid);
       }
 
       const dateInfo = formatDateWithDay(record.createdAt);
@@ -253,6 +253,7 @@ const PendingPayments = () => {
         isCash,
         paymentReceived,
         udhaarAdded,
+        oldBalancePaid,
         runningBalance,
         dateInfo,
       };
@@ -271,18 +272,38 @@ const PendingPayments = () => {
     }
   };
 
-  const handleSettlePayment = async (e) => {
-    e.preventDefault();
-    if (!selectedCustForPayment || !paymentAmountInput || Number(paymentAmountInput) <= 0) return;
+  // Open the payment modal; the receiving seller defaults to the customer's seller or the current filter
+  const openPaymentModal = (cust) => {
+    const pick = (name) => SELLERS.find((s) => s.toLowerCase() === (name || "").trim().toLowerCase()) || "";
+    setSelectedCustForPayment(cust);
+    setPaymentAmountInput(String(cust.totalPending));
+    setPaymentSeller(pick(cust.sellerName) || pick(selectedSeller) || pick(activeSeller));
+  };
 
-    const receipt = await payPendingAmount(selectedCustForPayment.id, Number(paymentAmountInput));
-
-    if (receipt) {
-      setPaymentReceipt(receipt);
-    }
-
+  const closePaymentModal = () => {
+    if (isSubmittingPayment) return;
     setSelectedCustForPayment(null);
     setPaymentAmountInput("");
+  };
+
+  const handleSettlePayment = async (e) => {
+    e.preventDefault();
+    if (isSubmittingPayment) return;
+    if (!selectedCustForPayment || !paymentAmountInput || Number(paymentAmountInput) <= 0) return;
+
+    setIsSubmittingPayment(true);
+    try {
+      const receipt = await payPendingAmount(selectedCustForPayment.id, Number(paymentAmountInput), paymentSeller);
+
+      // Keep the modal open when saving failed (payPendingAmount already showed the error)
+      if (receipt) {
+        setPaymentReceipt(receipt);
+        setSelectedCustForPayment(null);
+        setPaymentAmountInput("");
+      }
+    } finally {
+      setIsSubmittingPayment(false);
+    }
   };
 
   // Helper: Format text receipt for WhatsApp
@@ -799,8 +820,7 @@ const PendingPayments = () => {
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setSelectedCustForPayment(cust);
-                      setPaymentAmountInput(String(cust.totalPending));
+                      openPaymentModal(cust);
                     }}
                     className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-emerald-600/20"
                   >
@@ -840,14 +860,14 @@ const PendingPayments = () => {
         </div>
       )}
 
-      {/* Payment Settlement Modal */}
+      {/* Payment Settlement Modal (above the history modal, which can open it) */}
       {selectedCustForPayment && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <h3 className="font-bold text-slate-100 text-base">Record Pending Payment</h3>
               <button
-                onClick={() => setSelectedCustForPayment(null)}
+                onClick={closePaymentModal}
                 className="text-slate-400 hover:text-white p-1 rounded-lg"
               >
                 <X size={18} />
@@ -880,19 +900,38 @@ const PendingPayments = () => {
                 />
               </div>
 
+              <div>
+                <label className="text-xs font-semibold text-slate-400">Received By (Seller) *</label>
+                <select
+                  required
+                  value={paymentSeller}
+                  onChange={(e) => setPaymentSeller(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 font-bold focus:outline-none focus:border-indigo-500 mt-1"
+                >
+                  <option value="">Select seller...</option>
+                  {SELLERS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div className="pt-2 flex justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setSelectedCustForPayment(null)}
-                  className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-700"
+                  onClick={closePaymentModal}
+                  disabled={isSubmittingPayment}
+                  className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-700 disabled:opacity-60"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-emerald-600/20"
+                  disabled={isSubmittingPayment}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-emerald-600/20 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Confirm & Update Balance
+                  {isSubmittingPayment ? "Saving…" : "Confirm & Update Balance"}
                 </button>
               </div>
             </form>
@@ -938,10 +977,7 @@ const PendingPayments = () => {
 
                 {activeHistoryCust.totalPending > 0 && (
                   <button
-                    onClick={() => {
-                      setSelectedCustForPayment(activeHistoryCust);
-                      setPaymentAmountInput(String(activeHistoryCust.totalPending));
-                    }}
+                    onClick={() => openPaymentModal(activeHistoryCust)}
                     className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/20"
                   >
                     <DollarSign size={14} />
@@ -1130,6 +1166,11 @@ const PendingPayments = () => {
                         {tx.isCredit && tx.paymentReceived > 0 && (
                           <span className="text-emerald-400 font-semibold mr-1.5">
                             (Paid: Rs. {tx.paymentReceived.toLocaleString()} | Due: +Rs. {tx.udhaarAdded.toLocaleString()})
+                          </span>
+                        )}
+                        {tx.oldBalancePaid > 0 && (
+                          <span className="text-emerald-400 font-semibold mr-1.5">
+                            (Paid towards old balance: -Rs. {tx.oldBalancePaid.toLocaleString()})
                           </span>
                         )}
                         <span>
@@ -1359,7 +1400,11 @@ const PendingPayments = () => {
                           {tx.isCredit ? `Rs. ${tx.udhaarAdded.toLocaleString()}` : "—"}
                         </td>
                         <td className="py-1.5 text-right font-semibold text-emerald-700">
-                          {tx.isPayment ? `Rs. ${tx.paymentReceived.toLocaleString()}` : "—"}
+                          {tx.isPayment
+                            ? `Rs. ${tx.paymentReceived.toLocaleString()}`
+                            : tx.oldBalancePaid > 0
+                            ? `Rs. ${tx.oldBalancePaid.toLocaleString()}`
+                            : "—"}
                         </td>
                         <td className="py-1.5 text-right font-black">
                           Rs. {tx.runningBalance.toLocaleString()}
@@ -1431,7 +1476,7 @@ const PendingPayments = () => {
 
       {/* Payment Receipt Modal - Micro Thermal Roll Format */}
       {paymentReceipt && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50 overflow-y-auto print:static print:bg-transparent print:p-0 print:block">
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-[60] overflow-y-auto print:static print:bg-transparent print:p-0 print:block">
           <div className="bg-white text-slate-900 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative print:shadow-none print:w-full print:max-w-none print:rounded-none print:p-0">
             <button
               onClick={() => setPaymentReceipt(null)}

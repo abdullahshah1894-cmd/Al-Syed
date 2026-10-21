@@ -1,6 +1,7 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
-import { Users, Phone, MapPin, Receipt, Clock, Plus, Search, DollarSign, UserCheck, Calendar, X, FileText, ArrowUpRight, Smartphone, ShoppingBag, CheckCircle2, User } from "lucide-react";
+import { Users, Phone, MapPin, Receipt, Clock, Plus, Search, DollarSign, UserCheck, Calendar, X, FileText, ArrowUpRight, Smartphone, ShoppingBag, CheckCircle2, User, Pencil, Trash2 } from "lucide-react";
+import { isSettlement, saleBelongsTo, udhaarAdded } from "../utils/sales";
 
 const Customers = () => {
   const {
@@ -9,13 +10,83 @@ const Customers = () => {
     sales: ctxSales,
     allSales,
     shopSettings,
+    updateCustomer,
+    deleteCustomer,
   } = useApp();
 
-  const customers = allCustomers || ctxCustomers || [];
-  const sales = allSales || ctxSales || [];
+  const customers = useMemo(() => allCustomers || ctxCustomers || [], [allCustomers, ctxCustomers]);
+  const sales = useMemo(() => allSales || ctxSales || [], [allSales, ctxSales]);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedSeller, setSelectedSeller] = useState("All");
   const [selectedLedgerCust, setSelectedLedgerCust] = useState(null);
+  const [editForm, setEditForm] = useState(null); // { id, name, phone, email, address, cnic, sellerName }
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  // A customer belongs to a seller by their assigned seller (exact name);
+  // customers without one go by the seller of their latest sale or receipt
+  const customerSellerMap = useMemo(() => {
+    const map = new Map();
+    customers.forEach((c) => {
+      let owner = (c.sellerName || "").trim().toLowerCase();
+      if (!owner) {
+        let latest = null;
+        sales.forEach((s) => {
+          const seller = (s.sellerName || s.cashierName || "").trim();
+          if (!seller || !saleBelongsTo(s, c)) return;
+          if (!latest || new Date(s.createdAt) > new Date(latest.createdAt)) latest = { createdAt: s.createdAt, seller };
+        });
+        owner = latest ? latest.seller.toLowerCase() : "";
+      }
+      map.set(c.id, owner);
+    });
+    return map;
+  }, [customers, sales]);
+
+  const openEdit = (cust) => {
+    setEditForm({
+      id: cust.id,
+      name: cust.name || "",
+      phone: cust.phone || "",
+      email: cust.email || "",
+      address: cust.address || "",
+      cnic: cust.cnic || "",
+      sellerName: SELLERS.find((s) => s.toLowerCase() === (cust.sellerName || "").trim().toLowerCase()) || cust.sellerName || "",
+    });
+  };
+
+  const handleSaveEdit = async (e) => {
+    e.preventDefault();
+    if (isSavingEdit || !editForm || !editForm.name.trim()) return;
+    setIsSavingEdit(true);
+    try {
+      // Details only — balances are changed by sales and payments, never here
+      const saved = await updateCustomer(editForm.id, {
+        name: editForm.name.trim(),
+        phone: editForm.phone.trim(),
+        email: editForm.email.trim(),
+        address: editForm.address.trim(),
+        cnic: editForm.cnic.trim(),
+        sellerName: editForm.sellerName,
+      });
+      if (saved) {
+        if (selectedLedgerCust?.id === saved.id) setSelectedLedgerCust(saved);
+        setEditForm(null);
+      }
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  const handleDelete = async (cust) => {
+    const pending = Number(cust.totalPending || 0);
+    const warning =
+      pending > 0
+        ? `"${cust.name}" still owes ${shopSettings.currencySymbol} ${pending.toLocaleString()} Udhaar.\n\nDelete this customer anyway? Their sales history is kept.`
+        : `Delete customer "${cust.name}"? Their sales history is kept.`;
+    if (!window.confirm(warning)) return;
+    const ok = await deleteCustomer(cust.id);
+    if (ok && selectedLedgerCust?.id === cust.id) setSelectedLedgerCust(null);
+  };
 
   const filteredCustomers = customers.filter((c) => {
     const q = searchTerm.trim().toLowerCase();
@@ -29,20 +100,15 @@ const Customers = () => {
 
     if (!matchesSearch) return false;
 
-    if (selectedSeller !== "All") {
-      const sLower = selectedSeller.toLowerCase();
-      const isSeller =
-        (c.sellerName || "").toLowerCase().includes(sLower) ||
-        (c.name || "").toLowerCase().includes(sLower);
-      if (!isSeller) return false;
-    }
+    if (selectedSeller !== "All" && customerSellerMap.get(c.id) !== selectedSeller.toLowerCase()) return false;
 
     return true;
   });
 
-  // Quick lookup for Aziz and Mubashir accounts
-  const azizCust = customers.find((c) => c.name && c.name.toLowerCase().includes("aziz"));
-  const mubashirCust = customers.find((c) => c.name && c.name.toLowerCase().includes("mubashir"));
+  // Quick lookup for the Aziz and Mubashir partner accounts (exact customer name)
+  const findByName = (name) => customers.find((c) => (c.name || "").trim().toLowerCase() === name.toLowerCase());
+  const azizCust = findByName("Aziz");
+  const mubashirCust = findByName("Mubashir");
 
   return (
     <div className="p-6 space-y-6">
@@ -120,7 +186,7 @@ const Customers = () => {
               </div>
               <div>
                 <h2 className="text-base font-bold text-slate-100">{azizCust ? azizCust.name : "Aziz"}</h2>
-                <p className="text-xs text-indigo-300 font-semibold">{azizCust ? azizCust.phone : "0300-1111111"}</p>
+                {azizCust?.phone && <p className="text-xs text-indigo-300 font-semibold">{azizCust.phone}</p>}
               </div>
             </div>
             <span className="px-2.5 py-1 bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-[10px] font-bold rounded-full uppercase">
@@ -167,7 +233,7 @@ const Customers = () => {
               </div>
               <div>
                 <h2 className="text-base font-bold text-slate-100">{mubashirCust ? mubashirCust.name : "Mubashir"}</h2>
-                <p className="text-xs text-cyan-300 font-semibold">{mubashirCust ? mubashirCust.phone : "0300-2222222"}</p>
+                {mubashirCust?.phone && <p className="text-xs text-cyan-300 font-semibold">{mubashirCust.phone}</p>}
               </div>
             </div>
             <span className="px-2.5 py-1 bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-[10px] font-bold rounded-full uppercase">
@@ -258,12 +324,28 @@ const Customers = () => {
                   </td>
 
                   <td className="p-3.5 text-right">
-                    <button
-                      onClick={() => setSelectedLedgerCust(cust)}
-                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs inline-flex items-center gap-1 transition-all"
-                    >
-                      <Receipt size={13} /> View Ledger
-                    </button>
+                    <div className="inline-flex items-center gap-1.5">
+                      <button
+                        onClick={() => setSelectedLedgerCust(cust)}
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs inline-flex items-center gap-1 transition-all"
+                      >
+                        <Receipt size={13} /> View Ledger
+                      </button>
+                      <button
+                        onClick={() => openEdit(cust)}
+                        title="Edit customer"
+                        className="p-1.5 bg-slate-800 hover:bg-indigo-600/40 text-indigo-300 rounded-xl transition-all"
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(cust)}
+                        title="Delete customer"
+                        className="p-1.5 bg-slate-800 hover:bg-rose-600/40 text-rose-400 rounded-xl transition-all"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -322,13 +404,7 @@ const Customers = () => {
               <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">Transaction History</h4>
               {(() => {
                 const custSales = sales
-                  .filter((s) => {
-                    if (s.customerId && s.customerId === selectedLedgerCust.id) return true;
-                    if (s.customer && s.customer === selectedLedgerCust.id) return true;
-                    if (selectedLedgerCust.phone && s.customerPhone && s.customerPhone.trim() === selectedLedgerCust.phone.trim()) return true;
-                    if (selectedLedgerCust.name && s.customerName && s.customerName.trim().toLowerCase() === selectedLedgerCust.name.trim().toLowerCase()) return true;
-                    return false;
-                  })
+                  .filter((s) => saleBelongsTo(s, selectedLedgerCust))
                   .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
                 if (custSales.length === 0) {
@@ -339,24 +415,22 @@ const Customers = () => {
                   );
                 }
 
+                // Same rule as the server: a sale adds its due amount, money paid above the bill
+                // goes against the old balance, a settlement lowers it; never below 0
                 let runningUdhaar = 0;
                 const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
                 const rows = custSales.map((record) => {
-                  const isPayment = record.paymentMethod === "Udhaar Settlement";
-                  const isCredit =
-                    (record.paymentMethod || "").toLowerCase().includes("credit") ||
-                    (record.paymentMethod || "").toLowerCase().includes("udhaar") ||
-                    record.paymentMethod === "Pending Bill";
+                  const isPayment = isSettlement(record);
+                  const added = udhaarAdded(record);
+                  const isCredit = !isPayment && added > 0;
 
                   const grandTotal = Number(record.grandTotal || 0);
                   const paidAmount = Number(record.paidAmount || 0);
-                  const dueAmount = Number(record.dueAmount || 0);
 
                   if (isPayment) {
                     runningUdhaar = Math.max(0, runningUdhaar - paidAmount);
-                  } else if (isCredit) {
-                    const netAdded = dueAmount > 0 ? dueAmount : Math.max(0, grandTotal - paidAmount);
-                    runningUdhaar += netAdded;
+                  } else {
+                    runningUdhaar = Math.max(0, runningUdhaar + added - Math.max(0, paidAmount - grandTotal));
                   }
 
                   const d = new Date(record.createdAt);
@@ -438,6 +512,86 @@ const Customers = () => {
                 ));
               })()}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Customer Modal */}
+      {editForm && (
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-[60]">
+          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="font-bold text-slate-100 text-base flex items-center gap-2">
+                <Pencil size={16} className="text-indigo-400" /> Edit Customer
+              </h3>
+              <button
+                onClick={() => !isSavingEdit && setEditForm(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEdit} className="space-y-3">
+              {[
+                { key: "name", label: "Name *", required: true },
+                { key: "phone", label: "Phone" },
+                { key: "address", label: "Address" },
+                { key: "cnic", label: "CNIC" },
+              ].map((f) => (
+                <div key={f.key}>
+                  <label className="text-xs font-semibold text-slate-400">{f.label}</label>
+                  <input
+                    type="text"
+                    required={f.required}
+                    value={editForm[f.key]}
+                    onChange={(e) => setEditForm((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 mt-1"
+                  />
+                </div>
+              ))}
+
+              <div>
+                <label className="text-xs font-semibold text-slate-400">Seller</label>
+                <select
+                  value={editForm.sellerName}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, sellerName: e.target.value }))}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 mt-1"
+                >
+                  <option value="">No seller</option>
+                  {SELLERS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                  {editForm.sellerName && !SELLERS.includes(editForm.sellerName) && (
+                    <option value={editForm.sellerName}>{editForm.sellerName}</option>
+                  )}
+                </select>
+              </div>
+
+              <p className="text-[11px] text-slate-500">
+                Balances are not edited here — they change only through sales and payments.
+              </p>
+
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditForm(null)}
+                  disabled={isSavingEdit}
+                  className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-700 disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingEdit}
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-indigo-600/20 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {isSavingEdit ? "Saving…" : "Save Changes"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

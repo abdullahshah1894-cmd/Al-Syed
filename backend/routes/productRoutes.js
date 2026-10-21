@@ -6,6 +6,7 @@ router.get("/", productController.getProducts);
 router.get("/search/:query", productController.searchByImei);
 router.post("/", productController.createProduct);
 router.put("/:id", productController.updateProduct);
+router.post("/:id/stock", productController.addStock);
 router.delete("/:id", productController.deleteProduct);
 
 module.exports = router;

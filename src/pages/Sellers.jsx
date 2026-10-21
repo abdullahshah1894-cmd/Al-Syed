@@ -1,23 +1,31 @@
 import React, { useState, useMemo } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
 import { User, DollarSign, Clock, Users, Receipt, Search, Eye, Filter } from "lucide-react";
+import { realSales } from "../utils/sales";
+
+const sameName = (a, b) => (a || "").trim().toLowerCase() === (b || "").trim().toLowerCase();
 
 const Sellers = () => {
   const { allSales, allCustomers, shopSettings } = useApp();
   const [selectedSeller, setSelectedSeller] = useState(SELLERS[0] || "");
   const [searchTerm, setSearchTerm] = useState("");
 
+  // All of this seller's records (sales and payment receipts) for the transactions list
   const sellerSales = useMemo(() => {
-    return allSales.filter(s => (s.sellerName || s.cashierName) === selectedSeller);
+    return (allSales || []).filter(s => sameName(s.sellerName || s.cashierName, selectedSeller));
   }, [allSales, selectedSeller]);
 
+  // Customers assigned to this seller (exact name)
   const sellerCustomers = useMemo(() => {
-    return allCustomers.filter(c => c.sellerName === selectedSeller);
+    return (allCustomers || []).filter(c => sameName(c.sellerName, selectedSeller));
   }, [allCustomers, selectedSeller]);
 
-  const totalSales = sellerSales.reduce((acc, s) => acc + s.grandTotal, 0);
-  const totalPaid = sellerSales.reduce((acc, s) => acc + s.paidAmount, 0);
-  const totalPending = sellerSales.reduce((acc, s) => acc + s.dueAmount, 0);
+  // Totals count real sales only (payment receipts are not sales)
+  const sellerRealSales = realSales(sellerSales);
+  const totalSales = sellerRealSales.reduce((acc, s) => acc + Number(s.grandTotal || 0), 0);
+  const totalPaid = sellerRealSales.reduce((acc, s) => acc + Number(s.paidAmount || 0), 0);
+  // Outstanding Udhaar right now (goes down as payments come in)
+  const totalPending = sellerCustomers.reduce((acc, c) => acc + Number(c.totalPending || 0), 0);
 
   const cleanSearch = searchTerm.replace(/[-\s]/g, "").toLowerCase();
 
