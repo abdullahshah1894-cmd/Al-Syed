@@ -8,4 +8,10 @@ export default defineConfig({
     react(),
     tailwindcss()
   ],
+  // In development the frontend calls /api on its own origin; Vite forwards it to the backend
+  server: {
+    proxy: {
+      '/api': 'http://localhost:5000',
+    },
+  },
 })
