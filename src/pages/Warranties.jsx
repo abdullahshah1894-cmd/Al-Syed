@@ -1,7 +1,24 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useApp } from "../context/AppContext";
-import { ShieldCheck, Search, Wrench, X, FileText } from "lucide-react";
+import { ShieldCheck, Search, Wrench, FileText } from "lucide-react";
 import MobileIssues from "./MobileIssues";
+import {
+  Page,
+  PageHeader,
+  Card,
+  Badge,
+  Button,
+  Field,
+  Select,
+  Textarea,
+  Segmented,
+  TableWrap,
+  Th,
+  Td,
+  EmptyState,
+  Modal,
+  inputClass,
+} from "../components/ui";
 
 // Warranty dates are stored as YYYY-MM-DD (or a timestamp): show the local day, "—" when missing
 const showDate = (d) => {
@@ -10,6 +27,21 @@ const showDate = (d) => {
   const date = new Date(d);
   return isNaN(date.getTime()) ? String(d) : date.toLocaleDateString("en-CA");
 };
+
+// Status filter labels (the values stay the stored status names)
+const STATUS_LABELS = {
+  All: "All",
+  Active: "Active",
+  "Expiring Soon": "Expiring soon",
+  Expired: "Expired",
+  Void: "Void",
+  "Pending Claims": "Pending claims",
+};
+
+const statusTone = (status) =>
+  status === "Active" ? "paid" : status === "Expiring Soon" ? "saffron" : "neutral";
+
+const statusLabel = (status) => STATUS_LABELS[status] || status || "—";
 
 const Warranties = () => {
   const { warranties, addWarrantyClaim } = useApp();
@@ -69,266 +101,267 @@ const Warranties = () => {
     }
   };
 
-  const closeClaimModal = () => {
+  // Stable between keystrokes, so the modal does not take focus back from the form fields
+  const closeClaimModal = useCallback(() => {
     if (savingClaim) return;
     setClaimWarranty(null);
-  };
+  }, [savingClaim]);
 
-  return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-sm">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <ShieldCheck size={24} className="text-emerald-400" />
-            <h1 className="text-xl font-bold text-slate-100">Mobile Warranty & Repair System</h1>
-          </div>
-          <p className="text-xs text-slate-400">
-            Track official warranties and manage customer repair tickets
-          </p>
+  // Claims summary shared by the table and the phone cards
+  const claimSummary = (warr) => {
+    const claims = warr.claims || [];
+    const latestClaim = claims.length > 0 ? claims[claims.length - 1] : null;
+    if (!latestClaim) return <span className="text-xs text-muted">No claims</span>;
+    return (
+      <div>
+        <div className="font-medium text-ink">
+          {claims.length} {claims.length === 1 ? "claim" : "claims"}
         </div>
-
-        <div className="flex bg-slate-950 p-1.5 rounded-2xl border border-slate-800 self-start sm:self-auto shrink-0 w-full sm:w-auto">
-          <button 
-             onClick={() => setActiveTab("warranties")}
-             className={`flex-1 sm:flex-none px-4 py-2 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-2 ${activeTab === "warranties" ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30" : "text-slate-400 hover:text-white hover:bg-slate-900"}`}
-          >
-            <ShieldCheck size={16} /> Warranty Tracking
-          </button>
-          <button 
-             onClick={() => setActiveTab("repairs")}
-             className={`flex-1 sm:flex-none px-4 py-2 rounded-xl text-xs font-bold transition-all flex justify-center items-center gap-2 ${activeTab === "repairs" ? "bg-orange-600 text-white shadow-md shadow-orange-600/30" : "text-slate-400 hover:text-white hover:bg-slate-900"}`}
-          >
-            <Wrench size={16} /> Repair Tickets
-          </button>
+        <div
+          className={`text-xs font-semibold ${latestClaim.status === "Pending" ? "text-saffron-700" : "text-muted"}`}
+          title={latestClaim.issue}
+        >
+          Latest: {latestClaim.status || "Pending"}
+          {latestClaim.claimType ? ` (${latestClaim.claimType})` : ""}
         </div>
       </div>
+    );
+  };
+
+  // A void warranty belongs to a returned phone; the server would put the claim on
+  // the IMEI's latest warranty instead, so no claim is logged here
+  const claimAction = (warr, className) =>
+    warr.status === "Void" ? (
+      <span className="text-xs text-muted whitespace-nowrap">Returned, warranty void</span>
+    ) : (
+      <Button variant="secondary" icon={FileText} onClick={() => openClaimModal(warr)} className={className} title="Log warranty claim">
+        Log claim
+      </Button>
+    );
+
+  const emptyState = (
+    <EmptyState
+      icon={ShieldCheck}
+      title="No warranties found"
+      description={
+        searchTerm.trim() || selectedStatusFilter !== "All"
+          ? "Nothing matches this search or filter. Clear the search or pick All."
+          : "Warranties appear here when a phone with an IMEI is sold."
+      }
+    />
+  );
+
+  return (
+    <Page>
+      <PageHeader
+        title="Warranty and repairs"
+        description="Track phone warranties, log claims and manage repair tickets."
+        actions={
+          <Segmented
+            value={activeTab}
+            onChange={setActiveTab}
+            options={[
+              {
+                value: "warranties",
+                label: (
+                  <span className="inline-flex items-center gap-1.5">
+                    <ShieldCheck size={15} aria-hidden="true" /> Warranties
+                  </span>
+                ),
+              },
+              {
+                value: "repairs",
+                label: (
+                  <span className="inline-flex items-center gap-1.5">
+                    <Wrench size={15} aria-hidden="true" /> Repair tickets
+                  </span>
+                ),
+              },
+            ]}
+          />
+        }
+      />
 
       {activeTab === "repairs" ? (
-        <div className="animate-in fade-in zoom-in-95 duration-300">
-          <MobileIssues />
-        </div>
+        <MobileIssues embedded />
       ) : (
-        <div className="space-y-6 animate-in fade-in zoom-in-95 duration-300">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-            <div className="flex items-center gap-2 overflow-x-auto pb-1">
-              {statusOptions.map((st) => (
-                <button
-                  key={st}
-                  onClick={() => setSelectedStatusFilter(st)}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
-                    selectedStatusFilter === st
-                      ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-                      : "bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800"
-                  }`}
-                >
-                  {st}
-                </button>
-              ))}
-            </div>
-            
-            <div className="relative w-full md:w-72 shrink-0">
-              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <Segmented
+              size="sm"
+              value={selectedStatusFilter}
+              onChange={setSelectedStatusFilter}
+              options={statusOptions.map((st) => ({ value: st, label: STATUS_LABELS[st] }))}
+            />
+
+            <div className="relative w-full lg:w-80 shrink-0">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
               <input
                 type="text"
-                placeholder="Search IMEI, Phone, Customer..."
+                placeholder="Search IMEI, phone, customer…"
+                aria-label="Search warranties"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                className={`${inputClass} pl-9`}
               />
             </div>
           </div>
 
-      {/* Warranties Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="text-slate-400 uppercase bg-slate-950/60 rounded-xl">
-              <tr>
-                <th className="p-3.5 font-semibold">IMEI Number</th>
-                <th className="p-3.5 font-semibold">Smartphone Model</th>
-                <th className="p-3.5 font-semibold">Customer Details</th>
-                <th className="p-3.5 font-semibold">Warranty Period</th>
-                <th className="p-3.5 font-semibold">Warranty Type</th>
-                <th className="p-3.5 font-semibold">Claims</th>
-                <th className="p-3.5 font-semibold text-right">Status</th>
-                <th className="p-3.5 font-semibold text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800">
-              {filteredWarranties.length === 0 && (
-                <tr>
-                  <td colSpan="8" className="p-8 text-center text-slate-500 text-xs">
-                    No warranties found.
-                  </td>
-                </tr>
-              )}
-              {filteredWarranties.map((warr) => {
-                const isExpiring = warr.status === "Expiring Soon";
-                const claims = warr.claims || [];
-                const latestClaim = claims.length > 0 ? claims[claims.length - 1] : null;
+          {/* Phones and tablets: one card per warranty */}
+          <div className="space-y-3 lg:hidden">
+            {filteredWarranties.length === 0 ? (
+              <Card padded={false}>{emptyState}</Card>
+            ) : (
+              filteredWarranties.map((warr) => (
+                <Card key={warr.id} className="space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-ink">{warr.productName}</div>
+                      <div className="text-xs text-muted">
+                        {warr.brand} {warr.model}
+                      </div>
+                      <div className="mt-1 font-mono text-xs text-ink-soft break-all">{warr.imei}</div>
+                    </div>
+                    <Badge tone={statusTone(warr.status)}>{statusLabel(warr.status)}</Badge>
+                  </div>
 
-                return (
-                  <tr key={warr.id} className="hover:bg-slate-800/40 transition-colors">
-                    <td className="p-3.5 font-mono font-bold text-cyan-400">
-                      {warr.imei}
-                    </td>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="min-w-0">
+                      <div className="text-xs text-muted">Customer</div>
+                      <div className="font-medium text-ink truncate">{warr.customerName || "Walk-in customer"}</div>
+                      <div className="text-xs text-muted">{warr.customerPhone || "No phone"}</div>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs text-muted">{warr.warrantyType || "Warranty"}</div>
+                      <div className="text-ink-soft">From {showDate(warr.warrantyStartDate || warr.purchaseDate)}</div>
+                      <div className="font-semibold text-ink">Until {showDate(warr.warrantyExpiryDate)}</div>
+                    </div>
+                  </div>
 
-                    <td className="p-3.5">
-                      <div className="font-bold text-slate-100">{warr.productName}</div>
-                      <div className="text-[11px] text-slate-400">{warr.brand} {warr.model}</div>
-                    </td>
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3">
+                    {claimSummary(warr)}
+                    {claimAction(warr)}
+                  </div>
+                </Card>
+              ))
+            )}
+          </div>
 
-                    <td className="p-3.5">
-                      <div className="font-semibold text-slate-200">{warr.customerName || "Walk-in Customer"}</div>
-                      <div className="text-[11px] text-slate-400">{warr.customerPhone || "No phone"}</div>
-                    </td>
-
-                    <td className="p-3.5 text-slate-300">
-                      <div>Start: {showDate(warr.warrantyStartDate || warr.purchaseDate)}</div>
-                      <div className="font-semibold text-indigo-300">Expiry: {showDate(warr.warrantyExpiryDate)}</div>
-                    </td>
-
-                    <td className="p-3.5">
-                      <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-950 text-indigo-300 border border-slate-800">
-                        {warr.warrantyType || "—"}
-                      </span>
-                    </td>
-
-                    <td className="p-3.5">
-                      {latestClaim ? (
-                        <div>
-                          <div className="font-semibold text-slate-200">{claims.length} claim(s)</div>
-                          <div
-                            className={`text-[11px] font-bold ${
-                              latestClaim.status === "Pending" ? "text-amber-300" : "text-slate-400"
-                            }`}
-                            title={latestClaim.issue}
-                          >
-                            Latest: {latestClaim.status || "Pending"}
-                            {latestClaim.claimType ? ` (${latestClaim.claimType})` : ""}
-                          </div>
-                        </div>
-                      ) : (
-                        <span className="text-[11px] text-slate-500">No claims</span>
-                      )}
-                    </td>
-
-                    <td className="p-3.5 text-right">
-                      <span
-                        className={`font-bold px-3 py-1 rounded-full text-xs ${
-                          warr.status === "Active"
-                            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                            : isExpiring
-                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
-                            : "bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                        }`}
-                      >
-                        {warr.status}
-                      </span>
-                    </td>
-
-                    <td className="p-3.5 text-right">
-                      {/* A void warranty belongs to a returned phone; the server would put the claim on
-                          the IMEI's latest warranty instead, so no claim is logged here */}
-                      {warr.status === "Void" ? (
-                        <span className="text-[11px] text-slate-500 whitespace-nowrap">Returned — void</span>
-                      ) : (
-                        <button
-                          onClick={() => openClaimModal(warr)}
-                          className="px-3 py-1.5 bg-slate-950 hover:bg-slate-800 text-indigo-300 border border-slate-800 rounded-xl text-[11px] font-bold transition-colors whitespace-nowrap"
-                          title="Log Warranty Claim"
-                        >
-                          Log Claim
-                        </button>
-                      )}
-                    </td>
+          {/* Desktop: table */}
+          <Card className="hidden lg:block">
+            {filteredWarranties.length === 0 ? (
+              emptyState
+            ) : (
+              <TableWrap>
+                <thead>
+                  <tr>
+                    <Th>IMEI</Th>
+                    <Th>Phone</Th>
+                    <Th>Customer</Th>
+                    <Th>Warranty period</Th>
+                    <Th>Type</Th>
+                    <Th>Claims</Th>
+                    <Th className="text-right">Status</Th>
+                    <Th className="text-right">Action</Th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
+                </thead>
+                <tbody>
+                  {filteredWarranties.map((warr) => (
+                    <tr key={warr.id} className="hover:bg-sunken/60 transition-colors">
+                      <Td className="font-mono text-xs text-ink-soft whitespace-nowrap">{warr.imei}</Td>
+
+                      <Td>
+                        <div className="font-semibold text-ink">{warr.productName}</div>
+                        <div className="text-xs text-muted">
+                          {warr.brand} {warr.model}
+                        </div>
+                      </Td>
+
+                      <Td>
+                        <div className="font-medium text-ink">{warr.customerName || "Walk-in customer"}</div>
+                        <div className="text-xs text-muted">{warr.customerPhone || "No phone"}</div>
+                      </Td>
+
+                      <Td className="whitespace-nowrap">
+                        <div className="text-ink-soft">From {showDate(warr.warrantyStartDate || warr.purchaseDate)}</div>
+                        <div className="font-semibold text-ink">Until {showDate(warr.warrantyExpiryDate)}</div>
+                      </Td>
+
+                      <Td>
+                        <Badge tone="brand">{warr.warrantyType || "—"}</Badge>
+                      </Td>
+
+                      <Td>{claimSummary(warr)}</Td>
+
+                      <Td className="text-right">
+                        <Badge tone={statusTone(warr.status)}>{statusLabel(warr.status)}</Badge>
+                      </Td>
+
+                      <Td className="text-right">{claimAction(warr)}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </TableWrap>
+            )}
+          </Card>
         </div>
       )}
 
       {/* Log Claim Modal */}
       {claimWarranty && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div>
-                <h3 className="font-bold text-slate-100 text-base flex items-center gap-2">
-                  <FileText size={18} className="text-indigo-400" /> Log Warranty Claim
-                </h3>
-                <p className="text-[11px] text-slate-400">
-                  {claimWarranty.productName} • <span className="font-mono text-cyan-400">{claimWarranty.imei}</span>
-                </p>
-              </div>
-              <button onClick={closeClaimModal} className="text-slate-400 hover:text-white">
-                <X size={20} />
-              </button>
-            </div>
+        <Modal
+          open
+          onClose={closeClaimModal}
+          size="sm"
+          title="Log warranty claim"
+          description={
+            <>
+              {claimWarranty.productName} · <span className="font-mono">{claimWarranty.imei}</span>
+            </>
+          }
+          footer={
+            <>
+              <Button variant="secondary" onClick={closeClaimModal} disabled={savingClaim}>
+                Cancel
+              </Button>
+              <Button type="submit" form="warranty-claim-form" loading={savingClaim}>
+                {savingClaim ? "Saving…" : "Save claim"}
+              </Button>
+            </>
+          }
+        >
+          <form id="warranty-claim-form" onSubmit={handleClaimSubmit} className="space-y-4">
+            <Field label="Issue" htmlFor="claim-issue">
+              <Textarea
+                id="claim-issue"
+                required
+                rows={3}
+                value={claimIssue}
+                onChange={(e) => setClaimIssue(e.target.value)}
+                placeholder="What is wrong with the phone?"
+              />
+            </Field>
 
-            <form onSubmit={handleClaimSubmit} className="space-y-3 text-xs">
-              <div>
-                <label className="font-semibold text-slate-400">Issue *</label>
-                <textarea
-                  required
-                  rows={3}
-                  value={claimIssue}
-                  onChange={(e) => setClaimIssue(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500 resize-none"
-                  placeholder="Describe the fault..."
-                />
-              </div>
+            <Field label="Claim type" htmlFor="claim-type">
+              <Select id="claim-type" value={claimType} onChange={(e) => setClaimType(e.target.value)}>
+                <option value="Brand">Brand (official service centre)</option>
+                <option value="Shop">Shop</option>
+              </Select>
+            </Field>
 
-              <div>
-                <label className="font-semibold text-slate-400">Claim Type</label>
-                <select
-                  value={claimType}
-                  onChange={(e) => setClaimType(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                >
-                  <option value="Brand">Brand (Official Service Center)</option>
-                  <option value="Shop">Shop</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="font-semibold text-slate-400">Notes</label>
-                <textarea
-                  rows={2}
-                  value={claimNotes}
-                  onChange={(e) => setClaimNotes(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500 resize-none"
-                  placeholder="Optional notes..."
-                />
-              </div>
-
-              <div className="pt-3 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={closeClaimModal}
-                  disabled={savingClaim}
-                  className="px-4 py-2 bg-slate-800 text-slate-300 font-bold rounded-xl disabled:opacity-60"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingClaim}
-                  className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-500 disabled:opacity-50 shadow"
-                >
-                  {savingClaim ? "Saving..." : "Save Claim"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+            <Field label="Notes" htmlFor="claim-notes" hint="Optional">
+              <Textarea
+                id="claim-notes"
+                rows={2}
+                value={claimNotes}
+                onChange={(e) => setClaimNotes(e.target.value)}
+                placeholder="Anything the shop should remember"
+              />
+            </Field>
+          </form>
+        </Modal>
       )}
-    </div>
+    </Page>
   );
 };
 

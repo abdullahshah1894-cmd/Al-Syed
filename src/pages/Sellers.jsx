@@ -4,6 +4,7 @@ import { useAuth } from "../context/AuthContext";
 import {
   User, DollarSign, Clock, Users, Receipt, Search, TrendingUp, ShoppingBag, HandCoins, Undo2, CalendarDays,
 } from "lucide-react";
+import { Page, PageHeader, Card, CardHeader, Badge, Input, Segmented, TableWrap, Th, Td, EmptyState } from "../components/ui";
 import { isSettlement, realSales, saleBelongsTo, totalProfit, udhaarAdded } from "../utils/sales";
 import { localDate, isBetween } from "../utils/dates";
 
@@ -19,6 +20,7 @@ const netItems = (s) =>
 const inRange = (day, range) => !!day && (!range.from || day >= range.from) && (!range.to || day <= range.to);
 
 const RANGES = ["Today", "This Week", "This Month", "All Time", "Custom"];
+const RANGE_LABELS = { Today: "Today", "This Week": "This week", "This Month": "This month", "All Time": "All time", Custom: "Custom" };
 
 // Local-date bounds (YYYY-MM-DD, inclusive) of a range preset
 const rangeOf = (preset, customFrom, customTo, today = localDate()) => {
@@ -96,7 +98,7 @@ const Sellers = () => {
   const rangeLabel =
     preset === "Custom"
       ? `${range.from || "start"} → ${range.to || "today"}`
-      : preset;
+      : RANGE_LABELS[preset] || preset;
 
   const stats = useMemo(
     () => Object.fromEntries(SELLERS.map((seller) => [seller, sellerStats(allSales, seller, range)])),
@@ -146,239 +148,261 @@ const Sellers = () => {
   );
 
   const metricRows = (st) => [
-    { label: "Bills", value: st.bills.toLocaleString(), icon: Receipt, color: "text-indigo-400" },
-    { label: "Revenue", value: fmt(st.revenue), icon: DollarSign, color: "text-emerald-400" },
-    ...(isAdmin ? [{ label: "Profit", value: fmt(st.profit), icon: TrendingUp, color: st.profit < 0 ? "text-rose-400" : "text-indigo-300" }] : []),
-    { label: "Items Sold", value: st.items.toLocaleString(), icon: ShoppingBag, color: "text-cyan-400" },
-    { label: "Avg Bill", value: fmt(st.avgBill), icon: DollarSign, color: "text-amber-400" },
-    { label: "Udhaar Given", value: fmt(st.udhaarGiven), icon: Clock, color: "text-rose-400" },
-    { label: "Udhaar Collected", value: fmt(st.udhaarCollected), sub: `${st.collections} payment(s)`, icon: HandCoins, color: "text-emerald-400" },
-    { label: "Returns", value: fmt(st.returnsAmount), sub: `${st.returnsCount} return(s)`, icon: Undo2, color: "text-orange-400" },
-    { label: "Customers", value: st.customers.toLocaleString(), sub: st.walkIns ? `+ ${st.walkIns} walk-in bill(s)` : "", icon: Users, color: "text-cyan-300" },
+    { label: "Bills", value: st.bills.toLocaleString(), icon: Receipt },
+    { label: "Revenue", value: fmt(st.revenue), icon: DollarSign, tone: "text-ink" },
+    ...(isAdmin ? [{ label: "Profit", value: fmt(st.profit), icon: TrendingUp, tone: st.profit < 0 ? "text-saffron-700" : "text-paid-600" }] : []),
+    { label: "Items sold", value: st.items.toLocaleString(), icon: ShoppingBag },
+    { label: "Average bill", value: fmt(st.avgBill), icon: DollarSign },
+    { label: "Udhaar given", value: fmt(st.udhaarGiven), icon: Clock, tone: st.udhaarGiven > 0 ? "text-khata-600" : undefined },
+    { label: "Udhaar collected", value: fmt(st.udhaarCollected), sub: `${st.collections} payment(s)`, icon: HandCoins, tone: "text-paid-600" },
+    { label: "Returns", value: fmt(st.returnsAmount), sub: `${st.returnsCount} return(s)`, icon: Undo2, tone: st.returnsCount > 0 ? "text-saffron-700" : undefined },
+    { label: "Customers", value: st.customers.toLocaleString(), sub: st.walkIns ? `+ ${st.walkIns} walk-in bill(s)` : "", icon: Users },
   ];
 
-  return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-sm">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <User size={24} className="text-indigo-400" />
-            <h1 className="text-xl font-bold text-slate-100">Sellers Performance</h1>
-          </div>
-          <p className="text-xs text-slate-400">
-            Bills, revenue, Udhaar, returns and customers for each seller — {rangeLabel}
-          </p>
-        </div>
+  const typeBadge = (sale, settlement, returned) =>
+    settlement ? (
+      <Badge tone="paid">Udhaar payment</Badge>
+    ) : returned ? (
+      <Badge tone="saffron">Returned</Badge>
+    ) : (
+      <Badge>{sale.paymentMethod}</Badge>
+    );
+  const saleDate = (sale) =>
+    new Date(sale.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
 
-        <div className="flex flex-col items-start lg:items-end gap-2">
-          <div className="flex items-center gap-1.5 bg-slate-950 p-1.5 rounded-2xl border border-slate-800 flex-wrap">
-            {RANGES.map((r) => (
-              <button
-                key={r}
-                onClick={() => setPreset(r)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
-                  preset === r ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/30" : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-                }`}
-              >
-                {r}
-              </button>
-            ))}
+  return (
+    <Page>
+      <PageHeader
+        title="Sellers"
+        description={`Bills, revenue, Udhaar, returns and customers for each seller · ${rangeLabel}`}
+      />
+
+      {/* Date filter */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+        <Segmented options={RANGES.map((r) => ({ value: r, label: RANGE_LABELS[r] || r }))} value={preset} onChange={setPreset} className="self-start" />
+        {preset === "Custom" && (
+          <div className="flex flex-wrap items-center gap-2 text-sm text-ink-soft">
+            <CalendarDays size={16} className="text-muted" aria-hidden="true" />
+            <Input
+              type="date"
+              aria-label="From date"
+              value={customFrom}
+              max={customTo || undefined}
+              onChange={(e) => setCustomFrom(e.target.value)}
+              className="w-auto min-w-[9.5rem]"
+            />
+            <span>to</span>
+            <Input
+              type="date"
+              aria-label="To date"
+              value={customTo}
+              min={customFrom || undefined}
+              onChange={(e) => setCustomTo(e.target.value)}
+              className="w-auto min-w-[9.5rem]"
+            />
           </div>
-          {preset === "Custom" && (
-            <div className="flex items-center gap-2 text-xs text-slate-400">
-              <CalendarDays size={14} className="text-indigo-400" />
-              <input
-                type="date"
-                value={customFrom}
-                max={customTo || undefined}
-                onChange={(e) => setCustomFrom(e.target.value)}
-                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-              />
-              <span>to</span>
-              <input
-                type="date"
-                value={customTo}
-                min={customFrom || undefined}
-                onChange={(e) => setCustomTo(e.target.value)}
-                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-              />
-            </div>
-          )}
-        </div>
+        )}
       </div>
 
       {/* Seller cards (click to select) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {SELLERS.map((seller) => {
           const st = stats[seller];
           const active = seller === selectedSeller;
           return (
-            <div
+            <button
+              type="button"
               key={seller}
               onClick={() => setSelectedSeller(seller)}
-              className={`bg-slate-900 border rounded-3xl p-5 shadow-sm cursor-pointer transition-all ${
-                active ? "border-indigo-500/70 shadow-indigo-500/10" : "border-slate-800 hover:border-slate-700"
+              aria-pressed={active}
+              className={`text-left w-full bg-surface border rounded-2xl p-4 sm:p-5 shadow-card transition-colors ${
+                active ? "border-brand-500 ring-2 ring-brand-100" : "border-line hover:border-brand-200"
               }`}
             >
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center border ${active ? "bg-indigo-600 border-indigo-500 text-white" : "bg-slate-800 border-slate-700 text-slate-300"}`}>
-                    <User size={18} />
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className={`w-10 h-10 shrink-0 rounded-xl flex items-center justify-center ${
+                      active ? "bg-brand-600 text-white" : "bg-sunken text-ink-soft"
+                    }`}
+                  >
+                    <User size={18} aria-hidden="true" />
                   </div>
-                  <div>
-                    <div className="font-bold text-slate-100">{seller}</div>
-                    <div className="text-[11px] text-slate-500">
+                  <div className="min-w-0">
+                    <div className="font-display text-lg font-bold text-ink leading-tight">{seller}</div>
+                    <div className="text-xs text-muted">
                       {st.lastSale
                         ? `Last sale ${new Date(st.lastSale.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
                         : "No sales in this period"}
                     </div>
                   </div>
                 </div>
-                {active && (
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                    Selected
-                  </span>
-                )}
+                {active && <Badge tone="brand">Selected</Badge>}
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {metricRows(st).map(({ label, value, sub, icon: Icon, color }) => (
-                  <div key={label} className="p-3 bg-slate-950/60 rounded-2xl border border-slate-800">
-                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                      <Icon size={12} className={color} /> {label}
+                {metricRows(st).map(({ label, value, sub, icon: Icon, tone }) => (
+                  <div key={label} className="p-3 bg-sunken rounded-xl min-w-0">
+                    <div className="flex items-center gap-1.5 text-xs font-medium text-muted">
+                      <Icon size={13} aria-hidden="true" /> {label}
                     </div>
-                    <div className={`text-sm font-black mt-1 ${color}`}>{value}</div>
-                    {sub && <div className="text-[10px] text-slate-500">{sub}</div>}
+                    <div className={`mt-1 text-sm sm:text-base font-bold tabular-nums break-words ${tone || "text-ink"}`}>{value}</div>
+                    {sub && <div className="text-[11px] text-muted">{sub}</div>}
                   </div>
                 ))}
               </div>
-            </div>
+            </button>
           );
         })}
       </div>
 
       {otherBills > 0 && (
-        <p className="text-xs text-amber-400">
+        <p className="text-sm text-saffron-700 bg-saffron-50 border border-saffron-100 rounded-xl px-3 py-2">
           {otherBills} bill(s) in this period have no seller or a different seller name and are not counted above.
         </p>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left: Customers List */}
-        <div className="lg:col-span-1 bg-slate-900 border border-slate-800 rounded-3xl p-5 flex flex-col h-[600px]">
-          <h2 className="text-sm font-bold text-slate-100 mb-1 flex items-center gap-2">
-            <Users size={16} className="text-indigo-400" /> Customers of {selectedSeller}
-          </h2>
-          <p className="text-[11px] text-slate-500 mb-4">
-            {sellerCustomers.length} customer(s) • Udhaar owed today {fmt(sellerCustomersPending)} (current
-            balances, not limited to {rangeLabel})
-          </p>
-          <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-2">
+        {/* Customers list */}
+        <Card className="lg:col-span-1 flex flex-col lg:h-[600px]">
+          <CardHeader
+            className="mb-3"
+            title={`Customers of ${selectedSeller}`}
+            description={`${sellerCustomers.length} customer(s) · Udhaar owed today ${fmt(sellerCustomersPending)} (current balances, not limited to ${rangeLabel})`}
+          />
+          <div className="flex-1 max-h-[420px] lg:max-h-none overflow-y-auto -mx-1 px-1 custom-scrollbar">
             {sellerCustomers.length === 0 ? (
-              <div className="text-center py-10 text-slate-500 text-sm">No customers yet</div>
+              <EmptyState icon={Users} title="No customers yet" description={`Customers who buy from ${selectedSeller} will show here.`} />
             ) : (
-              sellerCustomers.map((c) => (
-                <div key={c.id} className="p-3 bg-slate-950 rounded-xl border border-slate-800">
-                  <div className="font-bold text-slate-100 text-sm">{c.name}</div>
-                  <div className="text-xs text-slate-400">{c.phone || "No phone"}</div>
-                  <div className="mt-2 flex justify-between items-center text-xs">
-                    <span className="text-slate-500">Udhaar:</span>
-                    <span className={num(c.totalPending) > 0 ? "text-rose-400 font-bold" : "text-emerald-400 font-bold"}>
-                      {fmt(c.totalPending)}
-                    </span>
-                  </div>
-                </div>
-              ))
+              <ul className="divide-y divide-line">
+                {sellerCustomers.map((c) => (
+                  <li key={c.id} className="py-3 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-ink text-sm truncate">{c.name}</div>
+                      <div className="text-xs text-muted">{c.phone || "No phone"}</div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-[11px] text-muted">Udhaar</div>
+                      <span className={`text-sm font-semibold tabular-nums ${num(c.totalPending) > 0 ? "text-khata-600" : "text-paid-600"}`}>
+                        {fmt(c.totalPending)}
+                      </span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
-        </div>
+        </Card>
 
-        {/* Right: Transactions in the range */}
-        <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-3xl p-5 flex flex-col h-[600px]">
+        {/* Transactions in the range */}
+        <Card className="lg:col-span-2 flex flex-col lg:h-[600px]">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 mb-4">
-            <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-              <Receipt size={16} className="text-indigo-400" /> {selectedSeller}'s Transactions
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-800 text-slate-300">
-                {filteredTransactions.length} • {rangeLabel}
-              </span>
-            </h2>
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <h2 className="text-base font-semibold">{selectedSeller}&apos;s bills and payments</h2>
+              <Badge>
+                {filteredTransactions.length} · {rangeLabel}
+              </Badge>
+            </div>
             <div className="relative w-full sm:w-64">
-              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" aria-hidden="true" />
+              <Input
                 type="text"
-                placeholder="Search bill or customer..."
+                aria-label="Search bill or customer"
+                placeholder="Search bill or customer"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-8 pr-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                className="pl-9"
               />
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto custom-scrollbar">
-            <table className="w-full text-left text-xs">
-              <thead className="text-slate-400 uppercase bg-slate-950 sticky top-0 z-10">
-                <tr>
-                  <th className="p-3 font-semibold">Bill #</th>
-                  <th className="p-3 font-semibold">Customer</th>
-                  <th className="p-3 font-semibold">Date</th>
-                  <th className="p-3 font-semibold">Type</th>
-                  <th className="p-3 font-semibold">Amount</th>
-                  <th className="p-3 font-semibold">Due</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/50">
-                {filteredTransactions.length === 0 ? (
-                  <tr>
-                    <td colSpan="6" className="p-8 text-center text-slate-500">No transactions in this period</td>
-                  </tr>
-                ) : (
-                  filteredTransactions.map((sale) => {
-                    const settlement = isSettlement(sale);
-                    const returned = sale.paymentStatus === "returned";
-                    const returnedAmount = sumBy(sale.returns, (r) => r.amount);
-                    return (
-                      <tr key={sale.id} className="hover:bg-slate-800/30 transition-colors">
-                        <td className="p-3 font-mono text-indigo-400">{sale.billNumber}</td>
-                        <td className="p-3 font-semibold text-slate-200">{sale.customerName}</td>
-                        <td className="p-3 text-slate-400">
-                          {new Date(sale.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}
-                        </td>
-                        <td className="p-3">
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] ${
-                              settlement
-                                ? "bg-emerald-500/15 text-emerald-300"
-                                : returned
-                                ? "bg-orange-500/15 text-orange-300"
-                                : "bg-slate-800 text-slate-300"
-                            }`}
-                          >
-                            {settlement ? "Udhaar Payment" : returned ? "Returned" : sale.paymentMethod}
-                          </span>
-                          {!settlement && !returned && returnedAmount > 0 && (
-                            <div className="text-[10px] text-orange-300 mt-0.5">Returned {fmt(returnedAmount)}</div>
-                          )}
-                        </td>
-                        <td className={`p-3 font-bold ${settlement ? "text-emerald-400" : "text-slate-200"}`}>
+          {filteredTransactions.length === 0 ? (
+            <EmptyState icon={Receipt} title="No bills in this period" description="Pick another date range or seller." />
+          ) : (
+            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+              {/* Phones: cards */}
+              <ul className="sm:hidden divide-y divide-line">
+                {filteredTransactions.map((sale) => {
+                  const settlement = isSettlement(sale);
+                  const returned = sale.paymentStatus === "returned";
+                  const returnedAmount = sumBy(sale.returns, (r) => r.amount);
+                  return (
+                    <li key={sale.id} className="py-3 space-y-1.5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="font-semibold text-ink text-sm truncate">{sale.customerName}</div>
+                          <div className="font-mono text-xs text-brand-700">{sale.billNumber}</div>
+                        </div>
+                        <div className={`text-sm font-bold tabular-nums shrink-0 ${settlement ? "text-paid-600" : "text-ink"}`}>
                           {fmt(settlement ? sale.paidAmount : sale.grandTotal)}
-                        </td>
-                        <td className="p-3">
-                          {!settlement && num(sale.dueAmount) > 0 ? (
-                            <span className="text-rose-400 font-bold">{fmt(sale.dueAmount)}</span>
-                          ) : (
-                            <span className="text-slate-500">-</span>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {typeBadge(sale, settlement, returned)}
+                          {!settlement && !returned && returnedAmount > 0 && (
+                            <span className="text-saffron-700">Returned {fmt(returnedAmount)}</span>
                           )}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+                        </div>
+                        {!settlement && num(sale.dueAmount) > 0 && (
+                          <span className="text-khata-600 font-semibold">Due {fmt(sale.dueAmount)}</span>
+                        )}
+                      </div>
+                      <div className="text-xs text-muted">{saleDate(sale)}</div>
+                    </li>
+                  );
+                })}
+              </ul>
+
+              {/* Tablet and up: table */}
+              <div className="hidden sm:block">
+                <TableWrap>
+                  <thead className="sticky top-0 z-10">
+                    <tr>
+                      <Th>Bill #</Th>
+                      <Th>Customer</Th>
+                      <Th>Date</Th>
+                      <Th>Type</Th>
+                      <Th className="text-right">Amount</Th>
+                      <Th className="text-right">Due</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredTransactions.map((sale) => {
+                      const settlement = isSettlement(sale);
+                      const returned = sale.paymentStatus === "returned";
+                      const returnedAmount = sumBy(sale.returns, (r) => r.amount);
+                      return (
+                        <tr key={sale.id} className="hover:bg-sunken/60 transition-colors">
+                          <Td className="font-mono text-xs text-brand-700 whitespace-nowrap">{sale.billNumber}</Td>
+                          <Td className="font-semibold text-ink">{sale.customerName}</Td>
+                          <Td className="text-xs text-muted whitespace-nowrap">{saleDate(sale)}</Td>
+                          <Td>
+                            {typeBadge(sale, settlement, returned)}
+                            {!settlement && !returned && returnedAmount > 0 && (
+                              <div className="text-[11px] text-saffron-700 mt-0.5 whitespace-nowrap">Returned {fmt(returnedAmount)}</div>
+                            )}
+                          </Td>
+                          <Td className={`text-right font-semibold tabular-nums whitespace-nowrap ${settlement ? "text-paid-600" : "text-ink"}`}>
+                            {fmt(settlement ? sale.paidAmount : sale.grandTotal)}
+                          </Td>
+                          <Td className="text-right whitespace-nowrap">
+                            {!settlement && num(sale.dueAmount) > 0 ? (
+                              <span className="text-khata-600 font-semibold tabular-nums">{fmt(sale.dueAmount)}</span>
+                            ) : (
+                              <span className="text-muted">-</span>
+                            )}
+                          </Td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </TableWrap>
+              </div>
+            </div>
+          )}
+        </Card>
       </div>
-    </div>
+    </Page>
   );
 };
 

@@ -1,12 +1,19 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
 import {
   ShoppingCart, Search, Plus, Minus, Trash2, UserPlus, Printer,
-  CheckCircle2, Smartphone, X, AlertCircle, User, ChevronDown,
+  CheckCircle2, Share2, X, AlertCircle, User, ChevronDown, PackageSearch,
 } from "lucide-react";
 
 import { printElement } from "../services/printReceipt";
 import { useShareImage } from "../components/useShareImage";
+import {
+  Badge, Button, EmptyState, Field, IconButton, Input, Modal, Money, Segmented, Textarea, inputClass,
+} from "../components/ui";
+
+const cx = (...parts) => parts.filter(Boolean).join(" ");
+// "Rs. 12,500" for the big totals (the number and the currency are styled separately)
+const fmt = (n) => (Number(n) || 0).toLocaleString("en-PK", { maximumFractionDigits: 2 });
 
 // Kept for older importers; the helper now lives in utils/shareImage
 // eslint-disable-next-line react-refresh/only-export-components
@@ -54,6 +61,15 @@ const POS = () => {
   // Receipt modal
   const [completedSaleInvoice, setCompletedSaleInvoice] = useState(null);
   const [openShare, shareDialog] = useShareImage();
+
+  // Phones / tablets: the cart opens over the products from the bottom bar
+  const [cartOpen, setCartOpen] = useState(false);
+  // A finished sale closes the phone cart, so the receipt is what the seller sees next
+  if (completedSaleInvoice && cartOpen) setCartOpen(false);
+
+  // Stable close handlers: the shared Modal refocuses itself whenever onClose changes
+  const closeAddCustomer = useCallback(() => setShowAddCustomerModal(false), []);
+  const closeCheckout = useCallback(() => setShowCheckoutModal(false), []);
 
   const customerDropdownRef = useRef(null);
 
@@ -241,11 +257,11 @@ const POS = () => {
     setMultiAddQty("1");
     setProductToAdd(product);
   };
-  const closeAddToCart = () => {
+  const closeAddToCart = useCallback(() => {
     setProductToAdd(null);
     setMultiAddImeis([]);
     setMultiAddQty("1");
-  };
+  }, []);
 
   const removeFromCart = (cartId) => setCart((prev) => prev.filter((i) => i.cartId !== cartId));
 
@@ -448,126 +464,132 @@ const POS = () => {
   };
 
   // ── UI ─────────────────────────────────────────────────────────
+  const cartCount = cart.reduce((n, item) => n + item.quantity, 0);
+  const cartCountLabel = `${cartCount} item${cartCount === 1 ? "" : "s"}`;
+  const sellerOptions = SELLERS.map((s) => ({ value: s, label: s }));
+  const pickSeller = (seller) => {
+    setSelectedSeller(seller);
+    setSelectedCustomer(null);
+    setCustomerSearch("");
+  };
+
   return (
     <>
-      <div className={`flex h-full overflow-hidden ${completedSaleInvoice ? "print:hidden" : ""}`}>
+      <div className={`lg:flex lg:h-[calc(100dvh-4rem-1px)] lg:overflow-hidden ${completedSaleInvoice ? "print:hidden" : ""}`}>
 
-      {/* ── Left: Product Catalog ─────────────────────────────── */}
-      <div className="flex-1 flex flex-col overflow-hidden border-r border-slate-800">
-
-        {/* Seller Selection Bar */}
-        <div className="bg-slate-900 border-b border-slate-800 px-4 py-3 flex items-center gap-3">
-          <User size={16} className="text-indigo-400 shrink-0" />
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider shrink-0">Seller:</span>
-          <div className="flex gap-2">
-            {SELLERS.map((seller) => (
-              <button
-                key={seller}
-                onClick={() => {
-                  setSelectedSeller(seller);
-                  setSelectedCustomer(null);
-                  setCustomerSearch("");
-                }}
-                className={`px-4 py-1.5 rounded-xl text-sm font-bold transition-all ${
-                  selectedSeller === seller
-                    ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/30"
-                    : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                }`}
-              >
-                {seller}
-              </button>
-            ))}
+      {/* ── Left: products ───────────────────────────────────── */}
+      <section className="flex-1 min-w-0 flex flex-col lg:overflow-hidden" aria-label="Products">
+        <div className="bg-surface border-b border-line px-4 sm:px-6 py-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h1 className="hidden lg:block text-2xl font-bold leading-tight">New sale</h1>
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-xs font-semibold text-ink-soft shrink-0">Seller</span>
+              <Segmented options={sellerOptions} value={selectedSeller} onChange={pickSeller} />
+            </div>
           </div>
-          <div className="ml-auto text-xs text-slate-500">
-            Active Seller: <span className="text-indigo-400 font-bold">{selectedSeller}</span>
-          </div>
-        </div>
-
-        {/* Product Search */}
-        <div className="bg-slate-900/60 px-4 py-3 border-b border-slate-800">
           <div className="relative">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
             <input
-              type="text"
-              placeholder="Search products by name, brand, barcode, IMEI..."
+              type="search"
+              placeholder="Search by name, brand, barcode or IMEI"
+              aria-label="Search products"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-9 pr-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500"
+              className={cx(inputClass, "pl-9")}
             />
           </div>
         </div>
 
-        {/* Products Grid */}
-        <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+        <div className="flex-1 min-h-0 lg:overflow-y-auto custom-scrollbar px-4 sm:px-6 pt-4 pb-28 lg:pb-6">
           {filteredProducts.length === 0 ? (
-            <div className="text-center py-20 text-slate-500">
-              <ShoppingCart size={48} className="mx-auto mb-3 opacity-30" />
-              <p>No products found</p>
-            </div>
+            <EmptyState
+              icon={PackageSearch}
+              title={products.length === 0 ? "No products yet" : "No products found"}
+              description={
+                products.length === 0
+                  ? "Add products in Inventory, then sell them here."
+                  : "Nothing matches your search. Try a name, brand, barcode or IMEI."
+              }
+            />
           ) : (
-            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
               {filteredProducts.map((product) => {
                 const inStockImeis = (product.imeis || []).filter((i) => i.status === "in_stock").length;
                 const available = product.imeis && product.imeis.length > 0 ? inStockImeis : product.quantity;
                 const outOfStock = available <= 0;
+                const lowStock = !outOfStock && available <= Number(product.minStockAlert || 0);
                 return (
                   <button
+                    type="button"
                     key={product.id}
                     onClick={() => !outOfStock && openAddToCart(product)}
                     disabled={outOfStock}
-                    className={`text-left p-3 rounded-2xl border transition-all group ${
+                    className={cx(
+                      "text-left p-3 rounded-2xl border bg-surface flex flex-col gap-1 min-h-[7.5rem] transition-colors",
                       outOfStock
-                        ? "bg-slate-900/30 border-slate-800/50 opacity-50 cursor-not-allowed"
-                        : "bg-slate-900 border-slate-800 hover:border-indigo-500/50 hover:bg-slate-800 active:scale-[0.98] cursor-pointer"
-                    }`}
+                        ? "border-line opacity-60 cursor-not-allowed"
+                        : "border-line shadow-card hover:border-brand-300 hover:bg-brand-50/40 cursor-pointer"
+                    )}
                   >
-                    <div className="font-semibold text-slate-100 text-sm leading-snug line-clamp-2">{product.name}</div>
-                    <div className="text-[11px] text-slate-400 mt-0.5">{product.brand} {product.model}</div>
-                    <div className="mt-2 flex items-center justify-between">
-                      <span className="text-indigo-400 font-extrabold text-sm">
-                        Rs. {product.salePrice.toLocaleString()}
-                      </span>
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                        outOfStock ? "bg-rose-900/40 text-rose-400" : "bg-emerald-900/30 text-emerald-400"
-                      }`}>
-                        {outOfStock ? "Out" : `${available} left`}
-                      </span>
-                    </div>
+                    <span className="font-semibold text-ink text-sm leading-snug line-clamp-2">{product.name}</span>
+                    <span className="text-xs text-muted truncate">{[product.brand, product.model].filter(Boolean).join(" ") || " "}</span>
+                    <span className="mt-auto pt-2 flex flex-wrap items-center justify-between gap-1.5">
+                      <Money amount={product.salePrice} className="text-sm font-semibold text-ink" />
+                      <Badge tone={outOfStock ? "khata" : lowStock ? "saffron" : "paid"}>
+                        {outOfStock ? "Out of stock" : `${available} left`}
+                      </Badge>
+                    </span>
                   </button>
                 );
               })}
             </div>
           )}
         </div>
-      </div>
+      </section>
 
-      {/* ── Right: Cart & Billing ─────────────────────────────── */}
-      <div className="w-80 xl:w-96 flex flex-col bg-slate-950 border-l border-slate-800">
+      {/* ── Right: cart and bill (a full-screen sheet on phones) ── */}
+      <div
+        aria-label="Cart"
+        className={cx(
+          cartOpen ? "flex" : "hidden",
+          "lg:flex flex-col bg-surface fixed inset-0 z-40 overflow-y-auto",
+          "lg:static lg:z-auto lg:w-[360px] xl:w-[400px] lg:shrink-0 lg:border-l lg:border-line lg:overflow-hidden"
+        )}
+      >
+        {/* Phone sheet title */}
+        <div className="lg:hidden flex items-center justify-between gap-3 px-4 h-14 border-b border-line shrink-0">
+          <div className="min-w-0">
+            <h2 className="text-lg font-bold leading-tight">Cart</h2>
+            <p className="text-xs text-muted">{cartCountLabel} · Seller {selectedSeller}</p>
+          </div>
+          <IconButton icon={X} label="Close cart" onClick={() => setCartOpen(false)} />
+        </div>
 
-        {/* Customer Selection */}
-        <div className="p-3 border-b border-slate-800 bg-slate-900">
-          <div className="text-[10px] font-semibold uppercase text-slate-500 tracking-wider mb-2 flex items-center justify-between">
-            <span>Customer ({selectedSeller}'s Customers First)</span>
-            <button
-              onClick={() => setShowAddCustomerModal(true)}
-              className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
-              title="Add new customer"
-            >
-              <UserPlus size={12} /> New
-            </button>
+        {/* Customer */}
+        <div className="p-4 border-b border-line space-y-2 shrink-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-ink">Customer</p>
+              <p className="text-xs text-muted truncate">{selectedSeller}'s customers are listed first</p>
+            </div>
+            <Button variant="soft" size="md" icon={UserPlus} onClick={() => setShowAddCustomerModal(true)} className="shrink-0">
+              New
+            </Button>
           </div>
 
           <div className="relative" ref={customerDropdownRef}>
             <div
-              className={`flex items-center gap-2 bg-slate-950 border rounded-xl px-3 py-2 cursor-pointer transition-all ${
-                showCustomerDropdown ? "border-indigo-500" : "border-slate-800 hover:border-slate-700"
-              }`}
+              className={cx(
+                "flex items-center gap-2 h-10 rounded-xl border bg-surface pl-3 pr-1 cursor-text transition-colors",
+                showCustomerDropdown ? "border-brand-500 ring-2 ring-brand-100" : "border-line-strong hover:border-muted"
+              )}
               onClick={() => setShowCustomerDropdown(true)}
             >
-              <User size={14} className="text-slate-400 shrink-0" />
+              <User size={15} className="text-muted shrink-0" aria-hidden="true" />
               <input
                 type="text"
-                placeholder="Search & select customer..."
+                placeholder="Walk-in, or search a customer"
+                aria-label="Customer"
                 value={selectedCustomer ? selectedCustomer.name : customerSearch}
                 onChange={(e) => {
                   setCustomerSearch(e.target.value);
@@ -575,58 +597,56 @@ const POS = () => {
                   setShowCustomerDropdown(true);
                 }}
                 onClick={() => setShowCustomerDropdown(true)}
-                className="flex-1 bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none min-w-0"
+                className="flex-1 bg-transparent text-sm text-ink placeholder:text-muted/80 focus:outline-none min-w-0"
               />
               {selectedCustomer ? (
                 <button
+                  type="button"
+                  aria-label="Clear customer"
                   onClick={(e) => { e.stopPropagation(); setSelectedCustomer(null); setCustomerSearch(""); }}
-                  className="text-slate-500 hover:text-red-400"
+                  className="h-8 w-8 inline-flex items-center justify-center rounded-lg text-muted hover:bg-sunken hover:text-ink"
                 >
-                  <X size={14} />
+                  <X size={15} />
                 </button>
               ) : (
-                <ChevronDown size={14} className="text-slate-400" />
+                <ChevronDown size={15} className="text-muted mr-2" aria-hidden="true" />
               )}
             </div>
 
             {showCustomerDropdown && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-50 max-h-56 overflow-y-auto custom-scrollbar">
+              <div className="absolute top-full left-0 right-0 mt-1 bg-surface border border-line rounded-xl shadow-pop z-50 max-h-64 overflow-y-auto custom-scrollbar py-1">
                 {sortedCustomers.length === 0 ? (
-                  <div className="p-3 text-center text-slate-500 text-xs">No customers found</div>
+                  <div className="px-3 py-4 text-center text-muted text-sm">
+                    No customer found. Use New to add one, or leave it for a walk-in sale.
+                  </div>
                 ) : (
                   sortedCustomers.map((cust) => {
                     const isThisSeller = (cust.sellerName || "").toLowerCase() === selectedSeller.toLowerCase();
                     return (
-                      <div
+                      <button
+                        type="button"
                         key={cust.id}
-                        className="px-3 py-2.5 hover:bg-slate-800 cursor-pointer flex items-start justify-between gap-2"
+                        className="w-full text-left px-3 py-2.5 hover:bg-sunken flex items-start justify-between gap-2"
                         onClick={() => {
                           setSelectedCustomer(cust);
                           setCustomerSearch(cust.name);
                           setShowCustomerDropdown(false);
                         }}
                       >
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-slate-100 truncate">{cust.name}</div>
-                          <div className="text-[11px] text-slate-400">
+                        <span className="min-w-0">
+                          <span className="block text-sm font-semibold text-ink truncate">{cust.name}</span>
+                          <span className="flex items-center gap-2 text-xs text-muted">
                             {cust.phone}
-                            {cust.sellerName && (
-                              <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                isThisSeller
-                                  ? "bg-indigo-900/50 text-indigo-300"
-                                  : "bg-slate-800 text-slate-400"
-                              }`}>
-                                {cust.sellerName}
-                              </span>
-                            )}
-                          </div>
-                        </div>
+                            {cust.sellerName && <Badge tone={isThisSeller ? "brand" : "neutral"}>{cust.sellerName}</Badge>}
+                          </span>
+                        </span>
                         {cust.totalPending > 0 && (
-                          <span className="text-[10px] font-bold text-rose-400 shrink-0">
-                            Udhaar: Rs.{cust.totalPending.toLocaleString()}
+                          <span className="text-xs text-muted shrink-0 text-right">
+                            Udhaar
+                            <Money amount={cust.totalPending} owed className="block" />
                           </span>
                         )}
-                      </div>
+                      </button>
                     );
                   })
                 )}
@@ -635,66 +655,73 @@ const POS = () => {
           </div>
 
           {selectedCustomer && selectedCustomer.totalPending > 0 && (
-            <div className="mt-2 px-3 py-1.5 bg-rose-950/30 border border-rose-900/50 rounded-lg text-[11px] text-rose-400 font-semibold">
-              ⚠ Previous Udhaar: Rs. {selectedCustomer.totalPending.toLocaleString()}
+            <div className="flex items-center justify-between gap-2 rounded-lg bg-khata-50 px-3 py-2 text-xs text-khata-700">
+              <span className="font-medium">Old Udhaar</span>
+              <Money amount={selectedCustomer.totalPending} owed />
             </div>
           )}
         </div>
 
-        {/* Cart Items */}
-        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2 custom-scrollbar">
+        {/* Cart items */}
+        <div className="flex-1 min-h-[10rem] lg:min-h-0 lg:overflow-y-auto custom-scrollbar p-4 space-y-2">
           {cart.length === 0 ? (
-            <div className="text-center py-16 text-slate-600">
-              <ShoppingCart size={40} className="mx-auto mb-3 opacity-30" />
-              <p className="text-sm">Cart is empty</p>
-              <p className="text-xs mt-1 text-slate-700">Select products from the left</p>
-            </div>
+            <EmptyState
+              icon={ShoppingCart}
+              title="Cart is empty"
+              description="Tap a product to add it to this bill."
+            />
           ) : (
             groupedCart.map((item) => (
-              <div key={item.product} className="bg-slate-900 border border-slate-800 rounded-xl p-2.5 space-y-1.5">
+              <div key={item.product} className="rounded-xl border border-line p-3 space-y-2">
                 <div className="flex items-start gap-2">
                   <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-slate-100 text-sm leading-snug truncate">{item.productName}</div>
-                    <div className="text-[11px] text-slate-400">{item.brand} {item.model}</div>
+                    <div className="font-semibold text-ink text-sm leading-snug truncate">{item.productName}</div>
+                    <div className="text-xs text-muted truncate">{item.brand} {item.model}</div>
                   </div>
-                  <div className="text-right shrink-0">
-                    <div className="text-xs font-bold text-indigo-400">Rs. {item.subtotal.toLocaleString()}</div>
-                  </div>
-                  <button
+                  <Money amount={item.subtotal} className="text-sm font-semibold text-ink shrink-0 pt-0.5" />
+                  <IconButton
+                    icon={Trash2}
+                    label={`Remove ${item.productName}`}
+                    size="sm"
                     onClick={() => item.cartIds.forEach((id) => removeFromCart(id))}
-                    className="p-1 text-slate-600 hover:text-red-400"
-                  >
-                    <Trash2 size={13} />
-                  </button>
+                    className="-mr-1 -mt-1 hover:text-khata-600"
+                  />
                 </div>
 
                 {item.imeisArray && item.imeisArray.length > 0 ? (
-                  <div className="flex flex-wrap gap-1">
+                  <div className="flex flex-wrap gap-1.5">
                     {item.imeisArray.map((imei) => (
-                      <span key={imei} className="font-mono text-cyan-400 text-[10px] bg-slate-950/60 px-1.5 py-0.5 rounded border border-slate-800 flex items-center gap-1">
+                      <span key={imei} className="inline-flex items-center gap-0.5 rounded-lg bg-sunken pl-2 font-mono text-[11px] text-ink-soft">
                         {imei}
-                        <button onClick={() => removeFromCart(`${item.product}_${imei}`)} className="text-slate-500 hover:text-red-400">
-                          <X size={9} />
+                        <button
+                          type="button"
+                          aria-label={`Remove IMEI ${imei}`}
+                          onClick={() => removeFromCart(`${item.product}_${imei}`)}
+                          className="h-7 w-7 inline-flex items-center justify-center rounded-lg text-muted hover:text-khata-600"
+                        >
+                          <X size={12} />
                         </button>
                       </span>
                     ))}
                   </div>
                 ) : (
                   <div className="flex items-center gap-2">
-                    <button
+                    <IconButton
+                      icon={Minus}
+                      label="One less"
+                      variant="secondary"
                       onClick={() => item.cartIds.forEach((id) => updateCartQuantity(id, -1))}
-                      className="w-6 h-6 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-300"
-                    >
-                      <Minus size={11} />
-                    </button>
-                    <span className="text-sm font-bold text-slate-100 min-w-[20px] text-center">{item.quantity}</span>
-                    <button
+                    />
+                    <span className="text-sm font-bold text-ink min-w-[2rem] text-center tabular-nums">{item.quantity}</span>
+                    <IconButton
+                      icon={Plus}
+                      label="One more"
+                      variant="secondary"
                       onClick={() => item.cartIds.forEach((id) => updateCartQuantity(id, 1))}
-                      className="w-6 h-6 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-300"
-                    >
-                      <Plus size={11} />
-                    </button>
-                    <span className="text-[11px] text-slate-500 ml-1">@ Rs.{item.unitSalePrice.toLocaleString()}</span>
+                    />
+                    <span className="text-xs text-muted ml-1">
+                      at <Money amount={item.unitSalePrice} /> each
+                    </span>
                   </div>
                 )}
               </div>
@@ -702,186 +729,226 @@ const POS = () => {
           )}
         </div>
 
-        {/* Billing Summary */}
-        <div className="p-3 border-t border-slate-800 space-y-2 bg-slate-900">
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="text-[10px] font-semibold text-slate-400 uppercase">Discount (Rs.)</label>
-              <input
-                type="number" min="0" value={discount}
+        {/* Bill */}
+        <div className="p-4 border-t border-line space-y-3 bg-surface shrink-0">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Discount (Rs.)" htmlFor="pos-discount">
+              <Input
+                id="pos-discount"
+                type="number" min="0" inputMode="decimal" value={discount}
                 onChange={(e) => setDiscount(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500 mt-0.5"
               />
-            </div>
-            <div>
-              <label className="text-[10px] font-semibold text-slate-400 uppercase">Tax (%)</label>
-              <input
-                type="number" min="0" value={taxPercent}
+            </Field>
+            <Field label="Tax (%)" htmlFor="pos-tax">
+              <Input
+                id="pos-tax"
+                type="number" min="0" inputMode="decimal" value={taxPercent}
                 onChange={(e) => setTaxPercent(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500 mt-0.5"
               />
-            </div>
+            </Field>
           </div>
 
-          <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1">
-            {previousBalance > 0 && (
-              <div className="flex justify-between text-[11px] text-rose-400 font-semibold">
-                <span>Previous Udhaar</span>
-                <span>+ Rs. {previousBalance.toLocaleString()}</span>
-              </div>
-            )}
-            <div className="flex justify-between items-center">
-              <span className="text-[11px] text-slate-400 uppercase font-semibold">Total to Pay</span>
-              <span className="text-lg font-extrabold text-indigo-400">Rs. {currentSaleTotal.toLocaleString()}</span>
-            </div>
-            {previousBalance > 0 && (
-              <div className="flex justify-between text-[10px] text-slate-500">
-                <span>Old Udhaar is not included — collect it on a Pending Bill or in Pending Payments</span>
-              </div>
-            )}
-          </div>
+          {previousBalance > 0 && (
+            <p className="text-xs text-ink-soft leading-relaxed">
+              Old Udhaar <Money amount={previousBalance} owed /> is not in this total. Collect it on a pending bill or in
+              Udhaar accounts.
+            </p>
+          )}
 
-          <button
-            onClick={handleCheckoutClick}
-            disabled={cart.length === 0}
-            className="w-full py-3 bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-indigo-500/20 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Checkout & Pay
-          </button>
+          {/* The one bold moment: what the customer pays now */}
+          <div className="rounded-2xl bg-brand-600 p-4 text-white">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-sm font-semibold text-brand-100">Total to pay</span>
+              <span className="text-xs text-brand-100">{cartCountLabel}</span>
+            </div>
+            <div className="mt-1 font-display font-bold leading-none tabular-nums whitespace-nowrap">
+              <span className="text-lg text-brand-100 mr-1.5">Rs.</span>
+              <span className="text-4xl xl:text-[2.75rem]">{fmt(currentSaleTotal)}</span>
+            </div>
+            {(taxAmount > 0 || discountAmount > 0) && (
+              <div className="mt-2 text-xs text-brand-100 flex flex-wrap gap-x-3 gap-y-0.5">
+                <span>Items Rs. {fmt(subtotal)}</span>
+                {taxAmount > 0 && <span>Tax + Rs. {fmt(taxAmount)}</span>}
+                {discountAmount > 0 && <span>Discount − Rs. {fmt(discountAmount)}</span>}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={handleCheckoutClick}
+              disabled={cart.length === 0}
+              className="mt-4 w-full h-12 rounded-xl bg-white text-brand-700 text-base font-semibold hover:bg-brand-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              Checkout and pay
+            </button>
+          </div>
         </div>
+      </div>
+
+      {/* ── Phones / tablets: cart bar ───────────────────────── */}
+      <div className="lg:hidden fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface/95 backdrop-blur px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] print:hidden">
+        <button
+          type="button"
+          onClick={() => setCartOpen(true)}
+          className="w-full h-12 rounded-xl bg-brand-600 text-white px-4 flex items-center justify-between gap-3 hover:bg-brand-700 transition-colors"
+        >
+          <span className="flex items-center gap-2 text-sm font-semibold min-w-0">
+            <ShoppingCart size={18} aria-hidden="true" />
+            <span className="truncate">{cartCount === 0 ? "Cart is empty" : cartCountLabel}</span>
+          </span>
+          <span className="flex items-center gap-2 shrink-0">
+            <span className="font-display text-lg font-bold tabular-nums">Rs. {fmt(currentSaleTotal)}</span>
+            <span className="text-xs font-semibold text-brand-100">View cart</span>
+          </span>
+        </button>
       </div>
     </div>
 
-      {/* ── Add Customer Modal ─────────────────────────────────── */}
-      {showAddCustomerModal && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-100 text-base">Add New Customer</h3>
-              <button onClick={() => setShowAddCustomerModal(false)} className="text-slate-400 hover:text-white"><X size={18} /></button>
-            </div>
-            <div className="text-xs bg-indigo-950/40 border border-indigo-900/40 text-indigo-300 px-3 py-2 rounded-xl font-medium">
-              This customer will be associated with seller: <strong>{selectedSeller}</strong>
-            </div>
-            <form onSubmit={handleCreateCustomer} className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-slate-200">Full Name *</label>
-                <input type="text" required value={newCustName} onChange={(e) => setNewCustName(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-slate-100 mt-1 focus:outline-none focus:border-indigo-500" placeholder="e.g. Imran Khan" />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-200">Phone Number *</label>
-                <input type="text" required value={newCustPhone} onChange={(e) => setNewCustPhone(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-slate-100 mt-1 focus:outline-none focus:border-indigo-500" placeholder="e.g. 03001234567" />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-200">Address / City</label>
-                <input type="text" value={newCustAddress} onChange={(e) => setNewCustAddress(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-slate-100 mt-1 focus:outline-none focus:border-indigo-500" placeholder="e.g. Main Market, Kohat" />
-              </div>
-              <div className="pt-2 flex justify-end gap-2">
-                <button type="button" onClick={() => setShowAddCustomerModal(false)} className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl">Cancel</button>
-                <button type="submit" disabled={isSavingCustomer} className="px-5 py-2.5 bg-indigo-600 text-white text-xs font-bold rounded-xl hover:bg-indigo-500 disabled:opacity-60">{isSavingCustomer ? "Saving…" : "Save & Select"}</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* ── Add customer ───────────────────────────────────────── */}
+      <Modal
+        open={showAddCustomerModal}
+        onClose={closeAddCustomer}
+        title="Add customer"
+        description={`Linked to seller ${selectedSeller}`}
+        size="sm"
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeAddCustomer}>Cancel</Button>
+            <Button type="submit" form="pos-add-customer-form" disabled={isSavingCustomer}>
+              {isSavingCustomer ? "Saving…" : "Save and select"}
+            </Button>
+          </>
+        }
+      >
+        <form id="pos-add-customer-form" onSubmit={handleCreateCustomer} className="space-y-4">
+          <Field label="Name" htmlFor="pos-cust-name">
+            <Input id="pos-cust-name" type="text" required value={newCustName} onChange={(e) => setNewCustName(e.target.value)} placeholder="e.g. Imran Khan" />
+          </Field>
+          <Field label="Phone number" htmlFor="pos-cust-phone">
+            <Input id="pos-cust-phone" type="tel" inputMode="tel" required value={newCustPhone} onChange={(e) => setNewCustPhone(e.target.value)} placeholder="e.g. 03001234567" />
+          </Field>
+          <Field label="Address or city (optional)" htmlFor="pos-cust-address">
+            <Input id="pos-cust-address" type="text" value={newCustAddress} onChange={(e) => setNewCustAddress(e.target.value)} placeholder="e.g. Main Market, Kohat" />
+          </Field>
+        </form>
+      </Modal>
 
-      {/* ── Checkout Modal ─────────────────────────────────────── */}
-      {showCheckoutModal && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-lg rounded-3xl p-8 shadow-2xl relative">
-            <button onClick={() => setShowCheckoutModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white"><X size={20} /></button>
-            <h2 className="text-xl font-bold text-white mb-2 text-center">Complete Payment</h2>
-            <p className="text-center text-xs text-slate-400 mb-6">Seller: <span className="text-indigo-400 font-bold">{selectedSeller}</span></p>
-
-            <div className="bg-slate-950 rounded-2xl p-4 mb-6 text-center border border-slate-800">
-              <p className="text-sm text-slate-400 uppercase tracking-wider font-semibold mb-1">This Bill</p>
-              <p className="text-3xl font-black text-indigo-400">Rs. {currentSaleTotal.toLocaleString()}</p>
-              {previousBalance > 0 && (
-                <p className="text-xs text-rose-300 font-semibold mt-2">
-                  Old Udhaar: Rs. {previousBalance.toLocaleString()} · Balance after this bill: Rs. {balanceAfterSale.toLocaleString()}
-                </p>
-              )}
-              {selectedCustomer && <p className="text-xs text-indigo-300 font-semibold mt-2">Billing to: {selectedCustomer.name}</p>}
-            </div>
-
-            <div className="space-y-4">
-              <label className="text-xs font-semibold text-slate-400 uppercase ml-1">Payment Method</label>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {["Cash", "Card", "Easypaisa", "Credit (Udhaar)"].map((method) => {
-                  const isUdhaar = method === "Credit (Udhaar)";
-                  const isSelected = paymentMethod === method;
-                  return (
-                    <button key={method} onClick={() => { setPaymentMethod(method); setPaidAmountInput(""); }}
-                      className={`p-3 rounded-xl border text-xs font-bold transition-all flex flex-col items-center justify-center gap-1 ${
-                        isSelected
-                          ? isUdhaar ? "bg-rose-600 border-rose-500 text-white" : "bg-indigo-600 border-indigo-500 text-white"
-                          : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
-                      }`}
-                    >
-                      {isUdhaar ? "Pending Bill" : method}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {paymentMethod === "Credit (Udhaar)" && (
-                <div className="mt-4 p-4 bg-rose-950/20 border border-rose-900/30 rounded-2xl space-y-4">
-                  {!selectedCustomer ? (
-                    <div className="text-rose-400 text-sm font-semibold flex items-center gap-2">
-                      <AlertCircle size={16} /> Please select a customer first.
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <label className="text-xs font-semibold text-rose-300 uppercase ml-1">Paid Now (Optional)</label>
-                        <input type="number" min="0" placeholder="0" value={paidAmountInput}
-                          onChange={(e) => setPaidAmountInput(e.target.value)}
-                          className="w-full mt-1 bg-slate-950 border border-rose-900/50 rounded-xl p-2.5 text-sm font-bold text-white focus:outline-none focus:border-rose-500" />
-                      </div>
-                      <div>
-                        <label className="text-xs font-semibold text-rose-300 uppercase ml-1">Due Date</label>
-                        <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)}
-                          className="w-full mt-1 bg-slate-950 border border-rose-900/50 rounded-xl p-2.5 text-sm text-white focus:outline-none focus:border-rose-500" />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div>
-                <label className="text-xs font-semibold text-slate-400 uppercase ml-1">Notes (Optional)</label>
-                <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2}
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 resize-none" />
-              </div>
-            </div>
-
-            <button
+      {/* ── Checkout ───────────────────────────────────────────── */}
+      <Modal
+        open={showCheckoutModal}
+        onClose={closeCheckout}
+        title="Take payment"
+        description={`Seller: ${selectedSeller}`}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeCheckout}>Back to cart</Button>
+            <Button
+              size="lg"
               onClick={finalizeCheckout}
               disabled={isSubmitting || (paymentMethod === "Credit (Udhaar)" && !selectedCustomer)}
-              className="w-full mt-6 py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl transition-all shadow-lg shadow-emerald-600/20 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex-1 sm:flex-none"
             >
-              {isSubmitting ? "Saving…" : "Confirm & Generate Invoice"}
-            </button>
+              {isSubmitting ? "Saving…" : "Confirm and save bill"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-5">
+          <div className="rounded-2xl bg-sunken p-4 text-center">
+            <p className="text-xs font-semibold text-muted">This bill</p>
+            <p className="mt-1 font-display text-3xl font-bold text-ink tabular-nums">Rs. {fmt(currentSaleTotal)}</p>
+            {previousBalance > 0 && (
+              <p className="mt-2 text-xs text-ink-soft">
+                Old Udhaar <Money amount={previousBalance} owed /> · Balance after this bill <Money amount={balanceAfterSale} owed />
+              </p>
+            )}
+            {selectedCustomer && (
+              <p className="mt-1 text-xs text-ink-soft">
+                Billing to <span className="font-semibold text-ink">{selectedCustomer.name}</span>
+              </p>
+            )}
           </div>
-        </div>
-      )}
 
-      {/* ── Receipt Modal ──────────────────────────────────────── */}
+          <div>
+            <p className="text-xs font-semibold text-ink-soft mb-1.5">Payment method</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {["Cash", "Card", "Easypaisa", "Credit (Udhaar)"].map((method) => {
+                const isUdhaar = method === "Credit (Udhaar)";
+                const isSelected = paymentMethod === method;
+                return (
+                  <button
+                    type="button"
+                    key={method}
+                    aria-pressed={isSelected}
+                    onClick={() => { setPaymentMethod(method); setPaidAmountInput(""); }}
+                    className={cx(
+                      "h-11 px-2 rounded-xl border text-sm font-semibold transition-colors",
+                      isSelected
+                        ? isUdhaar ? "bg-khata-600 border-khata-600 text-white" : "bg-brand-600 border-brand-600 text-white"
+                        : "bg-surface border-line-strong text-ink hover:bg-sunken"
+                    )}
+                  >
+                    {isUdhaar ? "Pending bill" : method}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {paymentMethod === "Credit (Udhaar)" && (
+            <div className="p-4 bg-khata-50 border border-khata-100 rounded-2xl">
+              {!selectedCustomer ? (
+                <div className="text-khata-700 text-sm font-semibold flex items-start gap-2">
+                  <AlertCircle size={16} className="shrink-0 mt-0.5" aria-hidden="true" />
+                  A pending bill needs a customer. Go back to the cart and choose one.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <Field label="Paid now (optional)" htmlFor="pos-paid-now">
+                    <Input
+                      id="pos-paid-now"
+                      type="number" min="0" inputMode="decimal" placeholder="0" value={paidAmountInput}
+                      onChange={(e) => setPaidAmountInput(e.target.value)}
+                      className="font-semibold"
+                    />
+                  </Field>
+                  <Field label="Due date" htmlFor="pos-due-date">
+                    <Input id="pos-due-date" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+                  </Field>
+                </div>
+              )}
+            </div>
+          )}
+
+          <Field label="Notes (optional)" htmlFor="pos-notes">
+            <Textarea id="pos-notes" value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
+          </Field>
+        </div>
+      </Modal>
+
+      {/* ── Receipt (kept outside Modal so the browser print fallback can show it) ── */}
       {completedSaleInvoice && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50 overflow-y-auto print:static print:bg-transparent print:p-0 print:block">
-          <div className="bg-white text-slate-900 w-full max-w-sm rounded-2xl shadow-2xl relative overflow-hidden print:shadow-none print:w-full print:max-w-none print:rounded-none">
-            <button
-              onClick={() => setCompletedSaleInvoice(null)}
-              className="absolute top-3 right-3 text-slate-400 hover:text-slate-800 p-1 rounded-full hover:bg-slate-100 z-10 print:hidden"
-            >
-              <X size={18} />
-            </button>
+        <div className="fixed inset-0 bg-ink/40 backdrop-blur-[2px] flex items-stretch sm:items-center justify-center sm:p-4 z-50 print:static print:bg-transparent print:p-0 print:block">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Receipt"
+            className="bg-white w-full sm:max-w-sm h-full sm:h-auto sm:max-h-[92vh] flex flex-col sm:rounded-2xl shadow-pop overflow-hidden print:overflow-visible print:shadow-none print:w-full print:max-w-none print:h-auto print:max-h-none print:rounded-none print:block"
+          >
+            <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-line bg-surface print:hidden">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="h-8 w-8 rounded-full bg-paid-50 text-paid-600 inline-flex items-center justify-center shrink-0">
+                  <CheckCircle2 size={18} aria-hidden="true" />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-ink">Bill saved</p>
+                  <p className="text-xs text-muted font-mono truncate">{completedSaleInvoice.billNumber}</p>
+                </div>
+              </div>
+              <IconButton icon={X} label="Close receipt" size="sm" onClick={() => setCompletedSaleInvoice(null)} />
+            </div>
 
             {/* Receipt Preview — the scroll box is the outer div, so the image / print gets the whole receipt */}
-            <div className="max-h-[70vh] overflow-y-auto print:max-h-none">
+            <div className="flex-1 overflow-y-auto sm:max-h-[65vh] bg-sunken sm:bg-white print:max-h-none print:overflow-visible print:bg-white">
             <div id="receipt-content" className="p-5 print:p-0 bg-white text-black print-target">
               {/* Shop Header */}
               <div className="text-center mb-4">
@@ -980,77 +1047,80 @@ const POS = () => {
             </div>
 
             {/* Actions */}
-            <div className="flex gap-2 p-4 border-t border-slate-100 bg-slate-50 print:hidden">
-              <button onClick={handlePrint} className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow">
-                <Printer size={14} /> Print
-              </button>
-              <button
-                onClick={handleWhatsAppShare}
-                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow"
-              >
-                <Smartphone size={14} /> Share
-              </button>
-              <button onClick={() => setCompletedSaleInvoice(null)} className="py-2.5 px-3 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs rounded-xl flex items-center justify-center gap-1">
-                <CheckCircle2 size={14} /> Done
-              </button>
+            <div className="grid grid-cols-3 gap-2 p-4 border-t border-line bg-surface pb-[max(1rem,env(safe-area-inset-bottom))] print:hidden">
+              <Button icon={Printer} onClick={handlePrint}>Print</Button>
+              <Button variant="secondary" icon={Share2} onClick={handleWhatsAppShare}>Share</Button>
+              <Button variant="ghost" icon={CheckCircle2} onClick={() => setCompletedSaleInvoice(null)}>Done</Button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ── Product Add Modal ──────────────────────────────────── */}
-      {productToAdd && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-sm shadow-2xl p-5">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-bold text-slate-100">Add to Cart</h2>
-              <button onClick={closeAddToCart} className="text-slate-400 hover:text-white"><X size={20} /></button>
+      {/* ── Add to cart ────────────────────────────────────────── */}
+      <Modal
+        open={!!productToAdd}
+        onClose={closeAddToCart}
+        title="Add to cart"
+        description={productToAdd ? [productToAdd.name, [productToAdd.brand, productToAdd.model].filter(Boolean).join(" ")].filter(Boolean).join(" · ") : undefined}
+        size="sm"
+        footer={
+          productToAdd && (
+            <Button onClick={handleConfirmMultiAdd} className="w-full" size="lg">
+              Add {productToAdd.imeis && productToAdd.imeis.length > 0 ? multiAddImeis.length : parseInt(multiAddQty, 10) || 0} to cart
+            </Button>
+          )
+        }
+      >
+        {productToAdd && (productToAdd.imeis && productToAdd.imeis.length > 0 ? (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-ink-soft">Choose the phones being sold</p>
+              <Badge tone={multiAddImeis.length > 0 ? "brand" : "neutral"}>{multiAddImeis.length} selected</Badge>
             </div>
-            <h3 className="text-sm font-semibold text-slate-200 mb-0.5">{productToAdd.name}</h3>
-            <p className="text-xs text-slate-400 mb-4">{productToAdd.brand} {productToAdd.model}</p>
-
-            {productToAdd.imeis && productToAdd.imeis.length > 0 ? (
-              <div className="space-y-3">
-                <label className="text-xs font-semibold text-slate-400 uppercase">Select IMEIs</label>
-                <div className="max-h-48 overflow-y-auto space-y-2 custom-scrollbar pr-2">
-                  {/* Units already in the cart are left out, so picking them cannot fail */}
-                  {productToAdd.imeis.filter((i) => i.status === "in_stock" && !cart.some((c) => c.imei === i.imei)).map((imeiObj) => (
-                    <label key={imeiObj.imei} className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${multiAddImeis.includes(imeiObj.imei) ? "bg-indigo-600/20 border-indigo-500" : "bg-slate-950 border-slate-800 hover:border-slate-700"}`}>
-                      <input type="checkbox" checked={multiAddImeis.includes(imeiObj.imei)}
-                        onChange={(e) => {
-                          if (e.target.checked) setMultiAddImeis((p) => [...p, imeiObj.imei]);
-                          else setMultiAddImeis((p) => p.filter((i) => i !== imeiObj.imei));
-                        }}
-                        className="w-4 h-4 rounded text-indigo-600"
-                      />
-                      <div>
-                        <div className="font-mono text-sm text-slate-200">
-                          {imeiObj.imei1 ? `SIM 1: ${imeiObj.imei1}` : imeiObj.imei}
-                          {imeiObj.imei2 ? ` | SIM 2: ${imeiObj.imei2}` : ""}
-                        </div>
-                        {imeiObj.ptaStatus && <div className="text-[10px] text-cyan-400">{imeiObj.ptaStatus}</div>}
+            <div className="space-y-2">
+              {/* Units already in the cart are left out, so picking them cannot fail */}
+              {productToAdd.imeis.filter((i) => i.status === "in_stock" && !cart.some((c) => c.imei === i.imei)).map((imeiObj) => {
+                const checked = multiAddImeis.includes(imeiObj.imei);
+                return (
+                  <label
+                    key={imeiObj.imei}
+                    className={cx(
+                      "flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-colors",
+                      checked ? "bg-brand-50 border-brand-300" : "bg-surface border-line hover:bg-sunken"
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        if (e.target.checked) setMultiAddImeis((p) => [...p, imeiObj.imei]);
+                        else setMultiAddImeis((p) => p.filter((i) => i !== imeiObj.imei));
+                      }}
+                      className="h-4 w-4 shrink-0 accent-brand-600"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-sm text-ink break-all">
+                        {imeiObj.imei1 ? `SIM 1: ${imeiObj.imei1}` : imeiObj.imei}
+                        {imeiObj.imei2 ? ` | SIM 2: ${imeiObj.imei2}` : ""}
                       </div>
-                    </label>
-                  ))}
-                </div>
-                <div className="text-xs text-indigo-400 font-medium">{multiAddImeis.length} selected</div>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-slate-400 uppercase">Quantity (Max: {productToAdd.quantity})</label>
-                <input type="number" min="1" max={productToAdd.quantity} value={multiAddQty}
-                  onChange={(e) => setMultiAddQty(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleConfirmMultiAdd()}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500" />
-              </div>
-            )}
-
-            <button onClick={handleConfirmMultiAdd} className="w-full mt-5 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl transition-all">
-              Add {productToAdd.imeis && productToAdd.imeis.length > 0 ? multiAddImeis.length : parseInt(multiAddQty, 10) || 0} to Cart
-            </button>
+                    </div>
+                    {imeiObj.ptaStatus && <Badge tone="neutral">{imeiObj.ptaStatus}</Badge>}
+                  </label>
+                );
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        ) : (
+          <Field label={`Quantity (${productToAdd.quantity} in stock)`} htmlFor="pos-add-qty">
+            <Input
+              id="pos-add-qty"
+              type="number" min="1" max={productToAdd.quantity} inputMode="numeric" value={multiAddQty}
+              onChange={(e) => setMultiAddQty(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleConfirmMultiAdd()}
+            />
+          </Field>
+        ))}
+      </Modal>
 
       {shareDialog}
     </>

@@ -1,28 +1,134 @@
 @import "tailwindcss";
 
+/* ══════════════════════════════════════════════════════════════════
+   AL-SYED design tokens — light "khata" theme
+   paper + ledger-ink blue for actions, khata red only for money owed,
+   leaf green for paid, saffron for warnings / low stock.
+   Use these names in classes: bg-paper, bg-surface, bg-sunken, border-line,
+   text-ink, text-ink-soft, text-muted, bg-brand-600, text-khata-600, ...
+══════════════════════════════════════════════════════════════════ */
+@theme {
+  --font-sans: "Geist", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --font-display: "Bricolage Grotesque", "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  /* Surfaces and text */
+  --color-paper: #f5f7fa;        /* app background */
+  --color-surface: #ffffff;      /* cards, panels, modals */
+  --color-sunken: #eef2f7;       /* inputs, table heads, hover rows */
+  --color-line: #e3e8ef;         /* borders and dividers */
+  --color-line-strong: #cdd5e0;  /* input borders, emphasized dividers */
+  --color-ink: #172033;          /* main text */
+  --color-ink-soft: #3e4a5e;     /* secondary text */
+  --color-muted: #6b7487;        /* hints, captions (4.6:1 on white) */
+
+  /* Ledger-ink blue: actions, links, selected state */
+  --color-brand-50: #eef2fe;
+  --color-brand-100: #dce4fc;
+  --color-brand-200: #bacaf8;
+  --color-brand-300: #8ea6f1;
+  --color-brand-400: #5a7be4;
+  --color-brand-500: #3557d6;
+  --color-brand-600: #2447c7;
+  --color-brand-700: #1d3aa6;
+  --color-brand-800: #1a3285;
+  --color-brand-900: #182c6a;
+
+  /* Khata red: Udhaar / money owed / destructive actions — nothing else */
+  --color-khata-50: #fdf1ef;
+  --color-khata-100: #fadcd8;
+  --color-khata-200: #f4b8b0;
+  --color-khata-300: #ea8b7f;
+  --color-khata-400: #dc5e50;
+  --color-khata-500: #c93c31;
+  --color-khata-600: #b0342a;
+  --color-khata-700: #922b23;
+  --color-khata-800: #74231d;
+  --color-khata-900: #5c1d18;
+
+  /* Leaf green: paid, in stock, success */
+  --color-paid-50: #eefbf3;
+  --color-paid-100: #d3f3df;
+  --color-paid-200: #a8e5bf;
+  --color-paid-300: #70cf97;
+  --color-paid-400: #3db26f;
+  --color-paid-500: #1e9655;
+  --color-paid-600: #157a45;
+  --color-paid-700: #136239;
+  --color-paid-800: #124e2f;
+  --color-paid-900: #0f4027;
+
+  /* Saffron: warnings, low stock, pending */
+  --color-saffron-50: #fef7eb;
+  --color-saffron-100: #fcebc9;
+  --color-saffron-200: #f8d592;
+  --color-saffron-300: #f2b955;
+  --color-saffron-400: #ea9f2e;
+  --color-saffron-500: #d98516;
+  --color-saffron-600: #b86a10;
+  --color-saffron-700: #925111;
+  --color-saffron-800: #763f13;
+  --color-saffron-900: #613513;
+
+  --radius-card: 1rem;
+  --shadow-card: 0 1px 2px rgb(23 32 51 / 0.04), 0 1px 1px rgb(23 32 51 / 0.03);
+  --shadow-pop: 0 12px 32px -8px rgb(23 32 51 / 0.18), 0 2px 6px rgb(23 32 51 / 0.06);
+}
+
 @layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
   body {
-    @apply bg-slate-950 text-slate-100 font-sans antialiased selection:bg-indigo-500 selection:text-white;
+    @apply bg-paper text-ink font-sans antialiased;
+    /* Money columns line up */
+    font-variant-numeric: tabular-nums;
+  }
+  ::selection {
+    background: var(--color-brand-100);
+    color: var(--color-ink);
+  }
+  h1, h2, h3 {
+    @apply font-display text-ink;
+    letter-spacing: -0.01em;
+  }
+  /* Visible keyboard focus everywhere */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+  }
+  input, select, textarea, button {
+    font: inherit;
+  }
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    opacity: 0.4;
   }
 }
 
-/* Custom Scrollbar for sleek dark mode */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Thin scrollbars on the light surfaces */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
-
 .custom-scrollbar::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.6);
+  background: transparent;
 }
-
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(51, 65, 85, 0.8);
+  background: var(--color-line-strong);
   border-radius: 9999px;
 }
-
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(99, 102, 241, 0.8);
+  background: var(--color-muted);
 }
 
 /* ══════════════════════════════════════════════════════════════════

@@ -26,20 +26,20 @@ class ErrorBoundary extends Component {
     if (!this.state.error) return this.props.children;
     return (
       <div className="min-h-[60vh] flex items-center justify-center p-6">
-        <div className="max-w-md w-full bg-slate-900 border border-rose-900/50 rounded-3xl p-6 text-center space-y-3">
-          <div className="w-12 h-12 mx-auto rounded-full bg-rose-500/10 text-rose-400 flex items-center justify-center">
+        <div className="max-w-md w-full bg-surface border border-khata-200 rounded-2xl shadow-card p-6 text-center space-y-3">
+          <div className="w-12 h-12 mx-auto rounded-full bg-khata-50 text-khata-600 flex items-center justify-center">
             <AlertTriangle size={24} />
           </div>
-          <h1 className="text-lg font-bold text-slate-100">This page hit an error</h1>
-          <p className="text-xs text-slate-400">
+          <h1 className="text-lg font-bold">This page hit an error</h1>
+          <p className="text-sm text-muted">
             Your data is safe in the database. Reload the page, or open another page from the menu.
           </p>
-          <pre className="text-[10px] text-rose-300 bg-slate-950 rounded-xl p-3 text-left whitespace-pre-wrap break-words max-h-40 overflow-auto">
+          <pre className="text-[10px] text-khata-700 bg-sunken rounded-xl p-3 text-left whitespace-pre-wrap break-words max-h-40 overflow-auto">
             {String(this.state.error?.message || this.state.error)}
           </pre>
           <button
             onClick={() => window.location.reload()}
-            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl inline-flex items-center gap-2"
+            className="px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold rounded-xl inline-flex items-center gap-2"
           >
             <RotateCcw size={14} /> Reload page
           </button>

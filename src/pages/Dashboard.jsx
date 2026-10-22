@@ -5,7 +5,6 @@ import { isSettlement, realSales, totalProfit, itemCount, udhaarAdded, saleProfi
 import { useAuth } from "../context/AuthContext";
 import { useNavigate } from "react-router-dom";
 import {
-  DollarSign,
   TrendingUp,
   TrendingDown,
   Boxes,
@@ -15,16 +14,17 @@ import {
   Calculator,
   ShoppingCart,
   Search,
-  ArrowUpRight,
+  ArrowRight,
   Receipt,
   Wrench,
   HandCoins,
   Undo2,
   Truck,
   Wallet,
-  BarChart3,
   Users,
+  Banknote,
 } from "lucide-react";
+import { Page, PageHeader, Card, CardHeader, Stat, Badge, Button, EmptyState } from "../components/ui";
 
 // ── Helpers (all dates are local shop dates, YYYY-MM-DD) ──────────────────────
 const num = (v) => Number(v || 0);
@@ -65,10 +65,41 @@ const dayStats = (records, expenses, day) => {
 };
 
 const ISSUE_STATUSES = [
-  { status: "Pending", cls: "bg-amber-500/10 text-amber-300 border-amber-500/30" },
-  { status: "Under Inspection", cls: "bg-indigo-500/10 text-indigo-300 border-indigo-500/30" },
-  { status: "Repaired", cls: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30" },
+  { status: "Pending", cls: "bg-saffron-50 text-saffron-700" },
+  { status: "Under Inspection", cls: "bg-brand-50 text-brand-700" },
+  { status: "Repaired", cls: "bg-paid-50 text-paid-700" },
 ];
+
+// A small "See all" link-button for card headers
+const MoreLink = ({ onClick, children }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className="inline-flex h-10 items-center gap-1 rounded-lg px-2 -mr-2 text-sm font-semibold text-brand-700 hover:bg-brand-50"
+  >
+    {children}
+    <ArrowRight size={15} aria-hidden="true" />
+  </button>
+);
+
+// One cell of the "Shop position" ledger strip; a button when it leads somewhere
+const PositionCell = ({ icon: Icon, label, value, hint, valueClass = "text-ink", onClick }) => {
+  const Tag = onClick ? "button" : "div";
+  return (
+    <Tag
+      type={onClick ? "button" : undefined}
+      onClick={onClick}
+      className={`bg-surface p-4 text-left min-w-0 ${onClick ? "hover:bg-sunken transition-colors" : ""}`}
+    >
+      <div className="flex items-center gap-1.5 text-xs font-medium text-muted">
+        <Icon size={14} aria-hidden="true" />
+        <span className="truncate">{label}</span>
+      </div>
+      <div className={`mt-1 font-display text-lg font-bold leading-tight break-words ${valueClass}`}>{value}</div>
+      {hint && <div className="mt-0.5 text-xs text-muted">{hint}</div>}
+    </Tag>
+  );
+};
 
 // "+12% vs yesterday" from real figures; null when there is nothing to compare with
 const changeVs = (now, before) => {
@@ -174,534 +205,394 @@ const Dashboard = () => {
 
   const recentBills = useMemo(() => [...realSales(records)].sort(byNewest).slice(0, 5), [records]);
 
-  const card = "bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm transition-all";
-  const clickable = "cursor-pointer hover:border-indigo-500/50 hover:shadow-indigo-500/10";
+  const readyForPickup = issueCounts.find((s) => s.status === "Repaired").count;
+  const trendBills = sumBy(trend, (d) => d.bills);
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Welcome Banner */}
-      <div className="bg-gradient-to-r from-indigo-900 via-indigo-950 to-slate-900 rounded-3xl p-6 border border-indigo-800/50 shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 mb-1 flex-wrap">
-            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 uppercase tracking-wider">
-              {user?.role === "admin" ? "Owner / Administrator" : "Cashier Portal"}
-            </span>
-            <span className="text-xs text-slate-400">• {new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'short', day: 'numeric' })}</span>
-            {sellerFiltered && (
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                Sales & expenses: {activeSeller} only
+    <Page>
+      <PageHeader
+        title={`Welcome back, ${user?.name || ""}`}
+        description={
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span>{shopSettings.shopName}</span>
+            <span aria-hidden="true">·</span>
+            <span>{new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "short", day: "numeric" })}</span>
+            <Badge tone="brand">{user?.role === "admin" ? "Owner" : "Cashier"}</Badge>
+            {sellerFiltered && <Badge tone="saffron">Sales and expenses: {activeSeller} only</Badge>}
+          </span>
+        }
+        actions={
+          <>
+            <Button icon={ShoppingCart} onClick={() => navigate("/pos")}>New sale</Button>
+            <Button variant="secondary" icon={Search} onClick={() => navigate("/imei-checker")}>Check IMEI</Button>
+            <Button variant="secondary" icon={Wrench} onClick={() => navigate("/mobile-issues")}>Repair ticket</Button>
+          </>
+        }
+      />
+
+      {/* Today: what the owner checks first */}
+      <section aria-labelledby="today-heading" className="space-y-3">
+        <h2 id="today-heading" className="text-base font-semibold">Today</h2>
+        <div className="grid gap-4 md:grid-cols-2">
+          <Stat
+            className="p-5 sm:p-6"
+            icon={Banknote}
+            label="Today's sales"
+            onClick={() => navigate(isAdmin ? "/reports" : "/bills")}
+            value={<span className="text-3xl sm:text-4xl">{fmt(today.revenue)}</span>}
+            hint={
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
+                <span>{today.bills} bill(s) today</span>
+                <span aria-hidden="true">·</span>
+                {revenueChange === null ? (
+                  <span>Yesterday {fmt(yesterday.revenue)}</span>
+                ) : (
+                  <span className={`inline-flex items-center gap-1 font-medium ${revenueChange >= 0 ? "text-paid-600" : "text-saffron-700"}`}>
+                    {revenueChange >= 0 ? <TrendingUp size={14} aria-hidden="true" /> : <TrendingDown size={14} aria-hidden="true" />}
+                    {revenueChange >= 0 ? "+" : ""}
+                    {revenueChange}% vs yesterday ({fmt(yesterday.revenue)})
+                  </span>
+                )}
               </span>
-            )}
-          </div>
-          <h1 className="text-2xl font-bold text-slate-100 tracking-tight">
-            Welcome back, {user?.name}!
-          </h1>
-          <p className="text-sm text-slate-300 mt-1">
-            {shopSettings.shopName} Dashboard Overview
-          </p>
+            }
+          />
+          <Stat
+            className="p-5 sm:p-6"
+            icon={Clock}
+            label="Udhaar given today"
+            tone={today.udhaarGiven > 0 ? "khata" : "neutral"}
+            onClick={() => navigate("/pending-payments")}
+            value={<span className="text-3xl sm:text-4xl">{fmt(today.udhaarGiven)}</span>}
+            hint={<span className="text-sm">Unpaid amount on today's bills</span>}
+          />
         </div>
 
-        {/* Quick Buttons */}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => navigate("/pos")}
-            className="px-5 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-2xl text-sm flex items-center gap-2 shadow-lg shadow-indigo-600/30 transition-all active:scale-95"
-          >
-            <ShoppingCart size={18} />
-            <span>Open POS Terminal</span>
-          </button>
-          <button
-            onClick={() => navigate("/imei-checker")}
-            className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold rounded-2xl text-sm flex items-center gap-2 border border-slate-700 transition-all"
-          >
-            <Search size={18} className="text-indigo-400" />
-            <span className="hidden sm:inline">IMEI Lookup</span>
-          </button>
-          <button
+        <div className="grid gap-3 grid-cols-2 xl:grid-cols-4">
+          <Stat
+            icon={HandCoins}
+            label="Udhaar collected"
+            tone={today.udhaarCollected > 0 ? "paid" : "neutral"}
+            onClick={() => navigate("/pending-payments")}
+            value={<span className="text-xl">{fmt(today.udhaarCollected)}</span>}
+            hint="Payments received today"
+          />
+          <Stat
+            icon={TrendingUp}
+            label="Today's profit"
+            tone={isAdmin && today.netProfit < 0 ? "saffron" : "neutral"}
+            onClick={isAdmin ? () => navigate("/reports") : undefined}
+            value={<span className="text-xl">{isAdmin ? fmt(today.netProfit) : "••••••"}</span>}
+            hint={isAdmin ? `Gross ${fmt(today.grossProfit)} − expenses ${fmt(today.expenses)}` : "Owner only"}
+          />
+          <Stat
+            icon={Undo2}
+            label="Returns"
+            onClick={() => navigate("/bills")}
+            value={<span className="text-xl">{fmt(today.returnsAmount)}</span>}
+            hint={`${today.returnsCount} return(s) today`}
+          />
+          <Stat
+            icon={Wallet}
+            label="Expenses"
+            onClick={() => navigate("/expenses")}
+            value={<span className="text-xl">{fmt(today.expenses)}</span>}
+            hint={`Yesterday ${fmt(yesterday.expenses)}`}
+          />
+        </div>
+      </section>
+
+      {/* Shop position: one ledger strip instead of six identical cards */}
+      <Card padded={false} className="overflow-hidden">
+        <div className="px-4 pt-4 sm:px-5 sm:pt-5">
+          <CardHeader title="Shop position" description="Stock, Udhaar and what the shop owes, right now" className="mb-3" />
+        </div>
+        <div className="grid grid-cols-1 min-[420px]:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-px bg-line border-t border-line">
+          <PositionCell
+            icon={Boxes}
+            label="Stock value"
+            onClick={() => navigate(isAdmin ? "/valuation" : "/inventory")}
+            value={isAdmin ? fmt(inventoryCost) : `${inventoryUnits.toLocaleString()} units`}
+            hint={
+              <>
+                {isAdmin ? `At cost · ${inventoryUnits.toLocaleString()} units` : `${liveProducts.length} products`}
+                <br />
+                Retail {fmt(inventoryRetail)}
+              </>
+            }
+          />
+          <PositionCell
+            icon={AlertTriangle}
+            label="Low stock"
+            onClick={() => navigate("/inventory")}
+            value={`${lowStockProducts.length} item(s)`}
+            valueClass={lowStockProducts.length ? "text-saffron-700" : "text-ink"}
+            hint={lowStockProducts.length ? `${outOfStock} out of stock` : "All above minimum"}
+          />
+          <PositionCell
+            icon={Clock}
+            label="Udhaar pending"
+            onClick={() => navigate("/pending-payments")}
+            value={fmt(totalUdhaarPending)}
+            valueClass={totalUdhaarPending > 0 ? "text-khata-600" : "text-ink"}
+            hint={`Across ${debtors.length} customer(s)${sellerFiltered ? " · all sellers" : ""}`}
+          />
+          <PositionCell
+            icon={Truck}
+            label="Owed to suppliers"
+            value={isAdmin ? fmt(supplierOwed) : "••••••"}
+            hint={isAdmin ? `${suppliersOwedCount} supplier(s) · bought this month ${fmt(purchasedThisMonth)}` : "Owner only"}
+          />
+          <PositionCell
+            icon={Wrench}
+            label="Open repairs"
             onClick={() => navigate("/mobile-issues")}
-            className="px-4 py-3 bg-orange-600/20 hover:bg-orange-600/40 text-orange-400 font-semibold rounded-2xl text-sm flex items-center gap-2 border border-orange-500/30 transition-all"
-          >
-            <Wrench size={18} />
-            <span className="hidden sm:inline">Mobile Issue</span>
-          </button>
+            value={`${openTickets} ticket(s)`}
+            hint={`${readyForPickup} ready for pickup`}
+          />
+          <PositionCell
+            icon={Calculator}
+            label="Zakat estimate (2.5%)"
+            onClick={isAdmin ? () => navigate("/zakat") : undefined}
+            value={isAdmin ? fmt(estimatedZakat) : "••••••"}
+            hint={isAdmin ? "Stock cost + receivables only" : "Owner only"}
+          />
         </div>
-      </div>
-
-      {/* Today */}
-      <div>
-        <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Today</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-          {/* Today's Sales */}
-          <div onClick={() => navigate(isAdmin ? "/reports" : "/bills")} className={`${card} ${clickable}`}>
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Today's Sales</span>
-              <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                <DollarSign size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-slate-100">{fmt(today.revenue)}</div>
-            <div className="text-[11px] text-slate-400 mt-1">{today.bills} bill(s) today</div>
-            <div className="text-[11px] mt-0.5 font-medium flex items-center gap-1">
-              {revenueChange === null ? (
-                <span className="text-slate-500">Yesterday: {fmt(yesterday.revenue)}</span>
-              ) : (
-                <span className={`flex items-center gap-1 ${revenueChange >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                  {revenueChange >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
-                  {revenueChange >= 0 ? "+" : ""}
-                  {revenueChange}% vs yesterday ({fmt(yesterday.revenue)})
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Today's Profit (Admin) */}
-          <div
-            onClick={() => (isAdmin ? navigate("/reports") : null)}
-            className={`${card} ${isAdmin ? clickable : ""}`}
-          >
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Today's Profit</span>
-              <div className="p-2 rounded-xl bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                <TrendingUp size={18} />
-              </div>
-            </div>
-            <div className={`text-xl font-bold ${isAdmin && today.netProfit < 0 ? "text-rose-400" : "text-slate-100"}`}>
-              {isAdmin ? fmt(today.netProfit) : "••••••"}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1">
-              {isAdmin ? `Gross ${fmt(today.grossProfit)} − Expenses ${fmt(today.expenses)}` : "Restricted for Cashier"}
-            </div>
-          </div>
-
-          {/* Udhaar Given Today */}
-          <div onClick={() => navigate("/pending-payments")} className={`${card} ${clickable}`}>
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Udhaar Given</span>
-              <div className="p-2 rounded-xl bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                <Clock size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-rose-400">{fmt(today.udhaarGiven)}</div>
-            <div className="text-[11px] text-slate-400 mt-1">Unpaid amount on today's bills</div>
-          </div>
-
-          {/* Udhaar Collected Today */}
-          <div onClick={() => navigate("/pending-payments")} className={`${card} ${clickable}`}>
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Udhaar Collected</span>
-              <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                <HandCoins size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-emerald-400">{fmt(today.udhaarCollected)}</div>
-            <div className="text-[11px] text-slate-400 mt-1">Payments received today</div>
-          </div>
-
-          {/* Returns Today */}
-          <div onClick={() => navigate("/bills")} className={`${card} ${clickable}`}>
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Returns</span>
-              <div className="p-2 rounded-xl bg-orange-500/10 text-orange-400 border border-orange-500/20">
-                <Undo2 size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-orange-300">{fmt(today.returnsAmount)}</div>
-            <div className="text-[11px] text-slate-400 mt-1">{today.returnsCount} return(s) today</div>
-          </div>
-
-          {/* Expenses Today */}
-          <div onClick={() => navigate("/expenses")} className={`${card} ${clickable}`}>
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Expenses</span>
-              <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                <Wallet size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-amber-400">{fmt(today.expenses)}</div>
-            <div className="text-[11px] text-slate-400 mt-1">Yesterday: {fmt(yesterday.expenses)}</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Shop position */}
-      <div>
-        <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Shop Position</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-          {/* Inventory Value */}
-          <div onClick={() => navigate(isAdmin ? "/valuation" : "/inventory")} className={`${card} cursor-pointer hover:border-cyan-500/50 hover:shadow-cyan-500/10`}>
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Stock Value</span>
-              <div className="p-2 rounded-xl bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                <Boxes size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-slate-100">
-              {isAdmin ? fmt(inventoryCost) : `${inventoryUnits.toLocaleString()} Units`}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1">
-              {isAdmin ? `Cost • ${inventoryUnits.toLocaleString()} units` : `${liveProducts.length} products`}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-0.5">Retail: {fmt(inventoryRetail)}</div>
-          </div>
-
-          {/* Low Stock */}
-          <div onClick={() => navigate("/inventory")} className={`${card} cursor-pointer hover:border-amber-500/50 hover:shadow-amber-500/10`}>
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Low Stock</span>
-              <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                <AlertTriangle size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-slate-100">{lowStockProducts.length} Items</div>
-            <div className={`text-[11px] mt-1 font-medium ${lowStockProducts.length ? "text-amber-400" : "text-slate-400"}`}>
-              {lowStockProducts.length ? `${outOfStock} out of stock` : "All above minimum"}
-            </div>
-          </div>
-
-          {/* Udhaar Outstanding */}
-          <div onClick={() => navigate("/pending-payments")} className={`${card} cursor-pointer hover:border-rose-500/50 hover:shadow-rose-500/10`}>
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Udhaar Pending</span>
-              <div className="p-2 rounded-xl bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                <Clock size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-rose-400">{fmt(totalUdhaarPending)}</div>
-            <div className="text-[11px] text-slate-400 mt-1">
-              Across {debtors.length} customer(s){sellerFiltered ? " • all sellers" : ""}
-            </div>
-          </div>
-
-          {/* Owed to Suppliers (Admin) */}
-          <div className={card}>
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Owed to Suppliers</span>
-              <div className="p-2 rounded-xl bg-fuchsia-500/10 text-fuchsia-400 border border-fuchsia-500/20">
-                <Truck size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-fuchsia-300">{isAdmin ? fmt(supplierOwed) : "••••••"}</div>
-            <div className="text-[11px] text-slate-400 mt-1">
-              {isAdmin
-                ? `${suppliersOwedCount} supplier(s) • Bought this month ${fmt(purchasedThisMonth)}`
-                : "Admin view only"}
-            </div>
-          </div>
-
-          {/* Open Repair Tickets */}
-          <div onClick={() => navigate("/mobile-issues")} className={`${card} cursor-pointer hover:border-orange-500/50 hover:shadow-orange-500/10`}>
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Open Repairs</span>
-              <div className="p-2 rounded-xl bg-orange-500/10 text-orange-400 border border-orange-500/20">
-                <Wrench size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-slate-100">{openTickets} Ticket(s)</div>
-            <div className="text-[11px] text-slate-400 mt-1">
-              {issueCounts.find((s) => s.status === "Repaired").count} ready for pickup
-            </div>
-          </div>
-
-          {/* Estimated Zakat (Admin) */}
-          <div
-            onClick={() => (isAdmin ? navigate("/zakat") : null)}
-            className={`${card} ${isAdmin ? "cursor-pointer hover:border-purple-500/50 hover:shadow-purple-500/10" : ""}`}
-          >
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider">Est. Zakat (2.5%)</span>
-              <div className="p-2 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                <Calculator size={18} />
-              </div>
-            </div>
-            <div className="text-xl font-bold text-purple-300">{isAdmin ? fmt(estimatedZakat) : "••••••"}</div>
-            <div className="text-[11px] text-purple-400 mt-1 font-medium">
-              {isAdmin ? "Stock cost + receivables only" : "Admin view only"}
-            </div>
-          </div>
-        </div>
-      </div>
+      </Card>
 
       {/* 7-day trend & top debtors */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <BarChart3 size={20} className="text-indigo-400" />
-              <h2 className="font-bold text-slate-100 text-base">Last 7 Days</h2>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
+        <Card className="lg:col-span-2 min-w-0">
+          <CardHeader
+            title="Sales, last 7 days"
+            description={`Total ${fmt(trendTotal)} · ${trendBills} bill(s)`}
+            actions={
+              <span className="flex items-center gap-3 text-xs text-muted">
+                <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-brand-200" aria-hidden="true" />Earlier days</span>
+                <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-brand-500" aria-hidden="true" />Today</span>
+              </span>
+            }
+          />
+          <div className="relative h-52">
+            {/* Light grid: quarter lines of the highest day */}
+            <div className="absolute inset-x-0 top-0 bottom-7 flex flex-col justify-between pointer-events-none" aria-hidden="true">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="border-t border-dashed border-line" />
+              ))}
+              <div className="border-t border-line-strong" />
             </div>
-            <span className="text-xs text-slate-400">
-              Total <strong className="text-slate-200">{fmt(trendTotal)}</strong> •{" "}
-              {sumBy(trend, (d) => d.bills)} bill(s)
-            </span>
-          </div>
-          <div className="h-48 flex items-end justify-between gap-2 sm:gap-4 pt-6 border-b border-slate-800/80">
-            {trend.map((d) => {
-              const h = d.revenue > 0 ? Math.max(3, Math.round((d.revenue / trendMax) * 100)) : 0;
-              const isTodayBar = d.day === todayStr;
-              return (
-                <div key={d.day} className="flex-1 flex flex-col items-center gap-2 h-full justify-end group">
-                  <div className="w-full flex items-end justify-center h-full relative">
-                    <div className="absolute -top-10 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-950 border border-slate-700 text-[10px] p-2 rounded-xl shadow-2xl z-20 pointer-events-none whitespace-nowrap">
-                      <div className="text-indigo-400 font-bold">{fmt(d.revenue)} • {d.bills} bill(s)</div>
-                      {isAdmin && <div className="text-emerald-400 font-bold">Profit: {fmt(d.profit)}</div>}
+            <div className="absolute inset-0 flex items-stretch justify-between gap-1.5 sm:gap-4">
+              {trend.map((d, i) => {
+                const h = d.revenue > 0 ? Math.max(3, Math.round((d.revenue / trendMax) * 100)) : 0;
+                const isTodayBar = d.day === todayStr;
+                const tip = `${isTodayBar ? "Today" : d.label}: ${fmt(d.revenue)}, ${d.bills} bill(s)${isAdmin ? `, profit ${fmt(d.profit)}` : ""}`;
+                return (
+                  <div
+                    key={d.day}
+                    tabIndex={0}
+                    aria-label={tip}
+                    className="relative flex-1 min-w-0 flex flex-col items-center group outline-none"
+                  >
+                    <div className="relative w-full flex-1 flex items-end justify-center">
+                      <div
+                        role="tooltip"
+                        className={`absolute ${i < 2 ? "left-0" : i > 4 ? "right-0" : "left-1/2 -translate-x-1/2"} opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity bg-surface border border-line text-xs px-2.5 py-1.5 rounded-lg shadow-pop z-20 pointer-events-none whitespace-nowrap`}
+                        style={{ bottom: `calc(${h}% + 6px)` }}
+                      >
+                        <div className="font-semibold text-ink">{fmt(d.revenue)} · {d.bills} bill(s)</div>
+                        {isAdmin && <div className="text-ink-soft">Profit {fmt(d.profit)}</div>}
+                      </div>
+                      <div
+                        style={{ height: `${h}%` }}
+                        className={`w-2/3 max-w-[40px] rounded-t transition-colors ${
+                          isTodayBar ? "bg-brand-500 group-hover:bg-brand-600" : "bg-brand-200 group-hover:bg-brand-300"
+                        }`}
+                      />
                     </div>
-                    <div
-                      style={{ height: `${h}%` }}
-                      className={`w-2/3 max-w-[36px] rounded-t-lg transition-all duration-500 group-hover:brightness-125 ${
-                        isTodayBar ? "bg-gradient-to-t from-emerald-600 to-emerald-400" : "bg-gradient-to-t from-indigo-700 to-indigo-500"
-                      }`}
-                    />
+                    <span className={`h-7 pt-1.5 text-xs ${isTodayBar ? "font-semibold text-ink" : "text-muted"}`}>
+                      {isTodayBar ? "Today" : d.label}
+                    </span>
                   </div>
-                  <span className={`text-[11px] font-bold ${isTodayBar ? "text-emerald-400" : "text-slate-400"}`}>
-                    {isTodayBar ? "Today" : d.label}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-          {trendTotal === 0 && <p className="text-xs text-slate-500 text-center">No sales in the last 7 days</p>}
-        </div>
-
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-            <div className="flex items-center gap-2">
-              <Users size={20} className="text-rose-400" />
-              <h2 className="font-bold text-slate-100 text-base">Top Udhaar</h2>
+                );
+              })}
             </div>
-            <span className="text-xs bg-rose-500/20 text-rose-300 font-bold px-2 py-0.5 rounded-full border border-rose-500/30">
-              {debtors.length}
-            </span>
           </div>
+          {trendTotal === 0 && <p className="mt-3 text-sm text-muted text-center">No sales in the last 7 days.</p>}
+        </Card>
+
+        <Card className="flex flex-col">
+          <CardHeader
+            title="Top Udhaar"
+            description="Customers who owe the most"
+            actions={<Badge tone={debtors.length ? "khata" : "neutral"}>{debtors.length} customer(s)</Badge>}
+          />
           {debtors.length === 0 ? (
-            <p className="text-sm text-slate-500 text-center py-6">No outstanding Udhaar</p>
+            <EmptyState icon={Users} title="No Udhaar outstanding" description="Every customer has paid in full." />
           ) : (
-            <div className="space-y-2">
+            <ul className="divide-y divide-line -mt-1 flex-1">
               {debtors.slice(0, 5).map((c) => (
-                <div key={c.id} className="p-3 bg-slate-950/60 rounded-2xl border border-slate-800 flex items-center justify-between">
+                <li key={c.id} className="py-2.5 flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-xs font-bold text-slate-200 truncate">{c.name}</p>
-                    <p className="text-[11px] text-slate-500 truncate">
+                    <p className="text-sm font-semibold text-ink truncate">{c.name}</p>
+                    <p className="text-xs text-muted truncate">
                       {c.phone || "No phone"}
-                      {c.sellerName ? ` • ${c.sellerName}` : ""}
+                      {c.sellerName ? ` · ${c.sellerName}` : ""}
                     </p>
                   </div>
-                  <span className="text-xs font-bold text-rose-400 shrink-0">{fmt(c.totalPending)}</span>
-                </div>
+                  <span className="text-sm font-semibold text-khata-600 shrink-0 tabular-nums">{fmt(c.totalPending)}</span>
+                </li>
               ))}
-            </div>
+            </ul>
           )}
-          <button
-            onClick={() => navigate("/pending-payments")}
-            className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl transition-colors border border-slate-700"
-          >
-            Collect Payments
-          </button>
-        </div>
+          <Button variant="secondary" icon={HandCoins} className="w-full mt-4" onClick={() => navigate("/pending-payments")}>
+            Collect payments
+          </Button>
+        </Card>
       </div>
 
       {/* Recent bills & low stock */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Receipt size={20} className="text-indigo-400" />
-              <h2 className="font-bold text-slate-100 text-base">Recent Bills</h2>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/25">
-                Latest {recentBills.length}
-              </span>
-            </div>
-            <button
-              onClick={() => navigate("/bills")}
-              className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1 transition-colors"
-            >
-              <span>View All Bills</span>
-              <ArrowUpRight size={14} />
-            </button>
-          </div>
-
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
+        <Card className="lg:col-span-2 min-w-0">
+          <CardHeader
+            title="Recent bills"
+            description={`Latest ${recentBills.length}`}
+            actions={<MoreLink onClick={() => navigate("/bills")}>All bills</MoreLink>}
+          />
           {recentBills.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-10 text-slate-500 gap-2">
-              <Receipt size={32} className="opacity-30" />
-              <p className="text-sm font-medium">No bills created yet</p>
-              <button
-                onClick={() => navigate("/pos")}
-                className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold mt-1"
-              >
-                Go to POS Terminal →
-              </button>
-            </div>
+            <EmptyState
+              icon={Receipt}
+              title="No bills yet"
+              description="Bills show up here as soon as you make a sale."
+              action={<Button icon={ShoppingCart} onClick={() => navigate("/pos")}>Start a sale</Button>}
+            />
           ) : (
-            <div className="space-y-3">
+            <ul className="divide-y divide-line -mt-1">
               {recentBills.map((sale) => {
                 const returned = sale.paymentStatus === "returned";
                 const due = num(sale.dueAmount);
                 return (
-                  <div
-                    key={sale.id}
-                    className="flex items-center gap-4 p-4 bg-slate-950/50 border border-slate-800 rounded-2xl hover:border-slate-700 transition-all"
-                  >
+                  <li key={sale.id} className="py-3 flex items-start gap-3">
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-mono text-xs font-bold text-indigo-400">{sale.billNumber}</span>
-                        <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            returned
-                              ? "bg-orange-500/20 text-orange-300 border border-orange-500/30"
-                              : due > 0
-                              ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                              : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                          }`}
-                        >
+                      <div className="flex items-center gap-x-2 gap-y-1 flex-wrap">
+                        <span className="font-mono text-xs font-semibold text-brand-700">{sale.billNumber}</span>
+                        <Badge tone={returned ? "saffron" : due > 0 ? "khata" : "paid"}>
                           {returned ? "Returned" : due > 0 ? `Due ${fmt(due)}` : sale.paymentMethod}
-                        </span>
-                        {(sale.returns || []).length > 0 && !returned && (
-                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-300 border border-orange-500/20">
-                            Part returned
-                          </span>
-                        )}
+                        </Badge>
+                        {(sale.returns || []).length > 0 && !returned && <Badge tone="saffron">Part returned</Badge>}
                         {(sale.sellerName || sale.cashierName) && (
-                          <span className="text-[10px] text-slate-500">{sale.sellerName || sale.cashierName}</span>
+                          <span className="text-xs text-muted">{sale.sellerName || sale.cashierName}</span>
                         )}
                       </div>
-                      <p className="text-sm font-semibold text-slate-200 mt-0.5 truncate">{sale.customerName}</p>
-                      <p className="text-[11px] text-slate-500 truncate">
+                      <p className="text-sm font-semibold text-ink mt-1 truncate">{sale.customerName}</p>
+                      <p className="text-xs text-muted truncate">
                         {(sale.items || []).map((i) => i.productName || i.name).join(", ")}
                       </p>
                     </div>
                     <div className="text-right shrink-0">
-                      <div className="text-base font-bold text-slate-100">{fmt(sale.grandTotal)}</div>
-                      <div className="text-[10px] text-slate-500 mt-0.5">
-                        {itemCount(sale)} item(s) •{" "}
+                      <div className="font-display text-base font-bold text-ink tabular-nums">{fmt(sale.grandTotal)}</div>
+                      <div className="text-xs text-muted mt-0.5">{itemCount(sale)} item(s)</div>
+                      <div className="text-xs text-muted">
                         {sale.createdAt
                           ? new Date(sale.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
                           : ""}
                       </div>
                     </div>
-                  </div>
+                  </li>
                 );
               })}
-            </div>
+            </ul>
           )}
-        </div>
+        </Card>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-            <div className="flex items-center gap-2">
-              <AlertTriangle size={20} className="text-amber-400" />
-              <h2 className="font-bold text-slate-100 text-base">Low Stock Warnings</h2>
-            </div>
-            <span className="text-xs bg-amber-500/20 text-amber-300 font-bold px-2 py-0.5 rounded-full border border-amber-500/30">
-              {lowStockProducts.length}
-            </span>
-          </div>
-
-          <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-            {lowStockProducts.length === 0 && (
-              <p className="text-sm text-slate-500 text-center py-6">Every product is above its minimum stock</p>
-            )}
-            {lowStockProducts.map((prod) => {
-              const stock = getProductStock(prod);
-              return (
-                <div
-                  key={prod.id}
-                  className="p-3 bg-slate-950/60 rounded-2xl border border-slate-800 flex items-center justify-between"
-                >
-                  <div className="min-w-0">
-                    <p className="text-xs font-bold text-slate-200 truncate">{prod.name}</p>
-                    <p className="text-[11px] text-slate-400 truncate">{[prod.brand, prod.category].filter(Boolean).join(" • ")}</p>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <span
-                      className={`px-2 py-1 rounded-lg text-xs font-bold border ${
-                        stock === 0
-                          ? "bg-rose-500/10 text-rose-400 border-rose-500/20"
-                          : "bg-amber-500/10 text-amber-400 border-amber-500/20"
-                      }`}
-                    >
-                      {stock === 0 ? "Out of stock" : `${stock} left`}
-                    </span>
-                    <p className="text-[10px] text-slate-500 mt-0.5">Min Alert: {prod.minStockAlert}</p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <button
-            onClick={() => navigate("/inventory")}
-            className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl transition-colors border border-slate-700"
-          >
-            Manage Inventory Stock
-          </button>
-        </div>
+        <Card className="flex flex-col">
+          <CardHeader
+            title="Low stock"
+            description="At or below the minimum you set"
+            actions={<Badge tone={lowStockProducts.length ? "saffron" : "neutral"}>{lowStockProducts.length}</Badge>}
+          />
+          {lowStockProducts.length === 0 ? (
+            <EmptyState icon={Boxes} title="Stock looks good" description="Every product is above its minimum stock." />
+          ) : (
+            <ul className="divide-y divide-line -mt-1 max-h-80 overflow-y-auto custom-scrollbar pr-1 flex-1">
+              {lowStockProducts.map((prod) => {
+                const stock = getProductStock(prod);
+                return (
+                  <li key={prod.id} className="py-2.5 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-ink truncate">{prod.name}</p>
+                      <p className="text-xs text-muted truncate">{[prod.brand, prod.category].filter(Boolean).join(" · ")}</p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      {stock === 0 ? (
+                        <span className="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold bg-saffron-600 text-white">Out of stock</span>
+                      ) : (
+                        <Badge tone="saffron">{stock} left</Badge>
+                      )}
+                      <p className="text-xs text-muted mt-0.5">Min {prod.minStockAlert}</p>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <Button variant="secondary" icon={Boxes} className="w-full mt-4" onClick={() => navigate("/inventory")}>
+            Manage stock
+          </Button>
+        </Card>
       </div>
 
       {/* Repairs & warranties */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-            <div className="flex items-center gap-2">
-              <Wrench size={20} className="text-orange-400" />
-              <h2 className="font-bold text-slate-100 text-base">Open Repair Tickets</h2>
-            </div>
-            <button
-              onClick={() => navigate("/mobile-issues")}
-              className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1"
-            >
-              <span>Open Repairs</span>
-              <ArrowUpRight size={14} />
-            </button>
-          </div>
-          <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6">
+        <Card>
+          <CardHeader
+            title="Repair tickets"
+            description="Phones in the shop for repair"
+            actions={<MoreLink onClick={() => navigate("/mobile-issues")}>Open repairs</MoreLink>}
+          />
+          <div className="grid grid-cols-3 gap-2 sm:gap-3">
             {issueCounts.map((s) => (
-              <div key={s.status} className={`p-3 rounded-2xl border text-center ${s.cls}`}>
-                <div className="text-2xl font-black">{s.count}</div>
-                <div className="text-[11px] font-semibold mt-0.5">{s.status === "Repaired" ? "Ready for pickup" : s.status}</div>
+              <div key={s.status} className={`p-3 rounded-xl text-center ${s.cls}`}>
+                <div className="font-display text-2xl font-bold">{s.count}</div>
+                <div className="text-xs font-semibold mt-0.5 leading-tight">
+                  {s.status === "Repaired" ? "Ready for pickup" : s.status === "Under Inspection" ? "Under inspection" : s.status}
+                </div>
               </div>
             ))}
           </div>
-          <p className="text-[11px] text-slate-500">
-            {(issues || []).filter((i) => i.status === "Delivered").length} delivered •{" "}
+          <p className="mt-3 text-xs text-muted">
+            {(issues || []).filter((i) => i.status === "Delivered").length} delivered ·{" "}
             {(issues || []).filter((i) => i.status === "Rejected").length} rejected (closed)
           </p>
-        </div>
+        </Card>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-            <div className="flex items-center gap-2">
-              <ShieldCheck size={20} className="text-cyan-400" />
-              <h2 className="font-bold text-slate-100 text-base">Warranties Expiring Soon</h2>
-            </div>
-            <span className="text-xs bg-cyan-500/20 text-cyan-300 font-bold px-2 py-0.5 rounded-full border border-cyan-500/30">
-              {expiringWarranties.length}
-            </span>
-          </div>
+        <Card className="flex flex-col">
+          <CardHeader
+            title="Warranties expiring soon"
+            description="Within the next 30 days"
+            actions={<Badge tone={expiringWarranties.length ? "saffron" : "neutral"}>{expiringWarranties.length}</Badge>}
+          />
           {expiringWarranties.length === 0 ? (
-            <p className="text-sm text-slate-500 text-center py-6">No warranty expires in the next 30 days</p>
+            <EmptyState icon={ShieldCheck} title="Nothing expiring" description="No warranty expires in the next 30 days." />
           ) : (
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+            <ul className="divide-y divide-line -mt-1 max-h-64 overflow-y-auto custom-scrollbar pr-1 flex-1">
               {expiringWarranties.slice(0, 6).map((w) => (
-                <div key={w.id} className="p-3 bg-slate-950/60 rounded-2xl border border-slate-800 flex items-center justify-between">
+                <li key={w.id} className="py-2.5 flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-xs font-bold text-slate-200 truncate">{w.productName || "Product"}</p>
-                    <p className="text-[11px] text-slate-500 truncate">
-                      {w.customerName || "Customer"} • <span className="font-mono">{w.imei}</span>
+                    <p className="text-sm font-semibold text-ink truncate">{w.productName || "Product"}</p>
+                    <p className="text-xs text-muted truncate">
+                      {w.customerName || "Customer"} · <span className="font-mono">{w.imei}</span>
                     </p>
                   </div>
-                  <span className="text-[11px] font-bold text-amber-400 shrink-0">Expires {w.warrantyExpiryDate}</span>
-                </div>
+                  <span className="text-xs font-semibold text-saffron-700 shrink-0">Expires {w.warrantyExpiryDate}</span>
+                </li>
               ))}
-            </div>
+            </ul>
           )}
-          <button
-            onClick={() => navigate("/warranties")}
-            className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl transition-colors border border-slate-700"
-          >
-            View Warranties
-          </button>
-        </div>
+          <Button variant="secondary" icon={ShieldCheck} className="w-full mt-4" onClick={() => navigate("/warranties")}>
+            View warranties
+          </Button>
+        </Card>
       </div>
-    </div>
+    </Page>
   );
 };
 

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useApp, getProductStock } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
@@ -7,7 +7,6 @@ import {
   Truck,
   Plus,
   Search,
-  X,
   Edit3,
   Trash2,
   Eye,
@@ -16,12 +15,31 @@ import {
   MapPin,
   CheckCircle2,
   PackagePlus,
-  DollarSign,
+  Banknote,
   Wallet,
   ShoppingBag,
   Users,
   FileText,
 } from "lucide-react";
+import {
+  Page,
+  PageHeader,
+  Card,
+  Stat,
+  Badge,
+  Button,
+  IconButton,
+  Field,
+  Input,
+  Select,
+  Textarea,
+  Segmented,
+  TableWrap,
+  Th,
+  Td,
+  EmptyState,
+  Modal,
+} from "../components/ui";
 
 // Same category names Inventory uses
 const CATEGORIES = ["Smartphones", "Tablets & iPads", "Accessories", "Spare Parts", "Wearables"];
@@ -34,13 +52,6 @@ const num = (v) => Number(v) || 0;
 
 // Products whose stock is counted from IMEI units rather than a plain quantity
 const isImeiProduct = (p) => (p.imeis && p.imeis.length > 0) || p.category === "Smartphones";
-
-const inputCls =
-  "w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100 mt-1 focus:outline-none focus:border-fuchsia-500";
-const smallInputCls =
-  "w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-slate-100 mt-1 focus:outline-none focus:border-fuchsia-500";
-const labelCls = "text-xs font-semibold text-slate-300";
-const smallLabelCls = "text-[11px] font-semibold text-slate-400";
 
 const emptySupplierForm = { name: "", phone: "", company: "", address: "", notes: "", openingBalance: "" };
 
@@ -90,6 +101,15 @@ const itemsSummary = (tx) =>
     .map((it) => `${[it.brand, it.name].filter(Boolean).join(" ") || "Item"} x${txItemUnits(it)}`)
     .join(", ");
 
+
+// Red error note shown above a form's buttons
+const ErrorNote = ({ children }) =>
+  children ? (
+    <div role="alert" className="bg-khata-50 border border-khata-200 text-khata-700 text-sm px-3 py-2.5 rounded-xl">
+      {children}
+    </div>
+  ) : null;
+
 // Searchable product picker for a purchase line
 const ProductPicker = ({ products, line, onPick, onQuery }) => {
   const q = line.productQuery.trim().toLowerCase();
@@ -105,52 +125,49 @@ const ProductPicker = ({ products, line, onPick, onQuery }) => {
 
   if (selected) {
     return (
-      <div className="flex items-center justify-between gap-2 bg-slate-950 border border-fuchsia-500/30 rounded-lg px-3 py-2 mt-1">
+      <div className="flex items-center justify-between gap-2 bg-brand-50 border border-brand-100 rounded-xl pl-3 pr-1 py-1">
         <div className="min-w-0">
-          <div className="text-xs font-bold text-slate-100 truncate">{selected.name}</div>
-          <div className="text-[10px] text-slate-400">
-            {selected.brand} • {selected.category} • Stock: {getProductStock(selected)}
-            {isImeiProduct(selected) ? " • IMEI tracked" : ""}
+          <div className="text-sm font-semibold text-ink truncate">{selected.name}</div>
+          <div className="text-xs text-ink-soft">
+            {selected.brand} · {selected.category} · Stock {getProductStock(selected)}
+            {isImeiProduct(selected) ? " · IMEI tracked" : ""}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => onPick(null)}
-          className="text-[11px] text-fuchsia-300 hover:text-fuchsia-200 font-bold shrink-0"
-        >
+        <Button variant="secondary" onClick={() => onPick(null)} className="shrink-0">
           Change
-        </button>
+        </Button>
       </div>
     );
   }
 
   return (
-    <div className="relative">
+    <div className="space-y-1.5">
       <div className="relative">
-        <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500 mt-0.5" />
-        <input
+        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+        <Input
           type="text"
+          aria-label="Search product"
           value={line.productQuery}
           onChange={(e) => onQuery(e.target.value)}
-          placeholder="Search product by name, brand, model..."
-          className={`${smallInputCls} pl-7`}
+          placeholder="Search product by name, brand, model…"
+          className="pl-9"
         />
       </div>
-      <div className="mt-1 max-h-40 overflow-y-auto bg-slate-950 border border-slate-800 rounded-lg divide-y divide-slate-800/70">
+      <div className="max-h-48 overflow-y-auto custom-scrollbar bg-surface border border-line rounded-xl divide-y divide-line">
         {matches.length === 0 ? (
-          <div className="p-2 text-[11px] text-slate-500 text-center">No product found — use "New product" instead.</div>
+          <div className="p-3 text-sm text-muted text-center">No product found. Switch to "New product" instead.</div>
         ) : (
           matches.map((p) => (
             <button
               type="button"
               key={p.id}
               onClick={() => onPick(p)}
-              className="w-full text-left px-3 py-1.5 hover:bg-slate-800/70 flex items-center justify-between gap-2"
+              className="w-full min-h-10 text-left px-3 py-2 hover:bg-sunken flex items-center justify-between gap-2"
             >
-              <span className="text-xs text-slate-200 truncate">
-                {p.name} <span className="text-slate-500">• {p.brand}</span>
+              <span className="text-sm text-ink truncate">
+                {p.name} <span className="text-muted">· {p.brand}</span>
               </span>
-              <span className="text-[10px] text-slate-500 shrink-0">Stock {getProductStock(p)}</span>
+              <span className="text-xs text-muted shrink-0">Stock {getProductStock(p)}</span>
             </button>
           ))
         )}
@@ -261,11 +278,12 @@ const Suppliers = () => {
     setShowSupplierForm(true);
   };
 
-  const closeSupplierForm = () => {
+  // Modal close handlers are stable, so an open modal does not take focus back from its inputs on every keystroke
+  const closeSupplierForm = useCallback(() => {
     setShowSupplierForm(false);
     setEditingSupplier(null);
     setSupplierError("");
-  };
+  }, []);
 
   const handleSupplierSubmit = async (e) => {
     e.preventDefault();
@@ -306,14 +324,14 @@ const Suppliers = () => {
   };
 
   // ── Account view ─────────────────────────────────────────────────────────
-  const closeAccount = () => {
+  const closeAccount = useCallback(() => {
     setViewId(null);
     if (searchParams.get("open")) {
       const next = new URLSearchParams(searchParams);
       next.delete("open");
       setSearchParams(next, { replace: true });
     }
-  };
+  }, [searchParams, setSearchParams]);
 
   // Statement: opening balance, then every entry oldest first with a running balance owed
   const statement = useMemo(() => {
@@ -561,679 +579,618 @@ const Suppliers = () => {
     }
   };
 
-  const balanceCls = (b) => (b > 0 ? "text-rose-400" : b < 0 ? "text-emerald-400" : "text-slate-300");
+
+  const balanceCls = (b) => (b > 0 ? "text-khata-600" : b < 0 ? "text-paid-600" : "text-ink-soft");
   const balanceLabel = (b) => (b < 0 ? `${money(-b)} advance` : money(b));
+
+  const closePurchase = useCallback(() => setShowPurchase(false), []);
+  const closePayment = useCallback(() => setShowPayment(false), []);
+  const closeTx = useCallback(() => setEditingTx(null), []);
+  // Esc / backdrop on a form opened from the account closes that form only, not the account under it
+  const subFormOpen = showSupplierForm || showPurchase || showPayment || !!editingTx;
+  const closeAccountView = useCallback(() => {
+    if (subFormOpen) return;
+    closeAccount();
+  }, [subFormOpen, closeAccount]);
 
   // Supplier accounts are the owner's only (the route is admin-only too; the server refuses cashiers)
   if (!isAdmin) {
     return (
-      <div className="p-6">
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-10 text-center text-slate-400">
-          <Truck size={40} className="mx-auto mb-3 opacity-30" />
-          <p className="text-sm font-semibold text-slate-200">Suppliers are managed by the owner only.</p>
-        </div>
-      </div>
+      <Page>
+        <Card>
+          <EmptyState icon={Truck} title="Suppliers are managed by the owner only" description="Ask the owner to log in to see supplier accounts." />
+        </Card>
+      </Page>
     );
   }
 
+  const rowActions = (s) => (
+    <div className="flex gap-1 justify-end">
+      <IconButton icon={Eye} label="Open account" onClick={() => setViewId(s.id)} />
+      <IconButton icon={Edit3} label="Edit supplier" onClick={() => openEditSupplier(s)} />
+      <IconButton icon={Trash2} label="Delete supplier" variant="danger-soft" onClick={() => handleDeleteSupplier(s)} />
+    </div>
+  );
+
   return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-sm">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <Truck size={24} className="text-fuchsia-400" />
-            <h1 className="text-xl font-bold text-slate-100">Suppliers</h1>
+    <Page>
+      <PageHeader
+        title="Suppliers"
+        description="Purchases, payments and what the shop still owes each supplier. A purchase can add its stock straight into inventory."
+        actions={<Button icon={Plus} onClick={openAddSupplier}>Add supplier</Button>}
+      />
+
+      {/* Summary */}
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <Stat label="Suppliers" icon={Users} value={(suppliers || []).length.toLocaleString()} />
+        <Stat label="You owe suppliers" icon={Wallet} tone={totalOwed > 0 ? "khata" : "neutral"} value={money(totalOwed)} />
+        <Stat label="Total purchased" icon={ShoppingBag} value={money(totalPurchased)} />
+        <Stat label="Total paid" icon={Banknote} tone="paid" value={money(totalPaid)} />
+      </div>
+
+      {/* Supplier list */}
+      <Card padded={false}>
+        <div className="p-4 sm:p-5 border-b border-line flex flex-col sm:flex-row sm:items-center gap-3 sm:justify-between">
+          <h2 className="text-base font-semibold">Supplier accounts ({filtered.length})</h2>
+          <div className="relative sm:w-80">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+            <Input
+              type="text"
+              aria-label="Search suppliers"
+              placeholder="Search name, company, phone…"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="pl-9"
+            />
           </div>
-          <p className="text-xs text-slate-400">
-            Supplier accounts — purchases, payments and what the shop still owes. Purchases can add stock straight into inventory.
-          </p>
-        </div>
-        <button
-          onClick={openAddSupplier}
-          className="flex items-center gap-2 px-5 py-2.5 bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-bold rounded-2xl shadow-lg shadow-fuchsia-600/20 transition-all text-sm"
-        >
-          <Plus size={16} /> Add Supplier
-        </button>
-      </div>
-
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {[
-          { label: "Suppliers", value: (suppliers || []).length.toLocaleString(), icon: Users, color: "from-slate-700 to-slate-600" },
-          { label: "Total Owed", value: money(totalOwed), icon: Wallet, color: "from-rose-600 to-rose-500" },
-          { label: "Total Purchased", value: money(totalPurchased), icon: ShoppingBag, color: "from-fuchsia-600 to-fuchsia-500" },
-          { label: "Total Paid", value: money(totalPaid), icon: DollarSign, color: "from-emerald-600 to-emerald-500" },
-        ].map(({ label, value, icon: Icon, color }) => (
-          <div key={label} className={`bg-gradient-to-br ${color} rounded-2xl p-4 shadow`}>
-            <div className="flex items-center justify-between text-xs text-white/70 font-semibold uppercase mb-1">
-              <span>{label}</span>
-              <Icon size={14} />
-            </div>
-            <div className="text-xl font-black text-white">{value}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Search */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-        <div className="relative">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Search suppliers by name, company, phone..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-8 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-100 focus:outline-none focus:border-fuchsia-500"
-          />
-        </div>
-      </div>
-
-      {/* Supplier List */}
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-sm">
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-          <h2 className="font-bold text-slate-100 text-sm">Suppliers ({filtered.length})</h2>
         </div>
 
         {filtered.length === 0 ? (
-          <div className="text-center py-16 text-slate-500">
-            <Truck size={48} className="mx-auto mb-3 opacity-20" />
-            <p className="text-sm">{(suppliers || []).length === 0 ? "No suppliers yet" : "No supplier matches your search"}</p>
-            {(suppliers || []).length === 0 && (
-              <button onClick={openAddSupplier} className="mt-3 text-xs text-fuchsia-400 hover:underline">Add your first supplier</button>
-            )}
-          </div>
+          <EmptyState
+            icon={Truck}
+            title={(suppliers || []).length === 0 ? "No suppliers yet" : "No supplier matches your search"}
+            description={
+              (suppliers || []).length === 0
+                ? "Add the people you buy stock from to keep track of what you owe them."
+                : "Try a different name, company or phone number."
+            }
+            action={(suppliers || []).length === 0 && <Button icon={Plus} onClick={openAddSupplier}>Add your first supplier</Button>}
+          />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-950/60 text-slate-400 uppercase text-[10px] tracking-wider">
-                <tr>
-                  <th className="p-3.5 font-semibold">Supplier</th>
-                  <th className="p-3.5 font-semibold">Phone</th>
-                  <th className="p-3.5 font-semibold text-right">Balance Owed</th>
-                  <th className="p-3.5 font-semibold text-right">Purchased</th>
-                  <th className="p-3.5 font-semibold text-right">Paid</th>
-                  <th className="p-3.5 font-semibold">Last Activity</th>
-                  <th className="p-3.5 font-semibold text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800">
-                {filtered.map((s) => (
-                  <tr key={s.id} className="hover:bg-slate-800/40 transition-colors">
-                    <td className="p-3.5">
-                      <button onClick={() => setViewId(s.id)} className="text-left">
-                        <div className="font-bold text-slate-100 text-sm hover:text-fuchsia-300">{s.name}</div>
-                        {s.company && <div className="text-[11px] text-slate-400">{s.company}</div>}
-                      </button>
-                    </td>
-                    <td className="p-3.5">
-                      {s.phone ? (
-                        <a href={`tel:${s.phone}`} className="font-mono text-cyan-300 hover:underline">{s.phone}</a>
-                      ) : (
-                        <span className="text-slate-500">—</span>
-                      )}
-                    </td>
-                    <td className={`p-3.5 text-right font-extrabold ${balanceCls(s.balance)}`}>{balanceLabel(s.balance)}</td>
-                    <td className="p-3.5 text-right text-slate-200">{money(s.totalPurchased)}</td>
-                    <td className="p-3.5 text-right text-emerald-300">{money(s.totalPaid)}</td>
-                    <td className="p-3.5 text-slate-400">{s.lastActivity ? fmtDate(s.lastActivity) : "—"}</td>
-                    <td className="p-3.5">
-                      <div className="flex gap-1 justify-end">
-                        <button onClick={() => setViewId(s.id)} title="View account" className="p-1.5 text-slate-400 hover:text-fuchsia-300 hover:bg-slate-800 rounded-lg transition-colors"><Eye size={14} /></button>
-                        <button onClick={() => openEditSupplier(s)} title="Edit" className="p-1.5 text-slate-500 hover:text-indigo-400 hover:bg-slate-800 rounded-lg transition-colors"><Edit3 size={14} /></button>
-                        <button onClick={() => handleDeleteSupplier(s)} title="Delete" className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded-lg transition-colors"><Trash2 size={14} /></button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* ── Supplier Account View ── */}
-      {viewSupplier && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-5xl rounded-3xl p-6 shadow-2xl flex flex-col max-h-[92vh]">
-            {/* Header */}
-            <div className="flex flex-col md:flex-row items-start md:items-center justify-between border-b border-slate-800 pb-4 mb-4 gap-3">
-              <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-2xl bg-fuchsia-600/20 border border-fuchsia-500/30 flex items-center justify-center text-fuchsia-300 font-black text-lg">
-                  {viewSupplier.name?.charAt(0)?.toUpperCase() || "S"}
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-100 text-xl">{viewSupplier.name}</h3>
-                  <div className="text-xs text-slate-400 mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
-                    {viewSupplier.company && <span className="flex items-center gap-1"><Building2 size={11} /> {viewSupplier.company}</span>}
-                    {viewSupplier.phone && (
-                      <a href={`tel:${viewSupplier.phone}`} className="flex items-center gap-1 font-mono text-cyan-300 hover:underline">
-                        <Phone size={11} /> {viewSupplier.phone}
-                      </a>
-                    )}
-                    {viewSupplier.address && <span className="flex items-center gap-1"><MapPin size={11} /> {viewSupplier.address}</span>}
+          <>
+            {/* Phones: one card per supplier */}
+            <ul className="md:hidden divide-y divide-line">
+              {filtered.map((s) => (
+                <li key={s.id} className="p-4 space-y-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <button type="button" onClick={() => setViewId(s.id)} className="min-w-0 text-left">
+                      <div className="font-semibold text-ink truncate">{s.name}</div>
+                      {s.company && <div className="text-xs text-muted truncate">{s.company}</div>}
+                    </button>
+                    <div className="text-right shrink-0">
+                      <div className="text-xs text-muted">Balance owed</div>
+                      <div className={`font-semibold tabular-nums ${balanceCls(s.balance)}`}>{balanceLabel(s.balance)}</div>
+                    </div>
                   </div>
-                  {viewSupplier.notes && <p className="text-[11px] text-slate-500 mt-0.5">{viewSupplier.notes}</p>}
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 self-end md:self-auto">
-                <button
-                  onClick={openPurchase}
-                  className="px-3.5 py-2 bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-fuchsia-600/20"
-                >
-                  <PackagePlus size={14} /> New Purchase
-                </button>
-                <button
-                  onClick={openPayment}
-                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/20"
-                >
-                  <DollarSign size={14} /> Pay Supplier
-                </button>
-                <button onClick={() => openEditSupplier(viewSupplier)} title="Edit supplier" className="p-2 text-slate-400 hover:text-indigo-300 rounded-xl hover:bg-slate-800">
-                  <Edit3 size={16} />
-                </button>
-                <button onClick={closeAccount} className="text-slate-400 hover:text-white p-2 rounded-xl hover:bg-slate-800 transition-colors">
-                  <X size={20} />
-                </button>
-              </div>
-            </div>
-
-            {/* Balance cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-              {[
-                { label: "Opening Balance", value: money(viewSupplier.openingBalance), cls: "text-slate-200" },
-                { label: "Purchased", value: money(viewSupplier.totalPurchased), cls: "text-fuchsia-300" },
-                { label: "Paid", value: money(viewSupplier.totalPaid), cls: "text-emerald-300" },
-                { label: "Balance Owed", value: balanceLabel(viewSupplier.balance), cls: balanceCls(viewSupplier.balance) },
-              ].map(({ label, value, cls }) => (
-                <div key={label} className="bg-slate-950 border border-slate-800 rounded-2xl p-3">
-                  <div className="text-[10px] text-slate-500 uppercase font-bold">{label}</div>
-                  <div className={`text-base font-extrabold ${cls}`}>{value}</div>
-                </div>
+                  <p className="text-xs text-muted">
+                    Purchased {money(s.totalPurchased)} · Paid {money(s.totalPaid)} · Last {s.lastActivity ? fmtDate(s.lastActivity) : "—"}
+                  </p>
+                  <div className="flex items-center justify-between gap-2">
+                    {s.phone ? (
+                      <a href={`tel:${s.phone}`} className="inline-flex h-10 items-center gap-1.5 rounded-lg px-2 -ml-2 font-mono text-sm text-brand-700 hover:bg-brand-50">
+                        <Phone size={14} aria-hidden="true" /> {s.phone}
+                      </a>
+                    ) : (
+                      <span className="text-sm text-muted">No phone</span>
+                    )}
+                    {rowActions(s)}
+                  </div>
+                </li>
               ))}
-            </div>
+            </ul>
 
-            {/* Statement */}
-            <div className="flex-1 overflow-y-auto border border-slate-800 rounded-2xl">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider sticky top-0">
+            {/* Tablet and up: table */}
+            <div className="hidden md:block p-4 sm:p-5 pt-2 sm:pt-3">
+              <TableWrap>
+                <thead>
                   <tr>
-                    <th className="p-3 font-semibold">Date</th>
-                    <th className="p-3 font-semibold">Type</th>
-                    <th className="p-3 font-semibold">Invoice / Ref</th>
-                    <th className="p-3 font-semibold">Items</th>
-                    <th className="p-3 font-semibold text-right">Amount</th>
-                    <th className="p-3 font-semibold text-right">Paid</th>
-                    <th className="p-3 font-semibold text-right">Balance Owed</th>
-                    <th className="p-3 font-semibold">Notes</th>
-                    <th className="p-3 font-semibold text-right"></th>
+                    <Th>Supplier</Th>
+                    <Th>Phone</Th>
+                    <Th className="text-right">Balance owed</Th>
+                    <Th className="text-right">Purchased</Th>
+                    <Th className="text-right">Paid</Th>
+                    <Th>Last activity</Th>
+                    <Th className="text-right">Actions</Th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800">
-                  <tr className="bg-slate-950/40">
-                    <td className="p-3 text-slate-500">—</td>
-                    <td className="p-3 text-slate-400 font-semibold" colSpan={5}>Opening balance</td>
-                    <td className={`p-3 text-right font-bold ${balanceCls(viewSupplier.openingBalance)}`}>{money(viewSupplier.openingBalance)}</td>
-                    <td className="p-3" colSpan={2}></td>
+                <tbody>
+                  {filtered.map((s) => (
+                    <tr key={s.id} className="hover:bg-sunken/60 transition-colors">
+                      <Td>
+                        <button type="button" onClick={() => setViewId(s.id)} className="text-left">
+                          <div className="font-semibold text-ink hover:text-brand-700">{s.name}</div>
+                          {s.company && <div className="text-xs text-muted">{s.company}</div>}
+                        </button>
+                      </Td>
+                      <Td>
+                        {s.phone ? (
+                          <a href={`tel:${s.phone}`} className="font-mono text-brand-700 hover:underline whitespace-nowrap">{s.phone}</a>
+                        ) : (
+                          <span className="text-muted">—</span>
+                        )}
+                      </Td>
+                      <Td className={`text-right font-semibold whitespace-nowrap ${balanceCls(s.balance)}`}>{balanceLabel(s.balance)}</Td>
+                      <Td className="text-right text-ink whitespace-nowrap">{money(s.totalPurchased)}</Td>
+                      <Td className="text-right text-ink-soft whitespace-nowrap">{money(s.totalPaid)}</Td>
+                      <Td className="text-ink-soft whitespace-nowrap">{s.lastActivity ? fmtDate(s.lastActivity) : "—"}</Td>
+                      <Td>{rowActions(s)}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </TableWrap>
+            </div>
+          </>
+        )}
+      </Card>
+
+      {/* ── Supplier account view (rendered before the forms opened from it, so they sit on top) ── */}
+      <Modal
+        open={!!viewSupplier}
+        onClose={closeAccountView}
+        size="xl"
+        title={viewSupplier?.name || "Supplier"}
+        description={
+          viewSupplier && (
+            <span className="flex flex-wrap gap-x-3 gap-y-0.5">
+              {viewSupplier.company && <span className="inline-flex items-center gap-1"><Building2 size={12} aria-hidden="true" /> {viewSupplier.company}</span>}
+              {viewSupplier.phone && (
+                <a href={`tel:${viewSupplier.phone}`} className="inline-flex items-center gap-1 font-mono text-brand-700 hover:underline">
+                  <Phone size={12} aria-hidden="true" /> {viewSupplier.phone}
+                </a>
+              )}
+              {viewSupplier.address && <span className="inline-flex items-center gap-1"><MapPin size={12} aria-hidden="true" /> {viewSupplier.address}</span>}
+            </span>
+          )
+        }
+      >
+        {viewSupplier && (
+          <div className="space-y-4">
+            {viewSupplier.notes && <p className="text-sm text-ink-soft">{viewSupplier.notes}</p>}
+
+            <div className="flex flex-wrap gap-2">
+              <Button icon={PackagePlus} onClick={openPurchase}>New purchase</Button>
+              <Button variant="success" icon={Banknote} onClick={openPayment}>Record payment</Button>
+              <Button variant="secondary" icon={Edit3} onClick={() => openEditSupplier(viewSupplier)}>Edit supplier</Button>
+            </div>
+
+            {/* Balance */}
+            <dl className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                { label: "Opening balance", value: money(viewSupplier.openingBalance), cls: "text-ink" },
+                { label: "Purchased", value: money(viewSupplier.totalPurchased), cls: "text-ink" },
+                { label: "Paid", value: money(viewSupplier.totalPaid), cls: "text-paid-600" },
+                { label: "Balance owed", value: balanceLabel(viewSupplier.balance), cls: balanceCls(viewSupplier.balance) },
+              ].map(({ label, value, cls }) => (
+                <div key={label} className="rounded-xl border border-line p-3 min-w-0">
+                  <dt className="text-xs text-muted">{label}</dt>
+                  <dd className={`mt-0.5 font-display text-base sm:text-lg font-bold break-words ${cls}`}>{value}</dd>
+                </div>
+              ))}
+            </dl>
+
+            {/* Statement */}
+            <div>
+              <h3 className="text-base font-semibold mb-2">Account statement</h3>
+              <TableWrap>
+                <thead>
+                  <tr>
+                    <Th>Date</Th>
+                    <Th>Type</Th>
+                    <Th>Invoice / ref</Th>
+                    <Th>Items</Th>
+                    <Th className="text-right">Amount</Th>
+                    <Th className="text-right">Paid</Th>
+                    <Th className="text-right">Balance owed</Th>
+                    <Th>Notes</Th>
+                    <Th className="text-right"><span className="sr-only">Actions</span></Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="bg-sunken/50">
+                    <Td className="text-muted">—</Td>
+                    <Td className="font-semibold text-ink-soft" colSpan={5}>Opening balance</Td>
+                    <Td className={`text-right font-semibold whitespace-nowrap ${balanceCls(viewSupplier.openingBalance)}`}>{money(viewSupplier.openingBalance)}</Td>
+                    <Td colSpan={2}></Td>
                   </tr>
                   {statement.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="p-8 text-center text-slate-500">
-                        <FileText size={32} className="mx-auto mb-2 opacity-30" />
-                        No purchases or payments yet. Use "New Purchase" or "Pay Supplier".
+                      <td colSpan={9}>
+                        <EmptyState
+                          icon={FileText}
+                          title="No purchases or payments yet"
+                          description='Use "New purchase" when stock arrives and "Record payment" when you pay.'
+                        />
                       </td>
                     </tr>
                   ) : (
                     statement.map((t) => (
-                      <tr key={t.id} className="hover:bg-slate-800/40">
-                        <td className="p-3 text-slate-300 whitespace-nowrap">{fmtDate(t.date)}</td>
-                        <td className="p-3">
-                          {t.type === "purchase" ? (
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
-                              Purchase
-                            </span>
-                          ) : (
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                              Payment
-                            </span>
-                          )}
-                          {t.stockAdded && <div className="text-[9px] text-slate-500 mt-0.5">Stock added</div>}
-                        </td>
-                        <td className="p-3 font-mono text-slate-300">{t.invoiceNumber || "—"}</td>
-                        <td className="p-3 text-slate-300 max-w-[220px]">
+                      <tr key={t.id} className="hover:bg-sunken/60">
+                        <Td className="text-ink-soft whitespace-nowrap">{fmtDate(t.date)}</Td>
+                        <Td>
+                          {t.type === "purchase" ? <Badge tone="brand">Purchase</Badge> : <Badge tone="paid">Payment</Badge>}
+                          {t.stockAdded && <div className="text-[11px] text-muted mt-0.5 whitespace-nowrap">Stock added</div>}
+                        </Td>
+                        <Td className="font-mono text-ink-soft whitespace-nowrap">{t.invoiceNumber || "—"}</Td>
+                        <Td className="text-ink-soft min-w-[160px] max-w-[240px]">
                           <span className="line-clamp-2" title={itemsSummary(t)}>{itemsSummary(t) || "—"}</span>
-                        </td>
-                        <td className="p-3 text-right text-slate-100 font-semibold whitespace-nowrap">{t.type === "purchase" ? money(t.amount) : "—"}</td>
-                        <td className="p-3 text-right text-emerald-300 whitespace-nowrap">{t.paid ? money(t.paid) : "—"}</td>
-                        <td className={`p-3 text-right font-bold whitespace-nowrap ${balanceCls(t.running)}`}>{balanceLabel(t.running)}</td>
-                        <td className="p-3 text-slate-400 max-w-[160px]"><span className="line-clamp-2">{t.notes || ""}</span></td>
-                        <td className="p-3">
+                        </Td>
+                        <Td className="text-right text-ink font-semibold whitespace-nowrap">{t.type === "purchase" ? money(t.amount) : "—"}</Td>
+                        <Td className="text-right text-paid-600 whitespace-nowrap">{t.paid ? money(t.paid) : "—"}</Td>
+                        <Td className={`text-right font-semibold whitespace-nowrap ${balanceCls(t.running)}`}>{balanceLabel(t.running)}</Td>
+                        <Td className="text-muted min-w-[120px] max-w-[180px]"><span className="line-clamp-2">{t.notes || ""}</span></Td>
+                        <Td>
                           <div className="flex gap-1 justify-end">
-                            <button onClick={() => openEditTx(t)} title="Edit" className="p-1.5 text-slate-500 hover:text-indigo-400 hover:bg-slate-800 rounded-lg"><Edit3 size={13} /></button>
-                            <button onClick={() => handleDeleteTx(t)} title="Delete" className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded-lg"><Trash2 size={13} /></button>
+                            <IconButton icon={Edit3} label="Edit entry" onClick={() => openEditTx(t)} />
+                            <IconButton icon={Trash2} label="Delete entry" variant="danger-soft" onClick={() => handleDeleteTx(t)} />
                           </div>
-                        </td>
+                        </Td>
                       </tr>
                     ))
                   )}
                 </tbody>
-              </table>
+              </TableWrap>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
 
       {/* ── Add / Edit Supplier Modal ── */}
-      {showSupplierForm && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-lg rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-100 text-base">{editingSupplier ? "Edit Supplier" : "Add New Supplier"}</h3>
-              <button onClick={closeSupplierForm} className="text-slate-400 hover:text-white"><X size={18} /></button>
-            </div>
-
-            {supplierError && (
-              <div className="bg-red-950/30 border border-red-900/50 text-red-400 text-xs px-3 py-2 rounded-xl">{supplierError}</div>
-            )}
-
-            <form onSubmit={handleSupplierSubmit} className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="col-span-2">
-                  <label className={labelCls}>Supplier Name *</label>
-                  <input type="text" required value={supplierForm.name} onChange={(e) => setSupplierForm({ ...supplierForm, name: e.target.value })}
-                    className={inputCls} placeholder="e.g. Ali Mobile Traders" />
-                </div>
-                <div>
-                  <label className={labelCls}>Phone</label>
-                  <input type="text" value={supplierForm.phone} onChange={(e) => setSupplierForm({ ...supplierForm, phone: e.target.value })}
-                    className={inputCls} placeholder="03xx-xxxxxxx" />
-                </div>
-                <div>
-                  <label className={labelCls}>Company</label>
-                  <input type="text" value={supplierForm.company} onChange={(e) => setSupplierForm({ ...supplierForm, company: e.target.value })}
-                    className={inputCls} placeholder="Optional" />
-                </div>
-                <div className="col-span-2">
-                  <label className={labelCls}>Address</label>
-                  <input type="text" value={supplierForm.address} onChange={(e) => setSupplierForm({ ...supplierForm, address: e.target.value })}
-                    className={inputCls} placeholder="Optional" />
-                </div>
-                <div className="col-span-2">
-                  <label className={labelCls}>Opening Balance ({curr})</label>
-                  <input type="number" min="0" step="any" value={supplierForm.openingBalance} onChange={(e) => setSupplierForm({ ...supplierForm, openingBalance: e.target.value })}
-                    className={inputCls} placeholder="0" />
-                  <p className="text-[10px] text-slate-500 mt-1">Amount you already owed this supplier before using the app.</p>
-                </div>
-                <div className="col-span-2">
-                  <label className={labelCls}>Notes</label>
-                  <textarea rows={2} value={supplierForm.notes} onChange={(e) => setSupplierForm({ ...supplierForm, notes: e.target.value })}
-                    className={`${inputCls} resize-none`} placeholder="Optional notes..." />
-                </div>
-              </div>
-
-              <div className="flex gap-3 pt-2">
-                <button type="button" onClick={closeSupplierForm} className="flex-1 py-2.5 bg-slate-800 text-slate-300 text-sm font-bold rounded-xl hover:bg-slate-700">
-                  Cancel
-                </button>
-                <button type="submit" disabled={savingSupplier}
-                  className="flex-1 py-2.5 bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-60 text-white text-sm font-bold rounded-xl shadow-lg shadow-fuchsia-600/20 flex items-center justify-center gap-2">
-                  <CheckCircle2 size={16} />
-                  {savingSupplier ? "Saving..." : editingSupplier ? "Update Supplier" : "Save Supplier"}
-                </button>
-              </div>
-            </form>
+      <Modal
+        open={showSupplierForm}
+        onClose={closeSupplierForm}
+        z="z-[60]"
+        title={editingSupplier ? "Edit supplier" : "Add supplier"}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeSupplierForm}>Cancel</Button>
+            <Button type="submit" form="supplier-form" icon={CheckCircle2} loading={savingSupplier}>
+              {savingSupplier ? "Saving…" : editingSupplier ? "Update supplier" : "Save supplier"}
+            </Button>
+          </>
+        }
+      >
+        <form id="supplier-form" onSubmit={handleSupplierSubmit} className="space-y-4">
+          <ErrorNote>{supplierError}</ErrorNote>
+          <Field label="Supplier name *" htmlFor="sup-name">
+            <Input id="sup-name" type="text" required value={supplierForm.name} onChange={(e) => setSupplierForm({ ...supplierForm, name: e.target.value })}
+              placeholder="e.g. Ali Mobile Traders" />
+          </Field>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Phone" htmlFor="sup-phone">
+              <Input id="sup-phone" type="tel" value={supplierForm.phone} onChange={(e) => setSupplierForm({ ...supplierForm, phone: e.target.value })}
+                placeholder="03xx-xxxxxxx" />
+            </Field>
+            <Field label="Company" htmlFor="sup-company">
+              <Input id="sup-company" type="text" value={supplierForm.company} onChange={(e) => setSupplierForm({ ...supplierForm, company: e.target.value })}
+                placeholder="Optional" />
+            </Field>
           </div>
-        </div>
-      )}
+          <Field label="Address" htmlFor="sup-address">
+            <Input id="sup-address" type="text" value={supplierForm.address} onChange={(e) => setSupplierForm({ ...supplierForm, address: e.target.value })}
+              placeholder="Optional" />
+          </Field>
+          <Field label={`Opening balance (${curr})`} htmlFor="sup-opening" hint="What you already owed this supplier before using the app.">
+            <Input id="sup-opening" type="number" min="0" step="any" inputMode="decimal" value={supplierForm.openingBalance}
+              onChange={(e) => setSupplierForm({ ...supplierForm, openingBalance: e.target.value })} placeholder="0" />
+          </Field>
+          <Field label="Notes" htmlFor="sup-notes">
+            <Textarea id="sup-notes" rows={2} value={supplierForm.notes} onChange={(e) => setSupplierForm({ ...supplierForm, notes: e.target.value })}
+              placeholder="Optional notes" />
+          </Field>
+        </form>
+      </Modal>
 
       {/* ── New Purchase Modal ── */}
-      {showPurchase && viewSupplier && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-[60] overflow-y-auto">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-4xl rounded-3xl p-6 shadow-2xl flex flex-col max-h-[94vh]">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
-              <div>
-                <h3 className="font-bold text-slate-100 text-base">New Purchase</h3>
-                <p className="text-[11px] text-slate-400">From {viewSupplier.name}</p>
-              </div>
-              <button onClick={() => setShowPurchase(false)} className="text-slate-400 hover:text-white"><X size={18} /></button>
-            </div>
+      <Modal
+        open={showPurchase && !!viewSupplier}
+        onClose={closePurchase}
+        z="z-[60]"
+        size="xl"
+        title="New purchase"
+        description={viewSupplier ? `From ${viewSupplier.name}` : undefined}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closePurchase}>Cancel</Button>
+            <Button type="submit" form="purchase-form" icon={CheckCircle2} loading={savingPurchase}>
+              {savingPurchase ? "Saving…" : "Save purchase"}
+            </Button>
+          </>
+        }
+      >
+        <form id="purchase-form" onSubmit={handlePurchaseSubmit} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <Field label="Date" htmlFor="pur-date">
+              <Input id="pur-date" type="date" value={purchaseForm.date} onChange={(e) => setPurchaseForm({ ...purchaseForm, date: e.target.value })} />
+            </Field>
+            <Field label="Supplier invoice no." htmlFor="pur-invoice">
+              <Input id="pur-invoice" type="text" value={purchaseForm.invoiceNumber} onChange={(e) => setPurchaseForm({ ...purchaseForm, invoiceNumber: e.target.value })}
+                placeholder="Optional" />
+            </Field>
+            <Field label="Notes" htmlFor="pur-notes">
+              <Input id="pur-notes" type="text" value={purchaseForm.notes} onChange={(e) => setPurchaseForm({ ...purchaseForm, notes: e.target.value })}
+                placeholder="Optional" />
+            </Field>
+          </div>
 
-            <form onSubmit={handlePurchaseSubmit} className="flex-1 overflow-y-auto space-y-4 pr-1">
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                <div>
-                  <label className={labelCls}>Date</label>
-                  <input type="date" value={purchaseForm.date} onChange={(e) => setPurchaseForm({ ...purchaseForm, date: e.target.value })} className={inputCls} />
-                </div>
-                <div>
-                  <label className={labelCls}>Supplier Invoice No.</label>
-                  <input type="text" value={purchaseForm.invoiceNumber} onChange={(e) => setPurchaseForm({ ...purchaseForm, invoiceNumber: e.target.value })}
-                    className={inputCls} placeholder="Optional" />
-                </div>
-                <div className="col-span-2 md:col-span-1">
-                  <label className={labelCls}>Notes</label>
-                  <input type="text" value={purchaseForm.notes} onChange={(e) => setPurchaseForm({ ...purchaseForm, notes: e.target.value })}
-                    className={inputCls} placeholder="Optional" />
-                </div>
-              </div>
-
-              {/* Item lines */}
-              <div className="space-y-3">
-                {lines.map((l, idx) => {
-                  const imeiMode = lineImeiMode(l);
-                  const units = lineUnits(l);
-                  return (
-                    <div key={l.key} className="bg-slate-950/60 border border-slate-800 rounded-2xl p-4 space-y-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold text-slate-300">Item {idx + 1}</span>
-                          <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[11px]">
-                            {[["existing", "Existing product"], ["new", "New product"]].map(([m, label]) => (
-                              <button
-                                type="button"
-                                key={m}
-                                onClick={() => setLine(l.key, { mode: m })}
-                                className={`px-2.5 py-1 rounded-md font-semibold ${l.mode === m ? "bg-fuchsia-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                        <button type="button" onClick={() => removeLine(l.key)} className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded-lg" title="Remove item">
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-
-                      {l.mode === "existing" ? (
-                        <div>
-                          <label className={smallLabelCls}>Product *</label>
-                          <ProductPicker
-                            products={liveProducts}
-                            line={l}
-                            onPick={(p) => pickProduct(l.key, p)}
-                            onQuery={(v) => setLine(l.key, { productQuery: v })}
-                          />
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                          <div className="col-span-2 md:col-span-1">
-                            <label className={smallLabelCls}>Name *</label>
-                            <input type="text" value={l.name} onChange={(e) => setLine(l.key, { name: e.target.value })} className={smallInputCls} placeholder="e.g. Galaxy A15" />
-                          </div>
-                          <div>
-                            <label className={smallLabelCls}>Brand *</label>
-                            <input type="text" value={l.brand} onChange={(e) => setLine(l.key, { brand: e.target.value })} className={smallInputCls} placeholder="e.g. Samsung" />
-                          </div>
-                          <div>
-                            <label className={smallLabelCls}>Model</label>
-                            <input type="text" value={l.model} onChange={(e) => setLine(l.key, { model: e.target.value })} className={smallInputCls} placeholder="Optional" />
-                          </div>
-                          <div>
-                            <label className={smallLabelCls}>Category</label>
-                            <select value={l.category} onChange={(e) => setLine(l.key, { category: e.target.value })} className={smallInputCls}>
-                              {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-                            </select>
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                        {imeiMode !== "none" && (
-                          <div className="col-span-2">
-                            <div className="flex items-center justify-between">
-                              <label className={smallLabelCls}>
-                                IMEIs {imeiMode === "required" ? "*" : "(or use quantity)"} — one phone per line, "imei1" or "imei1,imei2"
-                              </label>
-                            </div>
-                            <textarea
-                              rows={3}
-                              value={l.imeiText}
-                              onChange={(e) => setLine(l.key, { imeiText: e.target.value })}
-                              className={`${smallInputCls} font-mono resize-y`}
-                              placeholder={"358921098471201\n358921098471219,358921098471227"}
-                            />
-                            <div className="flex items-center justify-between mt-1">
-                              <span className="text-[10px] text-slate-500">{parseImeiText(l.imeiText).length} phone(s)</span>
-                              <select
-                                value={l.ptaStatus}
-                                onChange={(e) => setLine(l.key, { ptaStatus: e.target.value })}
-                                className="bg-slate-950 border border-slate-800 rounded-lg p-1 text-[11px] text-cyan-400 font-bold"
-                              >
-                                <option value="Approved">PTA Approved</option>
-                                <option value="Non-PTA">Non-PTA</option>
-                                <option value="CPID">CPID Approved</option>
-                              </select>
-                            </div>
-                          </div>
-                        )}
-                        {imeiMode !== "required" && (
-                          <div>
-                            <label className={smallLabelCls}>Quantity{imeiMode === "optional" ? " (if no IMEIs)" : " *"}</label>
-                            <input type="number" min="1" step="1" value={l.quantity} onChange={(e) => setLine(l.key, { quantity: e.target.value })} className={smallInputCls} />
-                          </div>
-                        )}
-                        <div>
-                          <label className={smallLabelCls}>Cost Price (each) *</label>
-                          <input type="number" min="0" step="any" value={l.costPrice} onChange={(e) => setLine(l.key, { costPrice: e.target.value })} className={smallInputCls} placeholder="0" />
-                        </div>
-                        <div>
-                          <label className={smallLabelCls}>Sale Price (each)</label>
-                          <input type="number" min="0" step="any" value={l.salePrice} onChange={(e) => setLine(l.key, { salePrice: e.target.value })} className={smallInputCls} placeholder="0" />
-                        </div>
-                        {l.mode === "new" && (
-                          <>
-                            <div>
-                              <label className={smallLabelCls}>Warranty (months)</label>
-                              <input type="number" min="0" step="1" value={l.warrantyDuration} disabled={l.warrantyType === "No Warranty"}
-                                onChange={(e) => setLine(l.key, { warrantyDuration: e.target.value })} className={`${smallInputCls} disabled:opacity-50`} />
-                            </div>
-                            <div>
-                              <label className={smallLabelCls}>Warranty Type</label>
-                              <select
-                                value={l.warrantyType}
-                                onChange={(e) => setLine(l.key, e.target.value === "No Warranty" ? { warrantyType: e.target.value, warrantyDuration: "0" } : { warrantyType: e.target.value })}
-                                className={smallInputCls}
-                              >
-                                {WARRANTY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                              </select>
-                            </div>
-                          </>
-                        )}
-                      </div>
-
-                      <div className="flex justify-end text-xs text-slate-400">
-                        {units} unit(s) × {money(l.costPrice)} ={" "}
-                        <span className="ml-1 font-extrabold text-slate-100">{money(lineTotal(l))}</span>
-                      </div>
+          {/* Item lines */}
+          <div className="space-y-3">
+            {lines.map((l, idx) => {
+              const imeiMode = lineImeiMode(l);
+              const units = lineUnits(l);
+              const id = `line-${l.key}`;
+              return (
+                <div key={l.key} className="bg-sunken/60 border border-line rounded-2xl p-3 sm:p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-semibold text-ink">Item {idx + 1}</span>
+                      <Segmented
+                        size="sm"
+                        value={l.mode}
+                        onChange={(m) => setLine(l.key, { mode: m })}
+                        options={[
+                          { value: "existing", label: "Existing product" },
+                          { value: "new", label: "New product" },
+                        ]}
+                      />
                     </div>
-                  );
-                })}
-
-                <button
-                  type="button"
-                  onClick={() => setLines((prev) => [...prev, newLine()])}
-                  className="w-full py-2.5 border border-dashed border-slate-700 hover:border-fuchsia-500 text-slate-400 hover:text-fuchsia-300 rounded-2xl text-xs font-bold flex items-center justify-center gap-1.5"
-                >
-                  <Plus size={14} /> Add Item
-                </button>
-                {!hasItems && (
-                  <p className="text-[11px] text-slate-500 text-center">
-                    No items: this saves a bill amount only (e.g. an old bill) and does not change inventory.
-                  </p>
-                )}
-              </div>
-
-              {/* Totals */}
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-                <div>
-                  <label className={labelCls}>Invoice Total</label>
-                  {hasItems ? (
-                    <div className="text-lg font-black text-slate-100 mt-1">{money(invoiceTotal)}</div>
-                  ) : (
-                    <input type="number" min="0" step="any" value={purchaseForm.total} onChange={(e) => setPurchaseForm({ ...purchaseForm, total: e.target.value })}
-                      className={inputCls} placeholder="Bill total" />
-                  )}
-                </div>
-                <div>
-                  <label className={labelCls}>Paid Now</label>
-                  <input type="number" min="0" step="any" value={purchaseForm.paid} onChange={(e) => setPurchaseForm({ ...purchaseForm, paid: e.target.value })}
-                    className={inputCls} placeholder="0" />
-                </div>
-                <div>
-                  <label className={labelCls}>What I have to pay</label>
-                  <div className={`text-lg font-black mt-1 ${toPay > 0 ? "text-rose-400" : "text-emerald-400"}`}>
-                    {toPay < 0 ? `${money(-toPay)} advance` : money(toPay)}
+                    <IconButton icon={Trash2} label="Remove item" variant="danger-soft" onClick={() => removeLine(l.key)} />
                   </div>
-                </div>
-                {hasItems && (
-                  <label className="md:col-span-3 flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={purchaseForm.addToStock}
-                      onChange={(e) => setPurchaseForm({ ...purchaseForm, addToStock: e.target.checked })}
-                      className="accent-fuchsia-500 w-4 h-4"
-                    />
-                    Add these items to inventory
-                    <span className="text-slate-500">(new products are created; existing ones are restocked with this cost and sale price)</span>
-                  </label>
-                )}
-              </div>
 
-              {purchaseError && (
-                <div className="bg-red-950/30 border border-red-900/50 text-red-400 text-xs px-3 py-2 rounded-xl">{purchaseError}</div>
-              )}
+                  {l.mode === "existing" ? (
+                    <Field label="Product *">
+                      <ProductPicker
+                        products={liveProducts}
+                        line={l}
+                        onPick={(p) => pickProduct(l.key, p)}
+                        onQuery={(v) => setLine(l.key, { productQuery: v })}
+                      />
+                    </Field>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                      <Field label="Name *" htmlFor={`${id}-name`}>
+                        <Input id={`${id}-name`} type="text" value={l.name} onChange={(e) => setLine(l.key, { name: e.target.value })} placeholder="e.g. Galaxy A15" />
+                      </Field>
+                      <Field label="Brand *" htmlFor={`${id}-brand`}>
+                        <Input id={`${id}-brand`} type="text" value={l.brand} onChange={(e) => setLine(l.key, { brand: e.target.value })} placeholder="e.g. Samsung" />
+                      </Field>
+                      <Field label="Model" htmlFor={`${id}-model`}>
+                        <Input id={`${id}-model`} type="text" value={l.model} onChange={(e) => setLine(l.key, { model: e.target.value })} placeholder="Optional" />
+                      </Field>
+                      <Field label="Category" htmlFor={`${id}-cat`}>
+                        <Select id={`${id}-cat`} value={l.category} onChange={(e) => setLine(l.key, { category: e.target.value })}>
+                          {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </Select>
+                      </Field>
+                    </div>
+                  )}
 
-              <div className="flex gap-3 pt-1">
-                <button type="button" onClick={() => setShowPurchase(false)} className="flex-1 py-2.5 bg-slate-800 text-slate-300 text-sm font-bold rounded-xl hover:bg-slate-700">
-                  Cancel
-                </button>
-                <button type="submit" disabled={savingPurchase}
-                  className="flex-1 py-2.5 bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-60 text-white text-sm font-bold rounded-xl shadow-lg shadow-fuchsia-600/20 flex items-center justify-center gap-2">
-                  <CheckCircle2 size={16} />
-                  {savingPurchase ? "Saving..." : "Save Purchase"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+                  {imeiMode !== "none" && (
+                    <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3">
+                      <Field
+                        label={`IMEIs ${imeiMode === "required" ? "*" : "(or use quantity)"}`}
+                        htmlFor={`${id}-imeis`}
+                        hint={`One phone per line: "imei1" or "imei1,imei2" · ${parseImeiText(l.imeiText).length} phone(s)`}
+                      >
+                        <Textarea
+                          id={`${id}-imeis`}
+                          rows={3}
+                          value={l.imeiText}
+                          onChange={(e) => setLine(l.key, { imeiText: e.target.value })}
+                          className="font-mono"
+                          placeholder={"358921098471201\n358921098471219,358921098471227"}
+                        />
+                      </Field>
+                      <Field label="PTA status" htmlFor={`${id}-pta`}>
+                        <Select id={`${id}-pta`} value={l.ptaStatus} onChange={(e) => setLine(l.key, { ptaStatus: e.target.value })} className="sm:w-44">
+                          <option value="Approved">PTA approved</option>
+                          <option value="Non-PTA">Non-PTA</option>
+                          <option value="CPID">CPID approved</option>
+                        </Select>
+                      </Field>
+                    </div>
+                  )}
 
-      {/* ── Pay Supplier Modal ── */}
-      {showPayment && viewSupplier && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div>
-                <h3 className="font-bold text-slate-100 text-base">Pay Supplier</h3>
-                <p className="text-[11px] text-slate-400">
-                  {viewSupplier.name} • Owed: <span className={balanceCls(viewSupplier.balance)}>{balanceLabel(viewSupplier.balance)}</span>
-                </p>
-              </div>
-              <button onClick={() => setShowPayment(false)} className="text-slate-400 hover:text-white"><X size={18} /></button>
-            </div>
-
-            {paymentError && (
-              <div className="bg-red-950/30 border border-red-900/50 text-red-400 text-xs px-3 py-2 rounded-xl">{paymentError}</div>
-            )}
-
-            <form onSubmit={handlePaymentSubmit} className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Amount ({curr}) *</label>
-                  <input type="number" min="0" step="any" required value={paymentForm.amount} onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })}
-                    className={inputCls} placeholder="0" />
-                </div>
-                <div>
-                  <label className={labelCls}>Date</label>
-                  <input type="date" value={paymentForm.date} onChange={(e) => setPaymentForm({ ...paymentForm, date: e.target.value })} className={inputCls} />
-                </div>
-                <div className="col-span-2">
-                  <label className={labelCls}>Reference</label>
-                  <input type="text" value={paymentForm.reference} onChange={(e) => setPaymentForm({ ...paymentForm, reference: e.target.value })}
-                    className={inputCls} placeholder="Cheque / transfer no. (optional)" />
-                </div>
-                <div className="col-span-2">
-                  <label className={labelCls}>Notes</label>
-                  <textarea rows={2} value={paymentForm.notes} onChange={(e) => setPaymentForm({ ...paymentForm, notes: e.target.value })}
-                    className={`${inputCls} resize-none`} placeholder="Optional notes..." />
-                </div>
-              </div>
-              <div className="flex gap-3 pt-2">
-                <button type="button" onClick={() => setShowPayment(false)} className="flex-1 py-2.5 bg-slate-800 text-slate-300 text-sm font-bold rounded-xl hover:bg-slate-700">
-                  Cancel
-                </button>
-                <button type="submit" disabled={savingPayment}
-                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-sm font-bold rounded-xl shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2">
-                  <CheckCircle2 size={16} />
-                  {savingPayment ? "Saving..." : "Save Payment"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ── Edit Statement Entry Modal ── */}
-      {editingTx && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-100 text-base">Edit {editingTx.type === "purchase" ? "Purchase" : "Payment"}</h3>
-              <button onClick={() => setEditingTx(null)} className="text-slate-400 hover:text-white"><X size={18} /></button>
-            </div>
-
-            {txError && (
-              <div className="bg-red-950/30 border border-red-900/50 text-red-400 text-xs px-3 py-2 rounded-xl">{txError}</div>
-            )}
-
-            <form onSubmit={handleTxSubmit} className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Date</label>
-                  <input type="date" value={txForm.date} onChange={(e) => setTxForm({ ...txForm, date: e.target.value })} className={inputCls} />
-                </div>
-                <div>
-                  <label className={labelCls}>{editingTx.type === "purchase" ? "Invoice No." : "Reference"}</label>
-                  <input type="text" value={txForm.invoiceNumber} onChange={(e) => setTxForm({ ...txForm, invoiceNumber: e.target.value })} className={inputCls} />
-                </div>
-                {editingTx.type === "purchase" && (
-                  <div>
-                    <label className={labelCls}>Invoice Total</label>
-                    {editingTx.stockAdded ? (
+                  <div className="grid grid-cols-1 min-[420px]:grid-cols-2 lg:grid-cols-4 gap-3">
+                    {imeiMode !== "required" && (
+                      <Field label={`Quantity${imeiMode === "optional" ? " (if no IMEIs)" : " *"}`} htmlFor={`${id}-qty`}>
+                        <Input id={`${id}-qty`} type="number" min="1" step="1" inputMode="numeric" value={l.quantity} onChange={(e) => setLine(l.key, { quantity: e.target.value })} />
+                      </Field>
+                    )}
+                    <Field label="Cost price (each) *" htmlFor={`${id}-cost`}>
+                      <Input id={`${id}-cost`} type="number" min="0" step="any" inputMode="decimal" value={l.costPrice} onChange={(e) => setLine(l.key, { costPrice: e.target.value })} placeholder="0" />
+                    </Field>
+                    <Field label="Sale price (each)" htmlFor={`${id}-sale`}>
+                      <Input id={`${id}-sale`} type="number" min="0" step="any" inputMode="decimal" value={l.salePrice} onChange={(e) => setLine(l.key, { salePrice: e.target.value })} placeholder="0" />
+                    </Field>
+                    {l.mode === "new" && (
                       <>
-                        <div className="text-sm font-bold text-slate-200 mt-2.5">{money(editingTx.total)}</div>
-                        <p className="text-[10px] text-slate-500 mt-1">Comes from the items added to stock.</p>
+                        <Field label="Warranty (months)" htmlFor={`${id}-wmonths`}>
+                          <Input id={`${id}-wmonths`} type="number" min="0" step="1" inputMode="numeric" value={l.warrantyDuration} disabled={l.warrantyType === "No Warranty"}
+                            onChange={(e) => setLine(l.key, { warrantyDuration: e.target.value })} />
+                        </Field>
+                        <Field label="Warranty type" htmlFor={`${id}-wtype`}>
+                          <Select
+                            id={`${id}-wtype`}
+                            value={l.warrantyType}
+                            onChange={(e) => setLine(l.key, e.target.value === "No Warranty" ? { warrantyType: e.target.value, warrantyDuration: "0" } : { warrantyType: e.target.value })}
+                          >
+                            {WARRANTY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                          </Select>
+                        </Field>
                       </>
-                    ) : (
-                      <input type="number" min="0" step="any" value={txForm.total} onChange={(e) => setTxForm({ ...txForm, total: e.target.value })} className={inputCls} />
                     )}
                   </div>
-                )}
-                <div className={editingTx.type === "purchase" ? "" : "col-span-2"}>
-                  <label className={labelCls}>{editingTx.type === "purchase" ? "Paid at the time" : "Amount Paid"}</label>
-                  <input type="number" min="0" step="any" value={txForm.paid} onChange={(e) => setTxForm({ ...txForm, paid: e.target.value })} className={inputCls} />
+
+                  <div className="flex flex-wrap justify-end gap-x-1 text-sm text-muted">
+                    <span>{units} unit(s) × {money(l.costPrice)} =</span>
+                    <span className="font-semibold text-ink">{money(lineTotal(l))}</span>
+                  </div>
                 </div>
-                <div className="col-span-2">
-                  <label className={labelCls}>Notes</label>
-                  <textarea rows={2} value={txForm.notes} onChange={(e) => setTxForm({ ...txForm, notes: e.target.value })} className={`${inputCls} resize-none`} />
-                </div>
-              </div>
-              <div className="flex gap-3 pt-2">
-                <button type="button" onClick={() => setEditingTx(null)} className="flex-1 py-2.5 bg-slate-800 text-slate-300 text-sm font-bold rounded-xl hover:bg-slate-700">
-                  Cancel
-                </button>
-                <button type="submit" disabled={savingTx}
-                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white text-sm font-bold rounded-xl shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2">
-                  <CheckCircle2 size={16} />
-                  {savingTx ? "Saving..." : "Save Changes"}
-                </button>
-              </div>
-            </form>
+              );
+            })}
+
+            <button
+              type="button"
+              onClick={() => setLines((prev) => [...prev, newLine()])}
+              className="w-full h-11 border border-dashed border-line-strong hover:border-brand-400 text-ink-soft hover:text-brand-700 hover:bg-brand-50 rounded-2xl text-sm font-semibold flex items-center justify-center gap-1.5 transition-colors"
+            >
+              <Plus size={16} aria-hidden="true" /> Add item
+            </button>
+            {!hasItems && (
+              <p className="text-xs text-muted text-center">
+                No items: this saves a bill amount only (for example an old bill) and does not change inventory.
+              </p>
+            )}
           </div>
-        </div>
-      )}
-    </div>
+
+          {/* Totals */}
+          <div className="border border-line rounded-2xl p-4 grid grid-cols-1 sm:grid-cols-3 gap-4 sm:items-end">
+            <Field label="Invoice total" htmlFor="pur-total">
+              {hasItems ? (
+                <div className="font-display text-xl font-bold text-ink">{money(invoiceTotal)}</div>
+              ) : (
+                <Input id="pur-total" type="number" min="0" step="any" inputMode="decimal" value={purchaseForm.total} onChange={(e) => setPurchaseForm({ ...purchaseForm, total: e.target.value })}
+                  placeholder="Bill total" />
+              )}
+            </Field>
+            <Field label="Paid now" htmlFor="pur-paid">
+              <Input id="pur-paid" type="number" min="0" step="any" inputMode="decimal" value={purchaseForm.paid} onChange={(e) => setPurchaseForm({ ...purchaseForm, paid: e.target.value })}
+                placeholder="0" />
+            </Field>
+            <Field label="Still to pay">
+              <div className={`font-display text-xl font-bold ${toPay > 0 ? "text-khata-600" : "text-paid-600"}`}>
+                {toPay < 0 ? `${money(-toPay)} advance` : money(toPay)}
+              </div>
+            </Field>
+            {hasItems && (
+              <label className="sm:col-span-3 flex items-start gap-2.5 text-sm text-ink cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={purchaseForm.addToStock}
+                  onChange={(e) => setPurchaseForm({ ...purchaseForm, addToStock: e.target.checked })}
+                  className="accent-brand-600 w-5 h-5 mt-0.5 shrink-0"
+                />
+                <span>
+                  Add these items to inventory
+                  <span className="block text-xs text-muted">New products are created; existing ones are restocked with this cost and sale price.</span>
+                </span>
+              </label>
+            )}
+          </div>
+
+          <ErrorNote>{purchaseError}</ErrorNote>
+        </form>
+      </Modal>
+
+      {/* ── Pay Supplier Modal ── */}
+      <Modal
+        open={showPayment && !!viewSupplier}
+        onClose={closePayment}
+        z="z-[60]"
+        size="sm"
+        title="Record payment"
+        description={
+          viewSupplier && (
+            <>
+              {viewSupplier.name} · Owed <span className={`font-semibold ${balanceCls(viewSupplier.balance)}`}>{balanceLabel(viewSupplier.balance)}</span>
+            </>
+          )
+        }
+        footer={
+          <>
+            <Button variant="secondary" onClick={closePayment}>Cancel</Button>
+            <Button type="submit" form="payment-form" variant="success" icon={CheckCircle2} loading={savingPayment}>
+              {savingPayment ? "Saving…" : "Save payment"}
+            </Button>
+          </>
+        }
+      >
+        <form id="payment-form" onSubmit={handlePaymentSubmit} className="space-y-4">
+          <ErrorNote>{paymentError}</ErrorNote>
+          <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-4">
+            <Field label={`Amount (${curr}) *`} htmlFor="pay-amount">
+              <Input id="pay-amount" type="number" min="0" step="any" inputMode="decimal" required value={paymentForm.amount}
+                onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })} placeholder="0" />
+            </Field>
+            <Field label="Date" htmlFor="pay-date">
+              <Input id="pay-date" type="date" value={paymentForm.date} onChange={(e) => setPaymentForm({ ...paymentForm, date: e.target.value })} />
+            </Field>
+          </div>
+          <Field label="Reference" htmlFor="pay-ref">
+            <Input id="pay-ref" type="text" value={paymentForm.reference} onChange={(e) => setPaymentForm({ ...paymentForm, reference: e.target.value })}
+              placeholder="Cheque or transfer no. (optional)" />
+          </Field>
+          <Field label="Notes" htmlFor="pay-notes">
+            <Textarea id="pay-notes" rows={2} value={paymentForm.notes} onChange={(e) => setPaymentForm({ ...paymentForm, notes: e.target.value })}
+              placeholder="Optional notes" />
+          </Field>
+        </form>
+      </Modal>
+
+      {/* ── Edit Statement Entry Modal ── */}
+      <Modal
+        open={!!editingTx}
+        onClose={closeTx}
+        z="z-[60]"
+        size="sm"
+        title={editingTx?.type === "purchase" ? "Edit purchase" : "Edit payment"}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeTx}>Cancel</Button>
+            <Button type="submit" form="tx-form" icon={CheckCircle2} loading={savingTx}>
+              {savingTx ? "Saving…" : "Save changes"}
+            </Button>
+          </>
+        }
+      >
+        {editingTx && (
+          <form id="tx-form" onSubmit={handleTxSubmit} className="space-y-4">
+            <ErrorNote>{txError}</ErrorNote>
+            <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-4">
+              <Field label="Date" htmlFor="tx-date">
+                <Input id="tx-date" type="date" value={txForm.date} onChange={(e) => setTxForm({ ...txForm, date: e.target.value })} />
+              </Field>
+              <Field label={editingTx.type === "purchase" ? "Invoice no." : "Reference"} htmlFor="tx-ref">
+                <Input id="tx-ref" type="text" value={txForm.invoiceNumber} onChange={(e) => setTxForm({ ...txForm, invoiceNumber: e.target.value })} />
+              </Field>
+              {editingTx.type === "purchase" && (
+                <Field
+                  label="Invoice total"
+                  htmlFor="tx-total"
+                  hint={editingTx.stockAdded ? "Comes from the items added to stock." : undefined}
+                >
+                  {editingTx.stockAdded ? (
+                    <div className="h-10 flex items-center text-sm font-semibold text-ink">{money(editingTx.total)}</div>
+                  ) : (
+                    <Input id="tx-total" type="number" min="0" step="any" inputMode="decimal" value={txForm.total} onChange={(e) => setTxForm({ ...txForm, total: e.target.value })} />
+                  )}
+                </Field>
+              )}
+              <Field
+                label={editingTx.type === "purchase" ? "Paid at the time" : "Amount paid"}
+                htmlFor="tx-paid"
+                className={editingTx.type === "purchase" ? "" : "min-[420px]:col-span-2"}
+              >
+                <Input id="tx-paid" type="number" min="0" step="any" inputMode="decimal" value={txForm.paid} onChange={(e) => setTxForm({ ...txForm, paid: e.target.value })} />
+              </Field>
+            </div>
+            <Field label="Notes" htmlFor="tx-notes">
+              <Textarea id="tx-notes" rows={2} value={txForm.notes} onChange={(e) => setTxForm({ ...txForm, notes: e.target.value })} />
+            </Field>
+          </form>
+        )}
+      </Modal>
+    </Page>
   );
 };
 

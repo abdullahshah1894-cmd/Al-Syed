@@ -1,6 +1,6 @@
-import React from "react";
 import { useApp, getProductStock } from "../context/AppContext";
-import { DollarSign } from "lucide-react";
+import { Boxes, Wallet, Tag, TrendingUp } from "lucide-react";
+import { Page, PageHeader, Card, CardHeader, Stat, Money, TableWrap, Th, Td, EmptyState } from "../components/ui";
 
 const CATEGORIES = ["Smartphones", "Tablets & iPads", "Accessories", "Spare Parts", "Wearables"];
 
@@ -37,89 +37,89 @@ const InventoryValuation = () => {
     ...(otherProducts.length > 0 ? [{ cat: "Other", list: otherProducts }] : []),
   ];
 
+
   return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-sm">
-        <div className="flex items-center gap-2 mb-1">
-          <DollarSign size={24} className="text-cyan-400" />
-          <h1 className="text-xl font-bold text-slate-100">Inventory Valuation & Gross Cost Analysis</h1>
-        </div>
-        <p className="text-xs text-slate-400">
-          Real-time wholesale purchase cost valuation, potential retail revenue, and expected gross profit margin
-        </p>
+    <Page>
+      <PageHeader
+        title="Stock value"
+        description="What the stock in the shop cost, what it sells for, and the profit in it. Sold and deleted items are not counted."
+      />
+
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <Stat
+          label="Items in stock"
+          icon={Boxes}
+          value={`${totalQty.toLocaleString()} units`}
+          hint={`Across ${liveProducts.length} product(s)`}
+        />
+        <Stat
+          label="Cost of stock"
+          icon={Wallet}
+          value={<Money amount={totalCostValuation} currency={curr} />}
+          hint="Money put into the stock in the shop"
+        />
+        <Stat
+          label="Selling value"
+          icon={Tag}
+          tone="brand"
+          value={<Money amount={totalSellingValuation} currency={curr} />}
+          hint="If everything sells at its sale price"
+        />
+        <Stat
+          label="Expected profit"
+          icon={TrendingUp}
+          tone={expectedProfit >= 0 ? "paid" : "saffron"}
+          value={<Money amount={expectedProfit} currency={curr} />}
+          hint="Selling value minus cost"
+        />
       </div>
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm space-y-2">
-          <span className="text-slate-400 text-xs font-bold uppercase">Total Items in Stock</span>
-          <div className="text-2xl font-extrabold text-slate-100">{totalQty.toLocaleString()} Units</div>
-          <p className="text-[11px] text-slate-400">Across {liveProducts.length} Products</p>
-        </div>
-
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm space-y-2">
-          <span className="text-slate-400 text-xs font-bold uppercase">Wholesale Purchase Cost</span>
-          <div className="text-2xl font-extrabold text-amber-400">
-            {curr} {totalCostValuation.toLocaleString()}
-          </div>
-          <p className="text-[11px] text-amber-300 font-medium">Total Invested Capital</p>
-        </div>
-
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm space-y-2">
-          <span className="text-slate-400 text-xs font-bold uppercase">Potential Selling Value</span>
-          <div className="text-2xl font-extrabold text-cyan-400">
-            {curr} {totalSellingValuation.toLocaleString()}
-          </div>
-          <p className="text-[11px] text-cyan-300 font-medium">Retail Revenue Potential</p>
-        </div>
-
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm space-y-2">
-          <span className="text-slate-400 text-xs font-bold uppercase">Expected Gross Profit</span>
-          <div className="text-2xl font-extrabold text-emerald-400">
-            {curr} {expectedProfit.toLocaleString()}
-          </div>
-          <p className="text-[11px] text-emerald-300 font-medium">Expected Gross Margin</p>
-        </div>
-      </div>
-
-      {/* Category Breakdown Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm overflow-hidden">
-        <h2 className="font-bold text-slate-100 text-base mb-4">Category Valuation Breakdown</h2>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="text-slate-400 uppercase bg-slate-950/60 rounded-xl">
+      <Card>
+        <CardHeader title="By category" description="Stock, cost and selling value for each category" />
+        {liveProducts.length === 0 ? (
+          <EmptyState icon={Boxes} title="No stock yet" description="Add products in Inventory and their value shows here." />
+        ) : (
+          <TableWrap>
+            <thead>
               <tr>
-                <th className="p-3.5 font-semibold">Category</th>
-                <th className="p-3.5 font-semibold">Products Count</th>
-                <th className="p-3.5 font-semibold">Total Quantity</th>
-                <th className="p-3.5 font-semibold">Cost Valuation</th>
-                <th className="p-3.5 font-semibold">Retail Valuation</th>
-                <th className="p-3.5 font-semibold text-right">Profit Potential</th>
+                <Th>Category</Th>
+                <Th className="text-right">Products</Th>
+                <Th className="text-right">Units</Th>
+                <Th className="text-right">Cost</Th>
+                <Th className="text-right">Selling value</Th>
+                <Th className="text-right">Profit</Th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800">
+            <tbody>
               {categoryRows.map(({ cat, list }) => {
                 const { qty: catQty, cost: catCost, retail: catRetail } = valuate(list);
 
                 return (
-                  <tr key={cat} className="hover:bg-slate-800/40 transition-colors">
-                    <td className="p-3.5 font-bold text-slate-100">{cat}</td>
-                    <td className="p-3.5 text-slate-300">{list.length} item(s)</td>
-                    <td className="p-3.5 font-semibold text-indigo-400">{catQty.toLocaleString()} units</td>
-                    <td className="p-3.5 font-semibold text-amber-400">{curr} {catCost.toLocaleString()}</td>
-                    <td className="p-3.5 font-semibold text-cyan-400">{curr} {catRetail.toLocaleString()}</td>
-                    <td className="p-3.5 font-extrabold text-emerald-400 text-right">
-                      {curr} {(catRetail - catCost).toLocaleString()}
-                    </td>
+                  <tr key={cat} className="hover:bg-sunken/60 transition-colors">
+                    <Td className="font-semibold text-ink whitespace-nowrap">{cat}</Td>
+                    <Td className="text-right text-ink-soft">{list.length}</Td>
+                    <Td className="text-right text-ink-soft">{catQty.toLocaleString()}</Td>
+                    <Td className="text-right text-ink-soft"><Money amount={catCost} currency={curr} /></Td>
+                    <Td className="text-right text-ink"><Money amount={catRetail} currency={curr} /></Td>
+                    <Td className="text-right font-semibold text-paid-600"><Money amount={catRetail - catCost} currency={curr} /></Td>
                   </tr>
                 );
               })}
             </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+            <tfoot>
+              <tr className="font-semibold text-ink">
+                <td className="px-3 py-3">All stock</td>
+                <td className="px-3 py-3 text-right">{liveProducts.length}</td>
+                <td className="px-3 py-3 text-right">{totalQty.toLocaleString()}</td>
+                <td className="px-3 py-3 text-right"><Money amount={totalCostValuation} currency={curr} /></td>
+                <td className="px-3 py-3 text-right"><Money amount={totalSellingValuation} currency={curr} /></td>
+                <td className="px-3 py-3 text-right text-paid-600"><Money amount={expectedProfit} currency={curr} /></td>
+              </tr>
+            </tfoot>
+          </TableWrap>
+        )}
+      </Card>
+    </Page>
   );
 };
 

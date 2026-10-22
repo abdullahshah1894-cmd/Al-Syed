@@ -84,35 +84,35 @@ const ShareImageDialog = ({ target, onClose }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-[80] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 print:hidden">
-      <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-md shadow-2xl flex flex-col max-h-[92vh]">
-        <div className="flex items-center justify-between p-4 border-b border-slate-800">
-          <h2 className="text-sm font-bold text-slate-100">{title}</h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-white" aria-label="Close">
+    <div className="fixed inset-0 z-[80] bg-ink/40 backdrop-blur-[2px] flex items-center justify-center p-4 print:hidden">
+      <div className="bg-surface border border-line rounded-2xl w-full max-w-md shadow-2xl flex flex-col max-h-[92vh]">
+        <div className="flex items-center justify-between p-4 border-b border-line">
+          <h2 className="text-base font-bold text-ink">{title}</h2>
+          <button onClick={onClose} className="text-muted hover:text-ink" aria-label="Close">
             <X size={20} />
           </button>
         </div>
 
-        <div className="p-4 overflow-y-auto flex-1 flex items-start justify-center bg-slate-950/50">
+        <div className="p-4 overflow-y-auto flex-1 flex items-start justify-center bg-sunken">
           {error ? (
-            <div className="text-rose-300 text-xs flex items-center gap-2 py-10">
+            <div className="text-khata-600 text-xs flex items-center gap-2 py-10">
               <AlertCircle size={16} /> {error}
             </div>
           ) : png ? (
-            <img src={png.url} alt="Invoice preview" className="max-w-full rounded-xl border border-slate-700 bg-white" />
+            <img src={png.url} alt="Invoice preview" className="max-w-full rounded-xl border border-line bg-white shadow-card" />
           ) : (
-            <div className="text-slate-400 text-xs flex items-center gap-2 py-10">
+            <div className="text-muted text-sm flex items-center gap-2 py-10">
               <Loader2 size={16} className="animate-spin" /> Making the image…
             </div>
           )}
         </div>
 
-        <div className="p-4 border-t border-slate-800 space-y-2">
+        <div className="p-4 border-t border-line space-y-2">
           <div className="grid grid-cols-2 gap-2">
             <button
               onClick={whatsapp}
               disabled={!png}
-              className="py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 disabled:opacity-50"
+              className="py-2.5 bg-paid-600 hover:bg-paid-700 text-white font-bold text-xs rounded-xl h-11 flex items-center justify-center gap-1.5 disabled:opacity-50"
             >
               <MessageCircle size={15} /> WhatsApp
             </button>
@@ -120,34 +120,34 @@ const ShareImageDialog = ({ target, onClose }) => {
               onClick={shareSheet}
               disabled={!canShareFiles}
               title={canShareFiles ? "Choose WhatsApp or any other app" : "This browser cannot share files; use WhatsApp, Copy or Download"}
-              className="py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 disabled:opacity-40"
+              className="py-2.5 bg-brand-600 hover:bg-brand-700 text-white font-bold text-xs rounded-xl h-11 flex items-center justify-center gap-1.5 disabled:opacity-40"
             >
               <Share2 size={15} /> Share to…
             </button>
             <button
               onClick={async () => setStatus((await copyImage()) ? "Image copied — paste it anywhere with Ctrl+V." : "Copy is not allowed in this browser; use Download.")}
               disabled={!png}
-              className="py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 disabled:opacity-50"
+              className="py-2.5 bg-surface border border-line-strong hover:bg-sunken text-ink font-bold text-xs rounded-xl h-11 flex items-center justify-center gap-1.5 disabled:opacity-50"
             >
               <Copy size={15} /> Copy image
             </button>
             <button
               onClick={download}
               disabled={!png}
-              className="py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 disabled:opacity-50"
+              className="py-2.5 bg-surface border border-line-strong hover:bg-sunken text-ink font-bold text-xs rounded-xl h-11 flex items-center justify-center gap-1.5 disabled:opacity-50"
             >
               <Download size={15} /> Download
             </button>
           </div>
           {status && (
-            <p className="text-[11px] text-emerald-300 flex items-start gap-1.5">
+            <p className="text-[11px] text-paid-700 flex items-start gap-1.5">
               <CheckCircle2 size={13} className="mt-0.5 shrink-0" /> {status}
             </p>
           )}
           {waPhone ? (
-            <p className="text-[10px] text-slate-500">WhatsApp chat: +{waPhone}</p>
+            <p className="text-[10px] text-muted">WhatsApp chat: +{waPhone}</p>
           ) : (
-            <p className="text-[10px] text-amber-400/80">No valid phone number — WhatsApp will ask you to pick the chat.</p>
+            <p className="text-[10px] text-saffron-700">No valid phone number — WhatsApp will ask you to pick the chat.</p>
           )}
         </div>
       </div>
