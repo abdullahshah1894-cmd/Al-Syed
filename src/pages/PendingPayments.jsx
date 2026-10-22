@@ -1,10 +1,9 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useApp, SELLERS } from "../context/AppContext";
-import { formatWAPhone } from "./POS";
-import html2canvas from "html2canvas";
+import { formatWAPhone, shareImageToWhatsApp } from "../utils/shareImage";
 import { printElement } from "../services/printReceipt";
-import { isSettlement, saleBelongsTo, udhaarAdded as saleUdhaar } from "../utils/sales";
+import { isSettlement, itemImeis, saleBelongsTo, udhaarAdded as saleUdhaar } from "../utils/sales";
 import {
   Clock,
   CheckCircle2,
@@ -24,6 +23,9 @@ import {
   ChevronDown,
   ChevronUp,
   RotateCcw,
+  Pencil,
+  Trash2,
+  Undo2,
 } from "lucide-react";
 
 // Helper to format date with day of the week
@@ -55,6 +57,26 @@ const formatDateWithDay = (dateStr) => {
   };
 };
 
+// Return state of one bill line: how much is sold, how much already came back, what is left
+const lineReturnInfo = (item) => {
+  const qty = Number(item.quantity || item.qty || 1);
+  const imeis = itemImeis(item);
+  const returnedImeis = Array.isArray(item.returnedImeis) ? item.returnedImeis : [];
+  const isPhone = imeis.length > 0;
+  const returnedCount = Math.min(qty, Math.max(Number(item.returnedQty || 0), returnedImeis.length));
+  const remainingImeis = imeis.filter((im) => !returnedImeis.includes(im));
+  const remaining = isPhone ? remainingImeis.length : Math.max(0, qty - returnedCount);
+  return {
+    qty,
+    isPhone,
+    returnedImeis,
+    remainingImeis,
+    returnedCount,
+    remaining,
+    fullyReturned: remaining === 0 && returnedCount > 0,
+  };
+};
+
 const PendingPayments = () => {
   const {
     customers: ctxCustomers,
@@ -64,6 +86,9 @@ const PendingPayments = () => {
     payPendingAmount,
     shopSettings,
     activeSeller,
+    updateCustomer,
+    deleteCustomer,
+    returnSaleItems,
   } = useApp();
 
   const customers = useMemo(() => allCustomers || ctxCustomers || [], [allCustomers, ctxCustomers]);
@@ -81,6 +106,27 @@ const PendingPayments = () => {
   const [paymentReceipt, setPaymentReceipt] = useState(null);
   const [statementCustomer, setStatementCustomer] = useState(null);
   const [isCapturingImage, setIsCapturingImage] = useState(false);
+
+  // Short status message at the bottom of the screen (returns, WhatsApp sharing)
+  const [notice, setNotice] = useState(null); // { type: "success" | "error" | "info", text }
+  const showNotice = (text, type = "success") => setNotice({ text, type, at: Date.now() });
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 7000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  // Edit customer account modal
+  const [editCust, setEditCust] = useState(null);
+  const [editForm, setEditForm] = useState({ name: "", phone: "", address: "", cnic: "", sellerName: "" });
+  const [isSavingCustomer, setIsSavingCustomer] = useState(false);
+
+  // Return modal: only the sale id and line index are kept, the sale itself is always read fresh
+  const [returnTarget, setReturnTarget] = useState(null); // { saleId, index }
+  const [returnQty, setReturnQty] = useState("1");
+  const [returnImeis, setReturnImeis] = useState([]);
+  const [returnNote, setReturnNote] = useState("");
+  const [isSubmittingReturn, setIsSubmittingReturn] = useState(false);
 
   // Sync with URL query parameters if present (e.g., from Header global search)
   useEffect(() => {
@@ -228,6 +274,11 @@ const PendingPayments = () => {
       const isCredit = !isPayment && udhaarAdded > 0;
       const isCash = !isPayment && !isCredit;
 
+      // Returns already lowered grandTotal / paidAmount / dueAmount on the server, so the
+      // running balance below stays right; a fully returned bill (grandTotal 0) adds nothing
+      const isReturned = !isPayment && record.paymentStatus === "returned";
+      const returnedTotal = (record.returns || []).reduce((sum, r) => sum + Number(r.amount || 0), 0);
+
       const grandTotal = Number(record.grandTotal || 0);
       const paidAmount = Number(record.paidAmount || 0);
 
@@ -251,6 +302,8 @@ const PendingPayments = () => {
         isPayment,
         isCredit,
         isCash,
+        isReturned,
+        returnedTotal,
         paymentReceived,
         udhaarAdded,
         oldBalancePaid,
@@ -367,7 +420,12 @@ const PendingPayments = () => {
       if (tx.isPayment) {
         text += `• ${d} | Payment: +${currency} ${tx.paymentReceived?.toLocaleString()} (Bal: ${currency} ${tx.runningBalance?.toLocaleString()})\n`;
       } else {
-        text += `• ${d} | Bill #${tx.billNumber}: ${currency} ${tx.grandTotal?.toLocaleString()} (Bal: ${currency} ${tx.runningBalance?.toLocaleString()})\n`;
+        const returnedTag = tx.isReturned
+          ? " - Returned"
+          : tx.returnedTotal > 0
+          ? ` - Returned ${currency} ${tx.returnedTotal.toLocaleString()}`
+          : "";
+        text += `• ${d} | Bill #${tx.billNumber}: ${currency} ${tx.grandTotal?.toLocaleString()}${returnedTag} (Bal: ${currency} ${tx.runningBalance?.toLocaleString()})\n`;
       }
     });
 
@@ -380,97 +438,30 @@ const PendingPayments = () => {
     return text;
   };
 
-  // Robust WhatsApp sender (works reliably on both Desktop & Mobile)
-  const openWhatsAppShare = async ({ element, phone, text, defaultFileName }) => {
+  // Send a receipt / statement to WhatsApp as a PNG image (share sheet on phones,
+  // clipboard + download + open chat on a computer) and tell the user what happened
+  const openWhatsAppShare = async ({ element, phone, text, defaultFileName, label = "Image" }) => {
+    if (isCapturingImage) return;
     setIsCapturingImage(true);
-
-    const formattedPhone = formatWAPhone(phone);
-    const waUrl = formattedPhone
-      ? `https://wa.me/${formattedPhone}?text=${encodeURIComponent(text)}`
-      : `https://web.whatsapp.com/send?text=${encodeURIComponent(text)}`;
-
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-
-    // 1. Mobile native share attempt
-    if (isMobile && element && navigator.canShare) {
-      try {
-        const canvas = await html2canvas(element, {
-          scale: 2,
-          backgroundColor: "#ffffff",
-          useCORS: true,
-          allowTaint: true,
-          logging: false,
-        });
-
-        const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
-        if (blob) {
-          const file = new File([blob], defaultFileName || "Receipt.png", { type: "image/png" });
-          if (navigator.canShare({ files: [file] })) {
-            await navigator.share({
-              files: [file],
-              title: "Receipt",
-              text: text,
-            });
-            setIsCapturingImage(false);
-            return;
-          }
-        }
-      } catch (shareErr) {
-        if (shareErr.name === "AbortError") {
-          setIsCapturingImage(false);
-          return;
-        }
-        console.warn("Native share failed, falling back to direct WhatsApp link:", shareErr);
+    try {
+      const result = await shareImageToWhatsApp({ element, phone, text, fileName: defaultFileName || "Receipt.png" });
+      let message = String(result.message || "").replace(/^Invoice image/, label);
+      if ((result.method === "clipboard" || result.method === "download") && !formatWAPhone(phone)) {
+        message += " No valid customer phone number, so choose the chat in WhatsApp yourself.";
       }
-    }
-
-    // 2. Desktop Flow: copy image to clipboard & download image slip
-    if (element) {
-      try {
-        const canvas = await html2canvas(element, {
-          scale: 2,
-          backgroundColor: "#ffffff",
-          useCORS: true,
-          allowTaint: true,
-          logging: false,
-        });
-
-        canvas.toBlob(async (blob) => {
-          if (blob) {
-            // Try clipboard copy so user can directly Ctrl+V into WhatsApp chat
-            try {
-              if (navigator.clipboard && window.ClipboardItem) {
-                await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-              }
-            } catch (clipErr) {
-              console.log("Clipboard copy not supported:", clipErr);
-            }
-
-            // Download image slip
-            try {
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = defaultFileName || "Receipt.png";
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              setTimeout(() => URL.revokeObjectURL(url), 1000);
-            } catch (dlErr) {
-              console.log("Download fallback skipped:", dlErr);
-            }
-          }
-        }, "image/png");
-      } catch (canvasErr) {
-        console.warn("Canvas capture warning:", canvasErr);
-      }
-    }
-
-    // 3. Always open WhatsApp with pre-filled receipt details
-    setTimeout(() => {
-      window.open(waUrl, "_blank");
+      showNotice(message, result.method === "cancelled" ? "info" : "success");
+    } catch (err) {
+      // Image could not be made: still open the chat with the text so nothing is lost
+      console.warn("WhatsApp image share failed:", err);
+      const wa = formatWAPhone(phone);
+      const url = wa
+        ? `https://wa.me/${wa}?text=${encodeURIComponent(text)}`
+        : `https://web.whatsapp.com/send?text=${encodeURIComponent(text)}`;
+      window.open(url, "_blank", "noopener");
+      showNotice(`Could not create the image (${err?.message || "unknown error"}). WhatsApp opened with the text only.`, "error");
+    } finally {
       setIsCapturingImage(false);
-    }, 300);
+    }
   };
 
   // WhatsApp share for Payment Receipt
@@ -484,6 +475,7 @@ const PendingPayments = () => {
       phone: paymentReceipt.customerPhone,
       text: waText,
       defaultFileName: `Receipt_${paymentReceipt.billNumber || "PAY"}.png`,
+      label: "Receipt image",
     });
   };
 
@@ -498,7 +490,133 @@ const PendingPayments = () => {
       phone: statementCustomer.phone,
       text: waText,
       defaultFileName: `Statement_${statementCustomer.name || "Customer"}.png`,
+      label: "Statement image",
     });
+  };
+
+  // ── Account edit / delete ────────────────────────────────────────────────
+  const openEditCustomer = (cust) => {
+    setEditCust(cust);
+    setEditForm({
+      name: cust.name || "",
+      phone: cust.phone || "",
+      address: cust.address || "",
+      cnic: cust.cnic || "",
+      sellerName: SELLERS.find((s) => s.toLowerCase() === (cust.sellerName || "").trim().toLowerCase()) || "",
+    });
+  };
+
+  const closeEditCustomer = () => {
+    if (isSavingCustomer) return;
+    setEditCust(null);
+  };
+
+  const handleSaveCustomer = async (e) => {
+    e.preventDefault();
+    if (isSavingCustomer || !editCust || !editForm.name.trim()) return;
+    setIsSavingCustomer(true);
+    try {
+      // Details only; balances are never sent (only sales, payments and returns change them)
+      const saved = await updateCustomer(editCust.id, {
+        name: editForm.name.trim(),
+        phone: editForm.phone.trim(),
+        email: editCust.email || "",
+        address: editForm.address.trim(),
+        cnic: editForm.cnic.trim(),
+        sellerName: editForm.sellerName,
+      });
+      if (saved) {
+        setEditCust(null);
+        showNotice(`${saved.name || "Customer"} updated.`);
+      }
+    } finally {
+      setIsSavingCustomer(false);
+    }
+  };
+
+  const handleDeleteCustomer = async (cust) => {
+    const owes = Number(cust.totalPending || 0);
+    const warning =
+      owes > 0
+        ? `This customer still owes ${shopSettings.currencySymbol || "Rs."} ${owes.toLocaleString()}.\n\n`
+        : "";
+    if (!window.confirm(`${warning}Delete the account of "${cust.name}"? Their bills stay in the records.`)) return;
+
+    const ok = await deleteCustomer(cust.id);
+    if (!ok) return;
+    // Close anything still open for this customer
+    if (historyCust?.id === cust.id) {
+      setHistoryCust(null);
+      setHistorySearch("");
+      setHistoryFilter("all");
+    }
+    if (statementCustomer?.id === cust.id) setStatementCustomer(null);
+    if (selectedCustForPayment?.id === cust.id) setSelectedCustForPayment(null);
+    if (editCust?.id === cust.id) setEditCust(null);
+    if (returnTarget) setReturnTarget(null);
+    showNotice(`${cust.name || "Customer"} deleted.`);
+  };
+
+  // ── Returns ──────────────────────────────────────────────────────────────
+  // Always read the bill fresh from the sales list, so the modal shows the latest return state
+  const returnSale = returnTarget ? sales.find((s) => s.id === returnTarget.saleId) || null : null;
+  const returnItem = returnSale ? (returnSale.items || [])[returnTarget.index] || null : null;
+  const returnInfo = returnItem ? lineReturnInfo(returnItem) : null;
+  const returnUnitPrice = returnItem
+    ? Number(returnItem.unitSalePrice || returnItem.unitPrice || returnItem.price || 0)
+    : 0;
+  const returnCount = returnInfo
+    ? returnInfo.isPhone
+      ? returnImeis.length
+      : Math.max(0, Math.floor(Number(returnQty) || 0))
+    : 0;
+  const returnValid =
+    !!returnInfo &&
+    (returnInfo.isPhone || Number.isInteger(Number(returnQty))) &&
+    returnCount >= 1 &&
+    returnCount <= returnInfo.remaining;
+  const returnEstimate = returnUnitPrice * returnCount;
+  const returnDuePart = returnSale ? Math.min(Math.max(0, Number(returnSale.dueAmount || 0)), returnEstimate) : 0;
+
+  const openReturnModal = (sale, index) => {
+    setReturnTarget({ saleId: sale.id, index });
+    setReturnQty("1");
+    setReturnImeis([]);
+    setReturnNote("");
+  };
+
+  const closeReturnModal = () => {
+    if (isSubmittingReturn) return;
+    setReturnTarget(null);
+  };
+
+  const toggleReturnImei = (imei) =>
+    setReturnImeis((prev) => (prev.includes(imei) ? prev.filter((x) => x !== imei) : [...prev, imei]));
+
+  const handleConfirmReturn = async () => {
+    if (isSubmittingReturn || !returnSale || !returnInfo || !returnValid) return;
+    const line = returnInfo.isPhone
+      ? { index: returnTarget.index, qty: returnImeis.length, imeis: returnImeis }
+      : { index: returnTarget.index, qty: returnCount };
+
+    setIsSubmittingReturn(true);
+    try {
+      const updated = await returnSaleItems(returnSale.id, [line], returnNote.trim());
+      // On failure returnSaleItems already showed the error; keep the modal open
+      if (updated) {
+        const last = (updated.returns || [])[(updated.returns || []).length - 1];
+        const cur = shopSettings.currencySymbol || "Rs.";
+        const details = last
+          ? ` ${cur} ${Number(last.amount || 0).toLocaleString()} refunded (Udhaar reduced ${cur} ${Number(
+              last.dueReduced || 0
+            ).toLocaleString()}, cash back ${cur} ${Number(last.cashBack || 0).toLocaleString()}).`
+          : "";
+        setReturnTarget(null);
+        showNotice(`Return saved, item back in stock.${details}`);
+      }
+    } finally {
+      setIsSubmittingReturn(false);
+    }
   };
 
   // Find active customer in history
@@ -828,6 +946,29 @@ const PendingPayments = () => {
                     <span>Record Payment</span>
                   </button>
                 )}
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openEditCustomer(cust);
+                  }}
+                  className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-2xl text-xs flex items-center justify-center transition-all border border-slate-700/50"
+                  title="Edit account"
+                >
+                  <Pencil size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteCustomer(cust);
+                  }}
+                  className="px-3 py-2.5 bg-slate-800 hover:bg-rose-600/30 text-slate-400 hover:text-rose-300 rounded-2xl text-xs flex items-center justify-center transition-all border border-slate-700/50 hover:border-rose-500/40"
+                  title="Delete account"
+                >
+                  <Trash2 size={14} />
+                </button>
               </div>
             </div>
           );
@@ -939,6 +1080,271 @@ const PendingPayments = () => {
         </div>
       )}
 
+      {/* Edit Customer Account Modal (above the history modal) */}
+      {editCust && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
+          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="font-bold text-slate-100 text-base flex items-center gap-2">
+                <Pencil size={16} className="text-indigo-400" /> Edit Customer Account
+              </h3>
+              <button onClick={closeEditCustomer} className="text-slate-400 hover:text-white p-1 rounded-lg">
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveCustomer} className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold text-slate-400">Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={editForm.name}
+                  onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 font-bold focus:outline-none focus:border-indigo-500 mt-1"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-slate-400">Phone</label>
+                  <input
+                    type="tel"
+                    value={editForm.phone}
+                    onChange={(e) => setEditForm((f) => ({ ...f, phone: e.target.value }))}
+                    placeholder="03xx-xxxxxxx"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 mt-1"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-400">CNIC</label>
+                  <input
+                    type="text"
+                    value={editForm.cnic}
+                    onChange={(e) => setEditForm((f) => ({ ...f, cnic: e.target.value }))}
+                    placeholder="xxxxx-xxxxxxx-x"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 mt-1"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-400">Address</label>
+                <input
+                  type="text"
+                  value={editForm.address}
+                  onChange={(e) => setEditForm((f) => ({ ...f, address: e.target.value }))}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-400">Seller</label>
+                <select
+                  value={editForm.sellerName}
+                  onChange={(e) => setEditForm((f) => ({ ...f, sellerName: e.target.value }))}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 font-bold focus:outline-none focus:border-indigo-500 mt-1"
+                >
+                  <option value="">No seller assigned</option>
+                  {SELLERS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-[11px] text-slate-500">
+                Balances are not edited here; they change only through sales, payments and returns.
+              </p>
+
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeEditCustomer}
+                  disabled={isSavingCustomer}
+                  className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-700 disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingCustomer || !editForm.name.trim()}
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-indigo-600/20 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {isSavingCustomer ? "Saving…" : "Save Changes"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Return Item Modal (above the history modal) */}
+      {returnTarget && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
+          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto custom-scrollbar">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="font-bold text-slate-100 text-base flex items-center gap-2">
+                <Undo2 size={16} className="text-amber-400" /> Return Item
+              </h3>
+              <button onClick={closeReturnModal} className="text-slate-400 hover:text-white p-1 rounded-lg">
+                <X size={18} />
+              </button>
+            </div>
+
+            {!returnSale || !returnItem || !returnInfo ? (
+              <p className="text-xs text-slate-400">This bill line is no longer available.</p>
+            ) : returnInfo.remaining === 0 ? (
+              <p className="text-xs text-slate-400">Everything on this line has already been returned.</p>
+            ) : (
+              <div className="space-y-3">
+                <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-1 text-xs">
+                  <p className="text-slate-400">
+                    Bill: <strong className="text-slate-200 font-mono">{returnSale.billNumber}</strong>
+                  </p>
+                  <p className="text-slate-400">
+                    Item: <strong className="text-slate-200">{returnItem.productName || returnItem.name || "Product"}</strong>
+                  </p>
+                  <p className="text-slate-400">
+                    Sold: <strong className="text-slate-200">{returnInfo.qty}</strong> x Rs.{" "}
+                    {returnUnitPrice.toLocaleString()}
+                    {returnInfo.returnedCount > 0 && (
+                      <span className="text-amber-300"> • {returnInfo.returnedCount} already returned</span>
+                    )}
+                  </p>
+                </div>
+
+                {returnInfo.isPhone ? (
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-slate-400">IMEIs to return *</label>
+                      {returnInfo.remainingImeis.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setReturnImeis(
+                              returnImeis.length === returnInfo.remainingImeis.length ? [] : [...returnInfo.remainingImeis]
+                            )
+                          }
+                          className="text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold"
+                        >
+                          {returnImeis.length === returnInfo.remainingImeis.length ? "Clear" : "Select all"}
+                        </button>
+                      )}
+                    </div>
+                    <div className="mt-1 space-y-1.5">
+                      {returnInfo.remainingImeis.map((im) => (
+                        <label
+                          key={im}
+                          className={`flex items-center gap-2 p-2.5 rounded-xl border cursor-pointer text-xs font-mono transition-all ${
+                            returnImeis.includes(im)
+                              ? "bg-amber-500/10 border-amber-500/40 text-amber-200"
+                              : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={returnImeis.includes(im)}
+                            onChange={() => toggleReturnImei(im)}
+                            className="accent-amber-500"
+                          />
+                          <Smartphone size={12} className="text-indigo-400" />
+                          <span>{im}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="text-xs font-semibold text-slate-400">
+                      Quantity to return * (1 - {returnInfo.remaining})
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max={returnInfo.remaining}
+                      step="1"
+                      value={returnQty}
+                      onChange={(e) => setReturnQty(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 font-bold focus:outline-none focus:border-indigo-500 mt-1"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label className="text-xs font-semibold text-slate-400">Note (optional)</label>
+                  <input
+                    type="text"
+                    value={returnNote}
+                    onChange={(e) => setReturnNote(e.target.value)}
+                    placeholder="e.g. faulty, customer changed mind"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 mt-1"
+                  />
+                </div>
+
+                {/* What will happen */}
+                <div className="bg-amber-950/20 border border-amber-900/40 rounded-2xl p-3 text-xs space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Refund amount:</span>
+                    <span className="font-black text-amber-300">
+                      Rs. {returnEstimate.toLocaleString()}
+                      {returnCount > 0 && (
+                        <span className="text-[10px] font-semibold text-slate-400">
+                          {" "}
+                          ({returnCount} x Rs. {returnUnitPrice.toLocaleString()})
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                  {returnEstimate > 0 && (
+                    <p className="text-[11px] text-slate-400">
+                      About Rs. {returnDuePart.toLocaleString()} comes off the Udhaar first
+                      {returnEstimate - returnDuePart > 0 &&
+                        `, Rs. ${(returnEstimate - returnDuePart).toLocaleString()} cash back`}
+                      .
+                    </p>
+                  )}
+                  {Number(returnSale.discountAmount || 0) > 0 && (
+                    <p className="text-[11px] text-slate-400">
+                      This bill had a discount of Rs. {Number(returnSale.discountAmount).toLocaleString()}, shared over
+                      its items, so the final refund may be a little lower.
+                    </p>
+                  )}
+                  <p className="text-[11px] text-slate-400">
+                    The {returnInfo.isPhone ? "phone(s) go" : "item goes"} back into stock
+                    {returnInfo.isPhone && " and the warranty is voided"}.
+                  </p>
+                </div>
+
+                {!returnValid && (
+                  <p className="text-[11px] text-rose-400">
+                    {returnInfo.isPhone
+                      ? "Select at least one IMEI."
+                      : `Enter a quantity from 1 to ${returnInfo.remaining}.`}
+                  </p>
+                )}
+              </div>
+            )}
+
+            <div className="pt-2 flex justify-end gap-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={closeReturnModal}
+                disabled={isSubmittingReturn}
+                className="mt-3 px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-700 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmReturn}
+                disabled={isSubmittingReturn || !returnValid}
+                className="mt-3 px-5 py-2 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-amber-600/20 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {isSubmittingReturn ? "Saving…" : "Confirm Return"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Comprehensive Customer Transaction & Statement Modal */}
       {activeHistoryCust && (
         <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50 overflow-y-auto">
@@ -966,7 +1372,7 @@ const PendingPayments = () => {
               </div>
 
               {/* Action buttons inside header */}
-              <div className="flex items-center gap-2 self-end sm:self-auto">
+              <div className="flex items-center gap-2 flex-wrap justify-end self-end sm:self-auto">
                 <button
                   onClick={() => setStatementCustomer(activeHistoryCust)}
                   className="px-3 py-2 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-sm"
@@ -984,6 +1390,21 @@ const PendingPayments = () => {
                     <span>Record Payment</span>
                   </button>
                 )}
+
+                <button
+                  onClick={() => openEditCustomer(activeHistoryCust)}
+                  className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/50 rounded-xl transition-all"
+                  title="Edit account"
+                >
+                  <Pencil size={14} />
+                </button>
+                <button
+                  onClick={() => handleDeleteCustomer(activeHistoryCust)}
+                  className="p-2 bg-slate-800 hover:bg-rose-600/30 text-slate-400 hover:text-rose-300 border border-slate-700/50 hover:border-rose-500/40 rounded-xl transition-all"
+                  title="Delete account"
+                >
+                  <Trash2 size={14} />
+                </button>
 
                 <button
                   onClick={() => {
@@ -1104,6 +1525,8 @@ const PendingPayments = () => {
                   className={`p-4 border rounded-2xl transition-all ${
                     tx.isPayment
                       ? "bg-emerald-950/20 border-emerald-900/40 hover:border-emerald-700/50"
+                      : tx.isReturned
+                      ? "bg-amber-950/10 border-amber-900/40 hover:border-amber-700/50"
                       : tx.isCredit
                       ? "bg-rose-950/20 border-rose-900/40 hover:border-rose-700/50"
                       : "bg-slate-950/60 border-slate-800/80 hover:border-indigo-800/50"
@@ -1125,6 +1548,8 @@ const PendingPayments = () => {
                         className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center gap-1 ${
                           tx.isPayment
                             ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                            : tx.isReturned
+                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
                             : tx.isCredit
                             ? "bg-rose-500/20 text-rose-400 border border-rose-500/30"
                             : "bg-blue-500/20 text-blue-400 border border-blue-500/30"
@@ -1133,6 +1558,10 @@ const PendingPayments = () => {
                         {tx.isPayment ? (
                           <>
                             <DollarSign size={11} /> Payment Received
+                          </>
+                        ) : tx.isReturned ? (
+                          <>
+                            <Undo2 size={11} /> Returned
                           </>
                         ) : tx.isCredit ? (
                           <>
@@ -1149,19 +1578,38 @@ const PendingPayments = () => {
                       <span className="text-[11px] font-mono font-bold text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
                         {tx.billNumber}
                       </span>
+
+                      {/* Partly returned bill */}
+                      {!tx.isPayment && !tx.isReturned && tx.returnedTotal > 0 && (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center gap-1 bg-amber-500/10 text-amber-300 border border-amber-500/30">
+                          <Undo2 size={11} /> Partly Returned
+                        </span>
+                      )}
                     </div>
 
                     {/* Amount & Balance column */}
                     <div className="text-left sm:text-right w-full sm:w-auto">
                       <div
                         className={`text-lg font-black ${
-                          tx.isPayment ? "text-emerald-400" : tx.isCredit ? "text-rose-400" : "text-blue-400"
+                          tx.isPayment
+                            ? "text-emerald-400"
+                            : tx.isReturned
+                            ? "text-amber-300"
+                            : tx.isCredit
+                            ? "text-rose-400"
+                            : "text-blue-400"
                         }`}
                       >
                         {tx.isPayment
                           ? `+${shopSettings.currencySymbol} ${tx.paymentReceived.toLocaleString()}`
                           : `${shopSettings.currencySymbol} ${tx.grandTotal.toLocaleString()}`}
                       </div>
+                      {!tx.isPayment && tx.returnedTotal > 0 && (
+                        <div className="text-[11px] text-amber-300/90 font-semibold">
+                          {tx.isReturned ? "Bill fully returned" : "After returns"} (returned: Rs.{" "}
+                          {tx.returnedTotal.toLocaleString()})
+                        </div>
+                      )}
                       <div className="text-[11px] text-slate-400">
                         {tx.isCredit && tx.paymentReceived > 0 && (
                           <span className="text-emerald-400 font-semibold mr-1.5">
@@ -1236,44 +1684,88 @@ const PendingPayments = () => {
                               });
                             }
 
+                            // What already came back from this line
+                            const ret = lineReturnInfo(item);
+
                             return (
                               <div
                                 key={idx}
-                                className="bg-slate-950/70 border border-slate-800/80 rounded-xl p-2.5 text-xs"
+                                className={`border rounded-xl p-2.5 text-xs ${
+                                  ret.fullyReturned
+                                    ? "bg-slate-950/40 border-amber-900/40"
+                                    : "bg-slate-950/70 border-slate-800/80"
+                                }`}
                               >
                                 <div className="flex justify-between items-start gap-2">
-                                  <div>
-                                    <span className="font-bold text-slate-200">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span
+                                      className={`font-bold ${
+                                        ret.fullyReturned ? "text-slate-500 line-through" : "text-slate-200"
+                                      }`}
+                                    >
                                       {item.productName || item.name || "Product"}
                                     </span>
                                     {item.category && (
-                                      <span className="ml-2 text-[10px] text-slate-400 px-1.5 py-0.5 bg-slate-900 border border-slate-800 rounded">
+                                      <span className="text-[10px] text-slate-400 px-1.5 py-0.5 bg-slate-900 border border-slate-800 rounded">
                                         {item.category}
                                       </span>
                                     )}
+                                    {ret.fullyReturned ? (
+                                      <span className="text-[10px] font-bold px-1.5 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded">
+                                        Returned
+                                      </span>
+                                    ) : ret.returnedCount > 0 ? (
+                                      <span className="text-[10px] font-bold px-1.5 py-0.5 bg-amber-500/10 text-amber-300 border border-amber-500/30 rounded">
+                                        {ret.returnedCount} of {ret.qty} returned
+                                      </span>
+                                    ) : null}
                                   </div>
-                                  <div className="text-right whitespace-nowrap">
-                                    <span className="font-extrabold text-slate-100">
-                                      Rs. {itemSubtotal.toLocaleString()}
-                                    </span>
-                                    <span className="block text-[10px] text-slate-400">
-                                      {itemQty} x Rs. {itemPrice.toLocaleString()}
-                                    </span>
+                                  <div className="flex items-start gap-2">
+                                    <div className="text-right whitespace-nowrap">
+                                      <span
+                                        className={`font-extrabold ${
+                                          ret.fullyReturned ? "text-slate-500 line-through" : "text-slate-100"
+                                        }`}
+                                      >
+                                        Rs. {itemSubtotal.toLocaleString()}
+                                      </span>
+                                      <span className="block text-[10px] text-slate-400">
+                                        {itemQty} x Rs. {itemPrice.toLocaleString()}
+                                      </span>
+                                    </div>
+                                    {ret.remaining > 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => openReturnModal(tx, idx)}
+                                        className="px-2 py-1 bg-amber-500/10 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all"
+                                        title="Return this item to stock"
+                                      >
+                                        <Undo2 size={11} /> Return
+                                      </button>
+                                    )}
                                   </div>
                                 </div>
 
-                                {/* IMEIs list if present */}
+                                {/* IMEIs list if present (returned IMEIs struck through) */}
                                 {imeis.length > 0 && (
                                   <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-slate-900">
-                                    {imeis.map((im, imIdx) => (
-                                      <span
-                                        key={imIdx}
-                                        className="inline-flex items-center gap-1 font-mono text-[10px] bg-indigo-950/40 text-indigo-300 border border-indigo-800/50 px-2 py-0.5 rounded-md"
-                                      >
-                                        <Smartphone size={10} className="text-indigo-400" />
-                                        <span>IMEI: {im}</span>
-                                      </span>
-                                    ))}
+                                    {imeis.map((im, imIdx) => {
+                                      const imReturned = ret.returnedImeis.includes(im);
+                                      return (
+                                        <span
+                                          key={imIdx}
+                                          className={`inline-flex items-center gap-1 font-mono text-[10px] px-2 py-0.5 rounded-md border ${
+                                            imReturned
+                                              ? "bg-amber-950/30 text-amber-300/80 border-amber-800/50"
+                                              : "bg-indigo-950/40 text-indigo-300 border-indigo-800/50"
+                                          }`}
+                                        >
+                                          <Smartphone size={10} className={imReturned ? "text-amber-400" : "text-indigo-400"} />
+                                          <span className={imReturned ? "line-through" : ""}>IMEI: {im}</span>
+                                          {imReturned && <span className="font-sans font-bold not-italic">(returned)</span>}
+                                        </span>
+                                      );
+                                    })}
                                   </div>
                                 )}
                               </div>
@@ -1291,6 +1783,56 @@ const PendingPayments = () => {
                         <p className="text-[11px] text-slate-400 italic pt-1">
                           Note: {tx.notes}
                         </p>
+                      )}
+
+                      {/* Return history of this bill */}
+                      {(tx.returns || []).length > 0 && (
+                        <div className="bg-amber-950/10 border border-amber-900/40 rounded-xl p-2.5 space-y-2">
+                          <div className="text-[11px] font-bold text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
+                            <Undo2 size={13} /> Returns on this bill ({tx.returns.length})
+                          </div>
+                          {tx.returns.map((r, rIdx) => {
+                            const rDate = formatDateWithDay(r.at || r.date);
+                            return (
+                              <div
+                                key={r.id || rIdx}
+                                className="text-[11px] text-slate-300 border-t border-amber-900/30 pt-1.5 first:border-t-0 first:pt-0 space-y-0.5"
+                              >
+                                <div className="flex justify-between gap-2 flex-wrap">
+                                  <span className="font-semibold text-slate-200">
+                                    {rDate.day}, {rDate.date}
+                                    {rDate.time !== "—" && <span className="text-slate-400 font-normal"> at {rDate.time}</span>}
+                                  </span>
+                                  <span className="font-extrabold text-amber-300">
+                                    Rs. {Number(r.amount || 0).toLocaleString()}
+                                  </span>
+                                </div>
+                                <div className="text-slate-400">
+                                  {(r.items || [])
+                                    .map((ri) => {
+                                      const ims = (ri.imeis || []).filter(Boolean);
+                                      return `${ri.productName || "Item"} x${Number(ri.qty || ims.length || 1)}${
+                                        ims.length ? ` (IMEI: ${ims.join(", ")})` : ""
+                                      }`;
+                                    })
+                                    .join(", ") || "Items returned"}
+                                </div>
+                                <div className="flex gap-3 flex-wrap text-[10px]">
+                                  <span>
+                                    Udhaar reduced{" "}
+                                    <strong className="text-rose-300">Rs. {Number(r.dueReduced || 0).toLocaleString()}</strong>
+                                  </span>
+                                  <span>
+                                    cash back{" "}
+                                    <strong className="text-emerald-300">Rs. {Number(r.cashBack || 0).toLocaleString()}</strong>
+                                  </span>
+                                  {r.by && <span className="text-slate-500">by {r.by}</span>}
+                                </div>
+                                {r.note && <p className="text-[10px] text-slate-400 italic">Note: {r.note}</p>}
+                              </div>
+                            );
+                          })}
+                        </div>
                       )}
                     </div>
                   )}
@@ -1386,8 +1928,20 @@ const PendingPayments = () => {
                           ) : (
                             <div>
                               <span className="font-medium">
-                                {(tx.items || []).map((i) => `${i.productName || i.name} (x${i.quantity || 1})`).join(", ") || "Sale"}
+                                {(tx.items || [])
+                                  .map((i) => {
+                                    const r = lineReturnInfo(i);
+                                    const tag = r.fullyReturned ? ", returned" : r.returnedCount > 0 ? `, ${r.returnedCount} returned` : "";
+                                    return `${i.productName || i.name} (x${i.quantity || 1}${tag})`;
+                                  })
+                                  .join(", ") || "Sale"}
                               </span>
+                              {(tx.isReturned || tx.returnedTotal > 0) && (
+                                <span className="text-[9px] font-bold block uppercase">
+                                  {tx.isReturned ? "Bill returned" : "Partly returned"}
+                                  {tx.returnedTotal > 0 && `: Rs. ${tx.returnedTotal.toLocaleString()}`}
+                                </span>
+                              )}
                               {tx.items?.some((i) => i.imei || i.imeisArray?.length) && (
                                 <span className="text-[9px] text-slate-500 block font-mono">
                                   IMEI: {tx.items.map((i) => i.imei || i.imeisArray?.join(", ")).filter(Boolean).join(", ")}
@@ -1587,6 +2141,27 @@ const PendingPayments = () => {
                 <CheckCircle2 size={15} /> Done
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Status message (returns, account changes, WhatsApp sharing) */}
+      {notice && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[70] w-[calc(100%-2rem)] max-w-md print:hidden">
+          <div
+            className={`flex items-start gap-2.5 p-3.5 rounded-2xl border shadow-2xl text-xs font-semibold backdrop-blur-md ${
+              notice.type === "error"
+                ? "bg-rose-950/90 border-rose-500/40 text-rose-200"
+                : notice.type === "info"
+                ? "bg-slate-900/95 border-slate-700 text-slate-200"
+                : "bg-emerald-950/90 border-emerald-500/40 text-emerald-200"
+            }`}
+          >
+            <CheckCircle2 size={16} className="flex-shrink-0 mt-0.5" />
+            <span className="flex-1">{notice.text}</span>
+            <button onClick={() => setNotice(null)} className="text-slate-400 hover:text-white p-0.5 rounded-md">
+              <X size={14} />
+            </button>
           </div>
         </div>
       )}

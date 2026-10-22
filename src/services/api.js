@@ -83,6 +83,9 @@ export const api = {
   // ── Sales ─────────────────────────────────────────
   getSales: () => fetchJson(`${API_BASE}/sales`),
   createSale: (data) => send("POST", `${API_BASE}/sales`, data),
+  returnSaleItems: (id, data) => send("POST", `${API_BASE}/sales/${id}/returns`, data),
+  updateSale: (id, data) => send("PUT", `${API_BASE}/sales/${id}`, data),
+  deleteSale: (id) => send("DELETE", `${API_BASE}/sales/${id}`),
   getAnalytics: () => fetchJson(`${API_BASE}/sales/analytics`),
 
   // ── Ledger ────────────────────────────────────────
@@ -119,6 +122,16 @@ export const api = {
   createExpense: (data) => send("POST", `${API_BASE}/expenses`, data),
   updateExpense: (id, data) => send("PUT", `${API_BASE}/expenses/${id}`, data),
   deleteExpense: (id) => send("DELETE", `${API_BASE}/expenses/${id}`),
+
+  // ── Suppliers ─────────────────────────────────────
+  getSuppliers: () => fetchJson(`${API_BASE}/suppliers?withTransactions=1`),
+  createSupplier: (data) => send("POST", `${API_BASE}/suppliers`, data),
+  updateSupplier: (id, data) => send("PUT", `${API_BASE}/suppliers/${id}`, data),
+  deleteSupplier: (id) => send("DELETE", `${API_BASE}/suppliers/${id}`),
+  addSupplierPurchase: (id, data) => send("POST", `${API_BASE}/suppliers/${id}/purchases`, data),
+  addSupplierPayment: (id, data) => send("POST", `${API_BASE}/suppliers/${id}/payments`, data),
+  updateSupplierTransaction: (txId, data) => send("PUT", `${API_BASE}/suppliers/transactions/${txId}`, data),
+  deleteSupplierTransaction: (txId) => send("DELETE", `${API_BASE}/suppliers/transactions/${txId}`),
 
   // ── Shop Settings ─────────────────────────────────
   getSettings: () => fetchJson(`${API_BASE}/settings`),

@@ -7,17 +7,11 @@ import {
   X, AlertCircle, User, ChevronDown, Image as ImageIcon,
 } from "lucide-react";
 
-import html2canvas from "html2canvas";
 import { printElement } from "../services/printReceipt";
+import { shareImageToWhatsApp } from "../utils/shareImage";
 
-// ─────────────────────────────────────────────────────────────────
-// Exported helper to format phone numbers for WA
-// ─────────────────────────────────────────────────────────────────
-export const formatWAPhone = (phone) => {
-  let formattedPhone = (phone || "").replace(/\D/g, "");
-  if (formattedPhone.startsWith("0")) formattedPhone = "92" + formattedPhone.substring(1);
-  return formattedPhone;
-};
+// Kept for older importers; the helper now lives in utils/shareImage
+export { formatWAPhone } from "../utils/shareImage";
 
 // ─────────────────────────────────────────────────────────────────
 // POS Component
@@ -57,6 +51,7 @@ const POS = () => {
   // Receipt modal
   const [completedSaleInvoice, setCompletedSaleInvoice] = useState(null);
   const [isCapturingImage, setIsCapturingImage] = useState(false);
+  const [shareMessage, setShareMessage] = useState(""); // result of the last WhatsApp share
 
   const customerDropdownRef = useRef(null);
 
@@ -339,6 +334,7 @@ const POS = () => {
     // Not saved: keep the cart and the checkout open so nothing is lost
     if (!recorded) return;
     setCompletedSaleInvoice({ ...recorded, sellerName: selectedSeller, previousBalance, balanceAfterSale });
+    setShareMessage("");
 
     setCart([]);
     setSelectedCustomer(null);
@@ -428,98 +424,24 @@ const POS = () => {
     return text;
   };
 
-  // ── WhatsApp: Generate image from receipt HTML ────────────────
+  // ── WhatsApp: send the receipt as a picture ──────────────────
   const handleWhatsAppShare = async () => {
-    if (!completedSaleInvoice) return;
-    const receiptElement = document.getElementById("receipt-content");
-    const waText = getSaleWAText(completedSaleInvoice);
-    const formattedPhone = formatWAPhone(completedSaleInvoice.customerPhone);
-    const waUrl = formattedPhone
-      ? `https://wa.me/${formattedPhone}?text=${encodeURIComponent(waText)}`
-      : `https://web.whatsapp.com/send?text=${encodeURIComponent(waText)}`;
-
+    if (!completedSaleInvoice || isCapturingImage) return;
     setIsCapturingImage(true);
-
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-
-    // 1. Mobile native share attempt
-    if (isMobile && receiptElement && navigator.canShare) {
-      try {
-        const canvas = await html2canvas(receiptElement, {
-          scale: 2,
-          backgroundColor: "#ffffff",
-          useCORS: true,
-          allowTaint: true,
-          logging: false,
-        });
-
-        const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
-        if (blob) {
-          const file = new File([blob], `Invoice_${completedSaleInvoice.billNumber || "INV"}.png`, { type: "image/png" });
-          if (navigator.canShare({ files: [file] })) {
-            await navigator.share({
-              files: [file],
-              title: `Invoice ${completedSaleInvoice.billNumber}`,
-              text: waText,
-            });
-            setIsCapturingImage(false);
-            return;
-          }
-        }
-      } catch (shareErr) {
-        if (shareErr.name === "AbortError") {
-          setIsCapturingImage(false);
-          return;
-        }
-        console.warn("Native share fallback to WhatsApp link:", shareErr);
-      }
-    }
-
-    // 2. Desktop Flow: copy image to clipboard & download image
-    if (receiptElement) {
-      try {
-        const canvas = await html2canvas(receiptElement, {
-          scale: 2,
-          backgroundColor: "#ffffff",
-          useCORS: true,
-          allowTaint: true,
-          logging: false,
-        });
-
-        canvas.toBlob(async (blob) => {
-          if (blob) {
-            try {
-              if (navigator.clipboard && window.ClipboardItem) {
-                await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-              }
-            } catch (clipErr) {
-              console.log("Clipboard copy not supported:", clipErr);
-            }
-
-            try {
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = `Invoice_${completedSaleInvoice.billNumber || "INV"}.png`;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              setTimeout(() => URL.revokeObjectURL(url), 1000);
-            } catch (dlErr) {
-              console.log("Download fallback skipped:", dlErr);
-            }
-          }
-        }, "image/png");
-      } catch (canvasErr) {
-        console.warn("Canvas capture warning:", canvasErr);
-      }
-    }
-
-    // 3. Always open WhatsApp with pre-filled message
-    setTimeout(() => {
-      window.open(waUrl, "_blank");
+    setShareMessage("");
+    try {
+      const { message } = await shareImageToWhatsApp({
+        element: document.getElementById("receipt-content"),
+        phone: completedSaleInvoice.customerPhone,
+        text: getSaleWAText(completedSaleInvoice),
+        fileName: `Invoice_${completedSaleInvoice.billNumber || "INV"}.png`,
+      });
+      setShareMessage(message);
+    } catch (err) {
+      setShareMessage(`Could not create the invoice image: ${err.message || err}`);
+    } finally {
       setIsCapturingImage(false);
-    }, 300);
+    }
   };
 
   // ── UI ─────────────────────────────────────────────────────────
@@ -955,8 +877,9 @@ const POS = () => {
               <X size={18} />
             </button>
 
-            {/* Receipt Preview */}
-            <div id="receipt-content" className="p-5 max-h-[70vh] overflow-y-auto print:max-h-none print:p-0 bg-white text-black print-target">
+            {/* Receipt Preview — the scroll box is the outer div, so the image / print gets the whole receipt */}
+            <div className="max-h-[70vh] overflow-y-auto print:max-h-none">
+            <div id="receipt-content" className="p-5 print:p-0 bg-white text-black print-target">
               {/* Shop Header */}
               <div className="text-center mb-4">
                 <h2 className="text-xl font-black uppercase tracking-tight">{shopSettings.shopName || "AL-SYED MOBILE SHOP"}</h2>
@@ -1051,6 +974,13 @@ const POS = () => {
               <div className="text-center text-xs font-bold mt-2">THANK YOU FOR YOUR BUSINESS</div>
               <div className="text-center text-[10px] mt-1 mb-2">Developed By Syed</div>
             </div>
+            </div>
+
+            {shareMessage && (
+              <div className="px-4 py-2 text-[11px] font-semibold text-emerald-800 bg-emerald-50 border-t border-emerald-100 print:hidden">
+                {shareMessage}
+              </div>
+            )}
 
             {/* Actions */}
             <div className="flex gap-2 p-4 border-t border-slate-100 bg-slate-50 print:hidden">

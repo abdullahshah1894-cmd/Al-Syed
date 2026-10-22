@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 
 const Header = () => {
-  const { products, customers, activeSeller, setActiveSeller } = useApp();
+  const { products, customers, suppliers, activeSeller, setActiveSeller } = useApp();
   const { user } = useAuth();
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState("");
@@ -44,8 +44,22 @@ const Header = () => {
         (c.phone || "").includes(query)
     );
 
+    // Customer accounts live in Pending Payments (the old Customers page is gone)
     if (isCustomer) {
       navigate(`/pending-payments?search=${encodeURIComponent(query)}`);
+      return;
+    }
+
+    // Supplier name / company / phone opens the Suppliers page filtered to it
+    const isSupplier = (suppliers || []).some(
+      (s) =>
+        (s.name || "").toLowerCase().includes(query.toLowerCase()) ||
+        (s.company || "").toLowerCase().includes(query.toLowerCase()) ||
+        (s.phone || "").includes(query)
+    );
+
+    if (isSupplier) {
+      navigate(`/suppliers?search=${encodeURIComponent(query)}`);
       return;
     }
 
