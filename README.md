@@ -134,6 +134,17 @@ A comprehensive, full-stack Point of Sale (POS), Inventory, Customer Khata / Led
 
 ---
 
+## 💻 Running on the shop laptop (Windows)
+
+1. First time only: clone the repo, copy `backend/.env.example` to `backend/.env` and fill in the Supabase keys
+   (the **service_role** key is required).
+2. **To get the newest version:** double-click `update-app.bat` (pulls `main` from GitHub and installs packages).
+3. **To open the app:** double-click `start-app.bat` (starts the server and the app, then opens http://localhost:5173).
+
+Database changes are applied once to the shared Supabase database, so every laptop sees the same data.
+
+---
+
 ## 🔐 Security & Configuration
 
 Sensitive keys, database credentials, and `.env` files are strictly excluded from version control via `.gitignore`. Always refer to `.env.example` to set up your local development environment.
