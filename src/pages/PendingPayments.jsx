@@ -1,14 +1,14 @@
-import React, { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useApp, SELLERS } from "../context/AppContext";
-import { formatWAPhone, shareImageToWhatsApp } from "../utils/shareImage";
+import { useAuth } from "../context/AuthContext";
+import { useShareImage } from "../components/useShareImage";
 import { printElement } from "../services/printReceipt";
 import { isSettlement, itemImeis, saleBelongsTo, udhaarAdded as saleUdhaar } from "../utils/sales";
 import {
   Clock,
   CheckCircle2,
-  DollarSign,
-  Calendar,
+  Banknote,
   User,
   Search,
   X,
@@ -16,17 +16,54 @@ import {
   Smartphone,
   FileText,
   ShoppingBag,
-  ArrowUpRight,
-  Filter,
   Users,
-  Tag,
-  ChevronDown,
-  ChevronUp,
   RotateCcw,
   Pencil,
   Trash2,
   Undo2,
+  Share2,
+  ArrowUpDown,
 } from "lucide-react";
+import {
+  Page,
+  PageHeader,
+  Card,
+  Stat,
+  Badge,
+  Button,
+  IconButton,
+  Field,
+  Input,
+  Select,
+  Segmented,
+  EmptyState,
+  Modal,
+  inputClass,
+} from "../components/ui";
+
+// "Statement_Ali Khan/2" -> "Statement_Ali_Khan_2.png" (safe on every phone / computer)
+const pngName = (base) => `${String(base || "Receipt").replace(/[^\w.-]+/g, "_")}.png`;
+
+// Everything searchable about one bill line (name and every IMEI form)
+const itemSearchText = (item) =>
+  [
+    item?.productName,
+    item?.name,
+    ...itemImeis(item),
+    ...(Array.isArray(item?.imeis) ? item.imeis.map((im) => (typeof im === "string" ? im : im?.imei)) : []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+// Short "Item x1 (IMEI: ...)" list of what came back in one return
+const returnItemsText = (items) =>
+  (items || [])
+    .map((ri) => {
+      const ims = (ri.imeis || []).filter(Boolean);
+      return `${ri.productName || "Item"} x${Number(ri.qty || ims.length || 1)}${ims.length ? ` (IMEI: ${ims.join(", ")})` : ""}`;
+    })
+    .join(", ");
 
 // Helper to format date with day of the week
 const formatDateWithDay = (dateStr) => {
@@ -90,10 +127,14 @@ const PendingPayments = () => {
     deleteCustomer,
     returnSaleItems,
   } = useApp();
+  // Account edit / delete and returns are for the owner only (the server answers 403 to cashiers)
+  const { isAdmin } = useAuth();
+  // Receipt / statement image preview with WhatsApp / Share to… / Copy / Download
+  const [openShare, shareDialog] = useShareImage();
 
   const customers = useMemo(() => allCustomers || ctxCustomers || [], [allCustomers, ctxCustomers]);
   const sales = useMemo(() => allSales || ctxSales || [], [allSales, ctxSales]);
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
 
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedSeller, setSelectedSeller] = useState("All"); // "All" | "Aziz" | "Mubashir"
@@ -104,10 +145,15 @@ const PendingPayments = () => {
   const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
   const [historyCust, setHistoryCust] = useState(null);
   const [paymentReceipt, setPaymentReceipt] = useState(null);
-  const [statementCustomer, setStatementCustomer] = useState(null);
-  const [isCapturingImage, setIsCapturingImage] = useState(false);
+  // Only the id is kept: the statement always shows the customer's latest balance
+  const [statementCustId, setStatementCustId] = useState(null);
+  const statementCustomer = statementCustId ? customers.find((c) => c.id === statementCustId) || null : null;
+  // The customer in the payment modal, read fresh so the outstanding amount is current
+  const payCust = selectedCustForPayment
+    ? customers.find((c) => c.id === selectedCustForPayment.id) || selectedCustForPayment
+    : null;
 
-  // Short status message at the bottom of the screen (returns, WhatsApp sharing)
+  // Short status message at the bottom of the screen (returns, account changes)
   const [notice, setNotice] = useState(null); // { type: "success" | "error" | "info", text }
   const showNotice = (text, type = "success") => setNotice({ text, type, at: Date.now() });
   useEffect(() => {
@@ -128,8 +174,12 @@ const PendingPayments = () => {
   const [returnNote, setReturnNote] = useState("");
   const [isSubmittingReturn, setIsSubmittingReturn] = useState(false);
 
-  // Sync with URL query parameters if present (e.g., from Header global search)
-  useEffect(() => {
+  // Sync with URL query parameters if present (e.g., from Header global search).
+  // Done while rendering (once per new URL) instead of in an effect, so there is no extra render pass.
+  const paramKey = searchParams.toString();
+  const [syncedParamKey, setSyncedParamKey] = useState(null);
+  if (syncedParamKey !== paramKey) {
+    setSyncedParamKey(paramKey);
     const sParam = searchParams.get("search");
     if (sParam) {
       setSearchTerm(sParam);
@@ -137,10 +187,10 @@ const PendingPayments = () => {
     }
     const sellerParam = searchParams.get("seller");
     if (sellerParam) {
-      setSelectedSeller(sellerParam);
+      setSelectedSeller(SELLERS.find((s) => s.toLowerCase() === sellerParam.trim().toLowerCase()) || sellerParam);
       setViewFilter("all");
     }
-  }, [searchParams]);
+  }
 
   // History modal filters
   const [historyFilter, setHistoryFilter] = useState("all"); // "all" | "sales" | "payments"
@@ -181,8 +231,9 @@ const PendingPayments = () => {
     // Customer Name
     if ((c.name || "").toLowerCase().includes(q)) return true;
 
-    // Phone (matches partial digits)
-    if ((c.phone || "").replace(/\s|-/g, "").includes(q.replace(/\s|-/g, ""))) return true;
+    // Phone (matches partial digits; "-" alone must not match every customer)
+    const qPhone = q.replace(/\s|-/g, "");
+    if (qPhone && (c.phone || "").replace(/\s|-/g, "").includes(qPhone)) return true;
 
     // CNIC
     if ((c.cnic || "").includes(q)) return true;
@@ -199,11 +250,7 @@ const PendingPayments = () => {
 
       if ((s.billNumber || "").toLowerCase().includes(q)) return true;
       if ((s.notes || "").toLowerCase().includes(q)) return true;
-      return (s.items || []).some(
-        (it) =>
-          (it.productName || it.name || "").toLowerCase().includes(q) ||
-          (it.imei || "").toLowerCase().includes(q)
-      );
+      return (s.items || []).some((it) => itemSearchText(it).includes(q));
     });
 
     return hasMatchingSale;
@@ -261,21 +308,71 @@ const PendingPayments = () => {
     if (!cust) return [];
 
     const custSales = sales.filter((s) => saleBelongsTo(s, cust));
+    const timeOf = (d) => {
+      const t = new Date(d).getTime();
+      return isNaN(t) ? 0 : t;
+    };
 
-    // Sort chronologically (oldest to newest) to accurately compute running Udhaar balance
-    const sorted = [...custSales].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    // Ledger events in time order: every bill / payment receipt when it was made, and every
+    // return when it happened (a return lowers the balance on its own day, not on the bill's day)
+    const events = [];
+    custSales.forEach((record) => {
+      const at = timeOf(record.createdAt);
+      events.push({ record, at });
+      if (isSettlement(record)) return;
+      (record.returns || []).forEach((ret, idx) => {
+        events.push({ record, ret, idx, at: Math.max(at, timeOf(ret.at || ret.date)) });
+      });
+    });
+    // Stable sort: a bill stays before its own returns when the times are equal
+    events.sort((a, b) => a.at - b.at);
 
-    // Same rule as the server: a sale adds its due amount, money paid above the bill
-    // goes against the old balance, a settlement lowers it; never below 0
+    // Same rules as the server: a sale adds its due amount, money paid above the bill goes against
+    // the old balance, a settlement lowers it (never below 0), a return lowers it by what it took off
     let runningBalance = 0;
-    return sorted.map((record) => {
+    return events.map(({ record, ret, idx }) => {
+      if (ret) {
+        const dueReduced = Number(ret.dueReduced || 0);
+        runningBalance = Math.max(0, runningBalance - dueReduced);
+        const when = ret.at || ret.date || record.createdAt;
+        return {
+          id: `${record.id}-return-${ret.id || idx}`,
+          saleId: record.id,
+          isReturnEntry: true,
+          isPayment: false,
+          isCredit: false,
+          isCash: false,
+          isReturned: false,
+          billNumber: record.billNumber,
+          createdAt: when,
+          items: ret.items || [],
+          notes: ret.note || "",
+          paymentMethod: "Return",
+          sellerName: ret.by || "",
+          returns: [],
+          returnAmount: Number(ret.amount || 0),
+          dueReduced,
+          cashBack: Number(ret.cashBack || 0),
+          grandTotal: 0,
+          paidAmount: 0,
+          paymentReceived: 0,
+          udhaarAdded: 0,
+          oldBalancePaid: 0,
+          returnedTotal: 0,
+          runningBalance,
+          dateInfo: formatDateWithDay(when),
+        };
+      }
+
       const isPayment = isSettlement(record);
-      const udhaarAdded = saleUdhaar(record);
+      // Returns lowered the bill's due amount on the server; add back what they took off the
+      // account, so the bill shows the Udhaar it added when it was made (the return rows take it off)
+      const returnedDue = (record.returns || []).reduce((sum, r) => sum + Number(r.dueReduced || 0), 0);
+      const udhaarAdded = isPayment ? 0 : saleUdhaar(record) + returnedDue;
       const isCredit = !isPayment && udhaarAdded > 0;
       const isCash = !isPayment && !isCredit;
 
-      // Returns already lowered grandTotal / paidAmount / dueAmount on the server, so the
-      // running balance below stays right; a fully returned bill (grandTotal 0) adds nothing
+      // grandTotal / paidAmount are the bill as it is now (after returns)
       const isReturned = !isPayment && record.paymentStatus === "returned";
       const returnedTotal = (record.returns || []).reduce((sum, r) => sum + Number(r.amount || 0), 0);
 
@@ -299,6 +396,8 @@ const PendingPayments = () => {
 
       return {
         ...record,
+        grandTotal,
+        paidAmount,
         isPayment,
         isCredit,
         isCash,
@@ -311,6 +410,13 @@ const PendingPayments = () => {
         dateInfo,
       };
     });
+  };
+
+  // Where the ledger ends vs. the balance saved on the account (the saved balance is what counts)
+  const ledgerGap = (cust, txs) => {
+    const ledgerEnd = txs.length ? txs[txs.length - 1].runningBalance : 0;
+    const diff = Number(cust?.totalPending || 0) - ledgerEnd;
+    return Math.abs(diff) >= 1 ? { ledgerEnd, diff } : null;
   };
 
   // Handler when selecting a seller button
@@ -333,11 +439,12 @@ const PendingPayments = () => {
     setPaymentSeller(pick(cust.sellerName) || pick(selectedSeller) || pick(activeSeller));
   };
 
-  const closePaymentModal = () => {
+  // useCallback: the modal re-focuses itself whenever onClose changes, so it must stay the same while typing
+  const closePaymentModal = useCallback(() => {
     if (isSubmittingPayment) return;
     setSelectedCustForPayment(null);
     setPaymentAmountInput("");
-  };
+  }, [isSubmittingPayment]);
 
   const handleSettlePayment = async (e) => {
     e.preventDefault();
@@ -404,7 +511,7 @@ const PendingPayments = () => {
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
     text += `*CUSTOMER UDHAAR STATEMENT*\n`;
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
-    text += `*Customer:* ${cust.name}\n`;
+    text += `*Customer:* ${cust.name || "Customer"}\n`;
     if (cust.phone) text += `*Phone:* ${cust.phone}\n`;
     text += `*Date:* ${dateStr}\n`;
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -417,7 +524,9 @@ const PendingPayments = () => {
     const recent = custTx.slice(-5);
     recent.forEach((tx) => {
       const d = tx.dateInfo ? `${tx.dateInfo.day}, ${tx.dateInfo.date}` : "";
-      if (tx.isPayment) {
+      if (tx.isReturnEntry) {
+        text += `• ${d} | Return on Bill #${tx.billNumber}: -${currency} ${tx.returnAmount.toLocaleString()} (Bal: ${currency} ${tx.runningBalance.toLocaleString()})\n`;
+      } else if (tx.isPayment) {
         text += `• ${d} | Payment: +${currency} ${tx.paymentReceived?.toLocaleString()} (Bal: ${currency} ${tx.runningBalance?.toLocaleString()})\n`;
       } else {
         const returnedTag = tx.isReturned
@@ -438,64 +547,34 @@ const PendingPayments = () => {
     return text;
   };
 
-  // Send a receipt / statement to WhatsApp as a PNG image (share sheet on phones,
-  // clipboard + download + open chat on a computer) and tell the user what happened
-  const openWhatsAppShare = async ({ element, phone, text, defaultFileName, label = "Image" }) => {
-    if (isCapturingImage) return;
-    setIsCapturingImage(true);
-    try {
-      const result = await shareImageToWhatsApp({ element, phone, text, fileName: defaultFileName || "Receipt.png" });
-      let message = String(result.message || "").replace(/^Invoice image/, label);
-      if ((result.method === "clipboard" || result.method === "download") && !formatWAPhone(phone)) {
-        message += " No valid customer phone number, so choose the chat in WhatsApp yourself.";
-      }
-      showNotice(message, result.method === "cancelled" ? "info" : "success");
-    } catch (err) {
-      // Image could not be made: still open the chat with the text so nothing is lost
-      console.warn("WhatsApp image share failed:", err);
-      const wa = formatWAPhone(phone);
-      const url = wa
-        ? `https://wa.me/${wa}?text=${encodeURIComponent(text)}`
-        : `https://web.whatsapp.com/send?text=${encodeURIComponent(text)}`;
-      window.open(url, "_blank", "noopener");
-      showNotice(`Could not create the image (${err?.message || "unknown error"}). WhatsApp opened with the text only.`, "error");
-    } finally {
-      setIsCapturingImage(false);
-    }
-  };
-
-  // WhatsApp share for Payment Receipt
+  // Share the payment receipt as an image (preview, then WhatsApp / any app / copy / download)
   const handleWhatsAppShare = () => {
     if (!paymentReceipt) return;
-    const receiptElement = document.getElementById("receipt-content");
-    const waText = getPaymentReceiptWAText(paymentReceipt);
-
-    openWhatsAppShare({
-      element: receiptElement,
-      phone: paymentReceipt.customerPhone,
-      text: waText,
-      defaultFileName: `Receipt_${paymentReceipt.billNumber || "PAY"}.png`,
-      label: "Receipt image",
+    const cust = customers.find((c) => c.id === paymentReceipt.customerId || c.id === paymentReceipt.customer);
+    openShare({
+      element: document.getElementById("receipt-content"),
+      fileName: pngName(`Receipt_${paymentReceipt.billNumber || "PAY"}`),
+      phone: paymentReceipt.customerPhone || cust?.phone || "",
+      text: getPaymentReceiptWAText(paymentReceipt),
+      title: "Share Receipt",
     });
   };
 
-  // WhatsApp share for Customer Statement
+  // Share the customer statement as an image
   const handleWhatsAppStatementShare = () => {
     if (!statementCustomer) return;
-    const statementEl = document.getElementById("statement-print-area");
-    const waText = getStatementWAText(statementCustomer);
-
-    openWhatsAppShare({
-      element: statementEl,
-      phone: statementCustomer.phone,
-      text: waText,
-      defaultFileName: `Statement_${statementCustomer.name || "Customer"}.png`,
-      label: "Statement image",
+    openShare({
+      element: document.getElementById("statement-print-area"),
+      fileName: pngName(`Statement_${statementCustomer.name || "Customer"}`),
+      phone: statementCustomer.phone || "",
+      text: getStatementWAText(statementCustomer),
+      title: "Share Statement",
     });
   };
 
   // ── Account edit / delete ────────────────────────────────────────────────
   const openEditCustomer = (cust) => {
+    if (!isAdmin) return;
     setEditCust(cust);
     setEditForm({
       name: cust.name || "",
@@ -506,14 +585,14 @@ const PendingPayments = () => {
     });
   };
 
-  const closeEditCustomer = () => {
+  const closeEditCustomer = useCallback(() => {
     if (isSavingCustomer) return;
     setEditCust(null);
-  };
+  }, [isSavingCustomer]);
 
   const handleSaveCustomer = async (e) => {
     e.preventDefault();
-    if (isSavingCustomer || !editCust || !editForm.name.trim()) return;
+    if (!isAdmin || isSavingCustomer || !editCust || !editForm.name.trim()) return;
     setIsSavingCustomer(true);
     try {
       // Details only; balances are never sent (only sales, payments and returns change them)
@@ -534,15 +613,20 @@ const PendingPayments = () => {
     }
   };
 
+  const [deletingCustId, setDeletingCustId] = useState(null);
   const handleDeleteCustomer = async (cust) => {
+    if (!isAdmin || deletingCustId) return;
     const owes = Number(cust.totalPending || 0);
     const warning =
       owes > 0
         ? `This customer still owes ${shopSettings.currencySymbol || "Rs."} ${owes.toLocaleString()}.\n\n`
         : "";
-    if (!window.confirm(`${warning}Delete the account of "${cust.name}"? Their bills stay in the records.`)) return;
+    if (!window.confirm(`${warning}Delete the account of "${cust.name || "this customer"}"? Their bills stay in the records.`)) return;
 
+    setDeletingCustId(cust.id);
+    // deleteCustomer alerts the user itself and returns false when the server refuses
     const ok = await deleteCustomer(cust.id);
+    setDeletingCustId(null);
     if (!ok) return;
     // Close anything still open for this customer
     if (historyCust?.id === cust.id) {
@@ -550,7 +634,7 @@ const PendingPayments = () => {
       setHistorySearch("");
       setHistoryFilter("all");
     }
-    if (statementCustomer?.id === cust.id) setStatementCustomer(null);
+    if (statementCustId === cust.id) setStatementCustId(null);
     if (selectedCustForPayment?.id === cust.id) setSelectedCustForPayment(null);
     if (editCust?.id === cust.id) setEditCust(null);
     if (returnTarget) setReturnTarget(null);
@@ -579,22 +663,23 @@ const PendingPayments = () => {
   const returnDuePart = returnSale ? Math.min(Math.max(0, Number(returnSale.dueAmount || 0)), returnEstimate) : 0;
 
   const openReturnModal = (sale, index) => {
+    if (!isAdmin) return;
     setReturnTarget({ saleId: sale.id, index });
     setReturnQty("1");
     setReturnImeis([]);
     setReturnNote("");
   };
 
-  const closeReturnModal = () => {
+  const closeReturnModal = useCallback(() => {
     if (isSubmittingReturn) return;
     setReturnTarget(null);
-  };
+  }, [isSubmittingReturn]);
 
   const toggleReturnImei = (imei) =>
     setReturnImeis((prev) => (prev.includes(imei) ? prev.filter((x) => x !== imei) : [...prev, imei]));
 
   const handleConfirmReturn = async () => {
-    if (isSubmittingReturn || !returnSale || !returnInfo || !returnValid) return;
+    if (!isAdmin || isSubmittingReturn || !returnSale || !returnInfo || !returnValid) return;
     const line = returnInfo.isPhone
       ? { index: returnTarget.index, qty: returnImeis.length, imeis: returnImeis }
       : { index: returnTarget.index, qty: returnCount };
@@ -626,1040 +711,638 @@ const PendingPayments = () => {
 
   // Process transactions for active history customer
   const activeTransactions = activeHistoryCust ? getCustomerTransactions(activeHistoryCust) : [];
+  const activeGap = activeHistoryCust ? ledgerGap(activeHistoryCust, activeTransactions) : null;
+  const statementTransactions = statementCustomer ? getCustomerTransactions(statementCustomer) : [];
+  const statementGap = statementCustomer ? ledgerGap(statementCustomer, statementTransactions) : null;
+  const billCount = activeTransactions.filter((t) => !t.isPayment && !t.isReturnEntry).length;
+  const paymentCount = activeTransactions.filter((t) => t.isPayment).length;
 
-  const filteredHistoryTransactions = useMemo(() => {
+  // Recomputed every render (the ledger is rebuilt from the latest sales each time)
+  const filteredHistoryTransactions = (() => {
     if (!activeTransactions.length) return [];
-    let list = activeTransactions.filter((t) => {
+    const q = historySearch.trim().toLowerCase();
+    const list = activeTransactions.filter((t) => {
       if (historyFilter === "payments" && !t.isPayment) return false;
       if (historyFilter === "sales" && t.isPayment) return false;
 
-      if (historySearch.trim()) {
-        const q = historySearch.toLowerCase();
+      if (q) {
         const billMatch = (t.billNumber || "").toLowerCase().includes(q);
         const dayMatch = (t.dateInfo.day || "").toLowerCase().includes(q);
         const dateMatch = (t.dateInfo.date || "").toLowerCase().includes(q);
         const notesMatch = (t.notes || "").toLowerCase().includes(q);
         const methodMatch = (t.paymentMethod || "").toLowerCase().includes(q);
-        const itemMatch = (t.items || []).some(
-          (item) =>
-            (item.productName || item.name || "").toLowerCase().includes(q) ||
-            (item.imei || "").toLowerCase().includes(q) ||
-            (item.imeisArray || []).some((im) => im.toLowerCase().includes(q))
-        );
+        const itemMatch = (t.items || []).some((item) => itemSearchText(item).includes(q));
         return billMatch || dayMatch || dateMatch || notesMatch || methodMatch || itemMatch;
       }
       return true;
     });
 
-    if (historySort === "newest") {
-      return [...list].reverse();
-    }
-    return list;
-  }, [activeTransactions, historyFilter, historySearch, historySort]);
+    return historySort === "newest" ? [...list].reverse() : list;
+  })();
+
+  const cur = shopSettings.currencySymbol || "Rs.";
+  const hasFilters = selectedSeller !== "All" || !!searchTerm.trim();
+  const resetFilters = () => {
+    setSelectedSeller("All");
+    setSearchTerm("");
+    setViewFilter("all");
+  };
+  // Seller chips: "All" or the matching seller name (case-insensitive, like the filter itself)
+  const sellerChipValue =
+    selectedSeller === "All"
+      ? "All"
+      : SELLERS.find((s) => s.toLowerCase() === selectedSeller.toLowerCase()) || selectedSeller;
+
+  // Esc / backdrop closes the khata only when nothing else is open on top of it
+  const stackedOpen =
+    !!payCust || (isAdmin && (!!editCust || !!returnTarget)) || !!statementCustomer || !!paymentReceipt;
+  const closeHistory = useCallback(() => {
+    if (stackedOpen) return;
+    setHistoryCust(null);
+    setHistorySearch("");
+    setHistoryFilter("all");
+  }, [stackedOpen]);
+
+  // Day / date / time line shared by every ledger entry
+  const dateLine = (dateInfo) => (
+    <>
+      <Badge tone="brand">{dateInfo.day}</Badge>
+      <span className="text-sm font-semibold text-ink">{dateInfo.date}</span>
+      <span className="text-xs text-muted">at {dateInfo.time}</span>
+    </>
+  );
+  const billChip = (billNumber) => (
+    <span className="font-mono text-[11px] font-semibold text-ink-soft bg-sunken px-2 py-0.5 rounded-md">{billNumber}</span>
+  );
 
   return (
     <>
-    <div className={`p-6 space-y-6 ${paymentReceipt || statementCustomer ? "print:hidden" : ""}`}>
-      {/* Header */}
-      <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-sm">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <Clock size={24} className="text-rose-400" />
-            <h1 className="text-xl font-bold text-slate-100">Customer Pending Bills (Udhaar System)</h1>
-          </div>
-          <p className="text-xs text-slate-400">
-            Filter by seller, search any customer name/phone, and click any record to view their full transaction ledger
-          </p>
-        </div>
+    <Page className={paymentReceipt || statementCustomer ? "print:hidden" : ""}>
+      <PageHeader
+        title="Udhaar khata"
+        description="Who owes the shop and how much. Open an account to see every bill, payment and return."
+      />
 
-        <div className="flex flex-col sm:flex-row gap-3 w-full lg:w-auto items-stretch sm:items-center">
-          {/* Seller Selection Filter Buttons */}
-          <div className="flex items-center gap-1.5 bg-slate-950 p-1.5 rounded-2xl border border-slate-800 flex-wrap sm:flex-nowrap">
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider px-2 hidden sm:inline">
-              Seller:
-            </span>
-            <button
-              onClick={() => setSelectedSeller("All")}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
-                selectedSeller === "All"
-                  ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-              }`}
-            >
-              <Users size={13} />
-              <span>All Sellers</span>
-            </button>
-            {SELLERS.map((sellerName) => {
-              const isSelected = selectedSeller.toLowerCase() === sellerName.toLowerCase();
-              return (
-                <button
-                  key={sellerName}
-                  onClick={() => handleSelectSeller(sellerName)}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
-                    isSelected
-                      ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30 border border-indigo-400/50"
-                      : "text-slate-300 hover:text-white hover:bg-slate-900 border border-transparent"
-                  }`}
-                >
-                  <User size={13} />
-                  <span>{sellerName}</span>
-                  {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse ml-0.5" />}
-                </button>
-              );
-            })}
+      {/* Totals for the current seller selection */}
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Stat
+          label="Udhaar to collect"
+          value={`${cur} ${stats.totalPendingAmount.toLocaleString()}`}
+          tone={stats.totalPendingAmount > 0 ? "khata" : "paid"}
+          hint={selectedSeller !== "All" ? `${selectedSeller}'s accounts` : "All sellers"}
+          icon={Clock}
+        />
+        <Stat
+          label="Udhaar collected"
+          value={`${cur} ${stats.totalCollected.toLocaleString()}`}
+          tone="paid"
+          hint="Payments and money paid on Udhaar bills"
+          icon={Banknote}
+        />
+        <Stat
+          label="Accounts with Udhaar"
+          value={`${stats.pendingCount} of ${stats.allCount}`}
+          hint="Customers who still owe money"
+          icon={Users}
+        />
+      </div>
+
+      {/* Filters */}
+      <Card className="space-y-3">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            <Segmented
+              value={viewFilter}
+              onChange={setViewFilter}
+              options={[
+                { value: "pending", label: `Owes Udhaar (${stats.pendingCount})` },
+                { value: "all", label: `All accounts (${stats.allCount})` },
+              ]}
+            />
+            <Segmented
+              value={sellerChipValue}
+              onChange={(v) => (v === "All" ? setSelectedSeller("All") : handleSelectSeller(v))}
+              options={[
+                { value: "All", label: "All sellers" },
+                ...SELLERS.map((s) => ({ value: s, label: s })),
+              ]}
+            />
           </div>
 
-          {/* Search box with Clear Button */}
-          <div className="relative w-full sm:w-72">
-            <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+          <div className="relative w-full lg:w-80 shrink-0">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
             <input
               type="text"
-              placeholder="Search customer name, phone, bill..."
+              placeholder="Search name, phone, bill no., IMEI…"
+              aria-label="Search customers"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-9 pr-8 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
+              className={`${inputClass} pl-9 pr-10`}
             />
             {searchTerm && (
-              <button
-                type="button"
+              <IconButton
+                icon={X}
+                label="Clear search"
+                size="sm"
                 onClick={() => setSearchTerm("")}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 p-0.5 rounded-md hover:bg-slate-800 transition-colors"
-                title="Clear search"
-              >
-                <X size={14} />
-              </button>
+                className="absolute right-1 top-1/2 -translate-y-1/2"
+              />
             )}
           </div>
         </div>
-      </div>
 
-      {/* KPI Overview Bar & Filter Tabs */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 bg-slate-900/60 border border-slate-800/80 rounded-2xl p-4">
-        {/* Toggle between Udhaar Pending & All Accounts */}
-        <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-semibold">
-          <button
-            onClick={() => setViewFilter("pending")}
-            className={`px-4 py-1.5 rounded-lg transition-all ${
-              viewFilter === "pending"
-                ? "bg-rose-500/20 text-rose-300 font-bold border border-rose-500/30 shadow-sm"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            Pending Udhaar ({stats.pendingCount})
-          </button>
-          <button
-            onClick={() => setViewFilter("all")}
-            className={`px-4 py-1.5 rounded-lg transition-all ${
-              viewFilter === "all"
-                ? "bg-indigo-600 text-white font-bold shadow-sm"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            All Accounts ({stats.allCount})
-          </button>
-        </div>
-
-        {/* Dynamic Aggregate Stats for Current Seller Selection */}
-        <div className="flex items-center gap-4 text-xs flex-wrap">
-          {selectedSeller !== "All" && (
-            <div className="px-2.5 py-1 bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 rounded-lg font-bold flex items-center gap-1.5">
-              <User size={13} />
-              <span>{selectedSeller}'s Accounts</span>
-            </div>
-          )}
-          <div className="flex items-center gap-2">
-            <span className="text-slate-400">Total Outstanding:</span>
-            <span className="font-black text-rose-400 text-sm">
-              {shopSettings.currencySymbol} {stats.totalPendingAmount.toLocaleString()}
-            </span>
-          </div>
-          <div className="h-4 w-px bg-slate-800 hidden sm:block" />
-          <div className="flex items-center gap-2">
-            <span className="text-slate-400">Total Collected:</span>
-            <span className="font-bold text-emerald-400">
-              {shopSettings.currencySymbol} {stats.totalCollected.toLocaleString()}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Active Filter Indicators Banner */}
-      {(selectedSeller !== "All" || searchTerm.trim()) && (
-        <div className="flex items-center gap-2 flex-wrap text-xs bg-indigo-950/20 border border-indigo-500/20 px-4 py-2.5 rounded-2xl">
-          <span className="text-slate-400 font-medium">Active Filters:</span>
-          {selectedSeller !== "All" && (
-            <span className="inline-flex items-center gap-1.5 bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 px-2.5 py-1 rounded-lg font-bold">
-              <User size={12} /> Seller: {selectedSeller}
-              <button
-                onClick={() => setSelectedSeller("All")}
-                className="hover:text-white ml-1"
-                title="Clear seller filter"
-              >
-                <X size={12} />
-              </button>
-            </span>
-          )}
-          {searchTerm.trim() && (
-            <span className="inline-flex items-center gap-1.5 bg-slate-800 text-slate-200 border border-slate-700 px-2.5 py-1 rounded-lg font-bold">
-              <Search size={12} /> Search: "{searchTerm}"
-              <button
-                onClick={() => setSearchTerm("")}
-                className="hover:text-white ml-1"
-                title="Clear search"
-              >
-                <X size={12} />
-              </button>
-            </span>
-          )}
-          <span className="text-slate-500 ml-auto font-medium">
-            Found {filteredCustomers.length} customer(s)
-          </span>
-          <button
-            onClick={() => {
-              setSelectedSeller("All");
-              setSearchTerm("");
-              setViewFilter("all");
-            }}
-            className="text-[11px] text-indigo-400 hover:text-indigo-300 underline font-semibold ml-2 flex items-center gap-1"
-          >
-            <RotateCcw size={11} /> Reset Filters
-          </button>
-        </div>
-      )}
-
-      {/* Customers Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filteredCustomers.map((cust) => {
-          // Pre-fetch last transaction info for preview
-          const custTx = getCustomerTransactions(cust);
-          const lastTx = custTx.length > 0 ? custTx[custTx.length - 1] : null;
-
-          return (
-            <div
-              key={cust.id}
-              onClick={() => setHistoryCust(cust)}
-              className="bg-slate-900 border border-slate-800 hover:border-indigo-500/60 rounded-3xl p-5 shadow-sm space-y-4 cursor-pointer transition-all duration-200 hover:bg-slate-800/40 hover:scale-[1.01] hover:shadow-xl hover:shadow-indigo-500/5 group relative"
-            >
-              {/* Card Header */}
-              <div className="flex items-start justify-between border-b border-slate-800 pb-3 gap-2">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="font-bold text-slate-100 text-base group-hover:text-indigo-300 transition-colors">
-                      {cust.name}
-                    </h3>
-                    {cust.sellerName && (
-                      <span className="text-[10px] px-2 py-0.5 bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded-md font-semibold">
-                        Seller: {cust.sellerName}
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
-                    <span>{cust.phone || "No phone"}</span>
-                    {cust.address && <span className="text-slate-500">• {cust.address}</span>}
-                  </p>
-                </div>
-
-                <span
-                  className={`px-2.5 py-1 rounded-full text-xs font-bold border whitespace-nowrap ${
-                    cust.totalPending > 0
-                      ? "bg-rose-500/20 text-rose-300 border-rose-500/30"
-                      : "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
-                  }`}
-                >
-                  {cust.totalPending > 0 ? "Udhaar Pending" : "Settled (Rs. 0)"}
-                </span>
-              </div>
-
-              {/* Financial Metrics */}
-              <div className="space-y-2 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Total Purchase:</span>
-                  <span className="font-semibold text-slate-200">
-                    {shopSettings.currencySymbol} {Number(cust.totalPurchases || 0).toLocaleString()}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Total Amount Paid:</span>
-                  <span className="font-semibold text-emerald-400">
-                    {shopSettings.currencySymbol} {Number(cust.totalPaid || 0).toLocaleString()}
-                  </span>
-                </div>
-                <div className="flex justify-between text-sm pt-2 border-t border-slate-800">
-                  <span className="font-bold text-rose-300">Remaining Balance:</span>
-                  <span className="font-extrabold text-rose-400 text-base">
-                    {shopSettings.currencySymbol} {Number(cust.totalPending || 0).toLocaleString()}
-                  </span>
-                </div>
-              </div>
-
-              {/* Last Activity Preview */}
-              {lastTx && (
-                <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-2.5 text-[11px] text-slate-400 space-y-0.5">
-                  <div className="flex justify-between items-center text-[10px]">
-                    <span className="text-slate-500 uppercase font-semibold">Last Activity:</span>
-                    <span className="font-bold text-indigo-300">{lastTx.dateInfo.day}, {lastTx.dateInfo.date}</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="truncate max-w-[180px] text-slate-300 font-medium">
-                      {lastTx.isPayment ? `Paid: Rs. ${lastTx.paymentReceived.toLocaleString()}` : `Sale: ${lastTx.billNumber}`}
-                    </span>
-                    <span className={`font-bold ${lastTx.isPayment ? "text-emerald-400" : "text-rose-400"}`}>
-                      {lastTx.isPayment ? `+Rs. ${lastTx.paymentReceived.toLocaleString()}` : `Total: Rs. ${lastTx.grandTotal.toLocaleString()}`}
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {/* Click Callout */}
-              <div className="pt-1 text-[11px] text-indigo-400 font-semibold flex items-center justify-between group-hover:text-indigo-300 transition-colors">
-                <span className="flex items-center gap-1.5">
-                  <FileText size={13} />
-                  Click to view full statement & history
-                </span>
-                <span className="text-xs group-hover:translate-x-1 transition-transform">→</span>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="flex gap-2 pt-2 border-t border-slate-800/80">
+        {/* Active filters */}
+        {hasFilters && (
+          <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3 text-xs">
+            {selectedSeller !== "All" && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-brand-50 text-brand-700 pl-2.5 pr-1 py-0.5 font-semibold">
+                <User size={12} aria-hidden="true" /> Seller: {selectedSeller}
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setHistoryCust(cust);
-                  }}
-                  className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-all border border-slate-700/50"
+                  onClick={() => setSelectedSeller("All")}
+                  className="ml-0.5 rounded-full p-1 hover:bg-brand-100"
+                  aria-label="Clear seller filter"
+                  title="Clear seller filter"
                 >
-                  <Calendar size={14} className="text-indigo-400" />
-                  <span>View Details</span>
+                  <X size={12} />
                 </button>
-
-                {cust.totalPending > 0 && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openPaymentModal(cust);
-                    }}
-                    className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-emerald-600/20"
-                  >
-                    <DollarSign size={14} />
-                    <span>Record Payment</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openEditCustomer(cust);
-                  }}
-                  className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-2xl text-xs flex items-center justify-center transition-all border border-slate-700/50"
-                  title="Edit account"
-                >
-                  <Pencil size={14} />
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteCustomer(cust);
-                  }}
-                  className="px-3 py-2.5 bg-slate-800 hover:bg-rose-600/30 text-slate-400 hover:text-rose-300 rounded-2xl text-xs flex items-center justify-center transition-all border border-slate-700/50 hover:border-rose-500/40"
-                  title="Delete account"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {filteredCustomers.length === 0 && (
-        <div className="text-center py-16 bg-slate-900/40 border border-slate-800/80 rounded-3xl p-8 space-y-3">
-          <Clock size={36} className="mx-auto text-slate-600" />
-          <h3 className="text-base font-bold text-slate-300">No Customers Found</h3>
-          <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            {searchTerm.trim()
-              ? `No customer records match "${searchTerm}". Check the spelling or click Reset Filters.`
-              : selectedSeller !== "All"
-              ? `No customer records found under seller "${selectedSeller}".`
-              : "All customers have settled their accounts! Click 'All Accounts' to inspect full customer histories."}
-          </p>
-          {(searchTerm.trim() || selectedSeller !== "All") && (
-            <button
-              onClick={() => {
-                setSelectedSeller("All");
-                setSearchTerm("");
-                setViewFilter("all");
-              }}
-              className="mt-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl transition-all shadow inline-flex items-center gap-1.5"
-            >
-              <RotateCcw size={13} /> Reset Filters & Show All
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Payment Settlement Modal (above the history modal, which can open it) */}
-      {selectedCustForPayment && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-100 text-base">Record Pending Payment</h3>
-              <button
-                onClick={closePaymentModal}
-                className="text-slate-400 hover:text-white p-1 rounded-lg"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <form onSubmit={handleSettlePayment} className="space-y-3">
-              <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-1 text-xs">
-                <p className="text-slate-400">
-                  Customer: <strong className="text-slate-200">{selectedCustForPayment.name}</strong>
-                </p>
-                <p className="text-slate-400">
-                  Current Outstanding:{" "}
-                  <strong className="text-rose-400">
-                    Rs. {selectedCustForPayment.totalPending.toLocaleString()}
-                  </strong>
-                </p>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Received Amount (Rs.) *</label>
-                <input
-                  type="number"
-                  required
-                  min="1"
-                  max={selectedCustForPayment.totalPending}
-                  value={paymentAmountInput}
-                  onChange={(e) => setPaymentAmountInput(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 font-bold focus:outline-none focus:border-indigo-500 mt-1"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Received By (Seller) *</label>
-                <select
-                  required
-                  value={paymentSeller}
-                  onChange={(e) => setPaymentSeller(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 font-bold focus:outline-none focus:border-indigo-500 mt-1"
-                >
-                  <option value="">Select seller...</option>
-                  {SELLERS.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="pt-2 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={closePaymentModal}
-                  disabled={isSubmittingPayment}
-                  className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-700 disabled:opacity-60"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmittingPayment}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-emerald-600/20 disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {isSubmittingPayment ? "Saving…" : "Confirm & Update Balance"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Edit Customer Account Modal (above the history modal) */}
-      {editCust && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-100 text-base flex items-center gap-2">
-                <Pencil size={16} className="text-indigo-400" /> Edit Customer Account
-              </h3>
-              <button onClick={closeEditCustomer} className="text-slate-400 hover:text-white p-1 rounded-lg">
-                <X size={18} />
-              </button>
-            </div>
-
-            <form onSubmit={handleSaveCustomer} className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Name *</label>
-                <input
-                  type="text"
-                  required
-                  value={editForm.name}
-                  onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 font-bold focus:outline-none focus:border-indigo-500 mt-1"
-                />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-semibold text-slate-400">Phone</label>
-                  <input
-                    type="tel"
-                    value={editForm.phone}
-                    onChange={(e) => setEditForm((f) => ({ ...f, phone: e.target.value }))}
-                    placeholder="03xx-xxxxxxx"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 mt-1"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-semibold text-slate-400">CNIC</label>
-                  <input
-                    type="text"
-                    value={editForm.cnic}
-                    onChange={(e) => setEditForm((f) => ({ ...f, cnic: e.target.value }))}
-                    placeholder="xxxxx-xxxxxxx-x"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 mt-1"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Address</label>
-                <input
-                  type="text"
-                  value={editForm.address}
-                  onChange={(e) => setEditForm((f) => ({ ...f, address: e.target.value }))}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 mt-1"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Seller</label>
-                <select
-                  value={editForm.sellerName}
-                  onChange={(e) => setEditForm((f) => ({ ...f, sellerName: e.target.value }))}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 font-bold focus:outline-none focus:border-indigo-500 mt-1"
-                >
-                  <option value="">No seller assigned</option>
-                  {SELLERS.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <p className="text-[11px] text-slate-500">
-                Balances are not edited here; they change only through sales, payments and returns.
-              </p>
-
-              <div className="pt-2 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={closeEditCustomer}
-                  disabled={isSavingCustomer}
-                  className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-700 disabled:opacity-60"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSavingCustomer || !editForm.name.trim()}
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-indigo-600/20 disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {isSavingCustomer ? "Saving…" : "Save Changes"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Return Item Modal (above the history modal) */}
-      {returnTarget && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto custom-scrollbar">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-100 text-base flex items-center gap-2">
-                <Undo2 size={16} className="text-amber-400" /> Return Item
-              </h3>
-              <button onClick={closeReturnModal} className="text-slate-400 hover:text-white p-1 rounded-lg">
-                <X size={18} />
-              </button>
-            </div>
-
-            {!returnSale || !returnItem || !returnInfo ? (
-              <p className="text-xs text-slate-400">This bill line is no longer available.</p>
-            ) : returnInfo.remaining === 0 ? (
-              <p className="text-xs text-slate-400">Everything on this line has already been returned.</p>
-            ) : (
-              <div className="space-y-3">
-                <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-1 text-xs">
-                  <p className="text-slate-400">
-                    Bill: <strong className="text-slate-200 font-mono">{returnSale.billNumber}</strong>
-                  </p>
-                  <p className="text-slate-400">
-                    Item: <strong className="text-slate-200">{returnItem.productName || returnItem.name || "Product"}</strong>
-                  </p>
-                  <p className="text-slate-400">
-                    Sold: <strong className="text-slate-200">{returnInfo.qty}</strong> x Rs.{" "}
-                    {returnUnitPrice.toLocaleString()}
-                    {returnInfo.returnedCount > 0 && (
-                      <span className="text-amber-300"> • {returnInfo.returnedCount} already returned</span>
-                    )}
-                  </p>
-                </div>
-
-                {returnInfo.isPhone ? (
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <label className="text-xs font-semibold text-slate-400">IMEIs to return *</label>
-                      {returnInfo.remainingImeis.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setReturnImeis(
-                              returnImeis.length === returnInfo.remainingImeis.length ? [] : [...returnInfo.remainingImeis]
-                            )
-                          }
-                          className="text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold"
-                        >
-                          {returnImeis.length === returnInfo.remainingImeis.length ? "Clear" : "Select all"}
-                        </button>
-                      )}
-                    </div>
-                    <div className="mt-1 space-y-1.5">
-                      {returnInfo.remainingImeis.map((im) => (
-                        <label
-                          key={im}
-                          className={`flex items-center gap-2 p-2.5 rounded-xl border cursor-pointer text-xs font-mono transition-all ${
-                            returnImeis.includes(im)
-                              ? "bg-amber-500/10 border-amber-500/40 text-amber-200"
-                              : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={returnImeis.includes(im)}
-                            onChange={() => toggleReturnImei(im)}
-                            className="accent-amber-500"
-                          />
-                          <Smartphone size={12} className="text-indigo-400" />
-                          <span>{im}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <label className="text-xs font-semibold text-slate-400">
-                      Quantity to return * (1 - {returnInfo.remaining})
-                    </label>
-                    <input
-                      type="number"
-                      min="1"
-                      max={returnInfo.remaining}
-                      step="1"
-                      value={returnQty}
-                      onChange={(e) => setReturnQty(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 font-bold focus:outline-none focus:border-indigo-500 mt-1"
-                    />
-                  </div>
-                )}
-
-                <div>
-                  <label className="text-xs font-semibold text-slate-400">Note (optional)</label>
-                  <input
-                    type="text"
-                    value={returnNote}
-                    onChange={(e) => setReturnNote(e.target.value)}
-                    placeholder="e.g. faulty, customer changed mind"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 mt-1"
-                  />
-                </div>
-
-                {/* What will happen */}
-                <div className="bg-amber-950/20 border border-amber-900/40 rounded-2xl p-3 text-xs space-y-1">
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Refund amount:</span>
-                    <span className="font-black text-amber-300">
-                      Rs. {returnEstimate.toLocaleString()}
-                      {returnCount > 0 && (
-                        <span className="text-[10px] font-semibold text-slate-400">
-                          {" "}
-                          ({returnCount} x Rs. {returnUnitPrice.toLocaleString()})
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                  {returnEstimate > 0 && (
-                    <p className="text-[11px] text-slate-400">
-                      About Rs. {returnDuePart.toLocaleString()} comes off the Udhaar first
-                      {returnEstimate - returnDuePart > 0 &&
-                        `, Rs. ${(returnEstimate - returnDuePart).toLocaleString()} cash back`}
-                      .
-                    </p>
-                  )}
-                  {Number(returnSale.discountAmount || 0) > 0 && (
-                    <p className="text-[11px] text-slate-400">
-                      This bill had a discount of Rs. {Number(returnSale.discountAmount).toLocaleString()}, shared over
-                      its items, so the final refund may be a little lower.
-                    </p>
-                  )}
-                  <p className="text-[11px] text-slate-400">
-                    The {returnInfo.isPhone ? "phone(s) go" : "item goes"} back into stock
-                    {returnInfo.isPhone && " and the warranty is voided"}.
-                  </p>
-                </div>
-
-                {!returnValid && (
-                  <p className="text-[11px] text-rose-400">
-                    {returnInfo.isPhone
-                      ? "Select at least one IMEI."
-                      : `Enter a quantity from 1 to ${returnInfo.remaining}.`}
-                  </p>
-                )}
-              </div>
+              </span>
             )}
-
-            <div className="pt-2 flex justify-end gap-2 border-t border-slate-800">
-              <button
-                type="button"
-                onClick={closeReturnModal}
-                disabled={isSubmittingReturn}
-                className="mt-3 px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-700 disabled:opacity-60"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmReturn}
-                disabled={isSubmittingReturn || !returnValid}
-                className="mt-3 px-5 py-2 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-amber-600/20 disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {isSubmittingReturn ? "Saving…" : "Confirm Return"}
-              </button>
-            </div>
+            {searchTerm.trim() && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-sunken text-ink-soft pl-2.5 pr-1 py-0.5 font-semibold max-w-full">
+                <Search size={12} aria-hidden="true" />
+                <span className="truncate">Search: "{searchTerm}"</span>
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm("")}
+                  className="ml-0.5 rounded-full p-1 hover:bg-line"
+                  aria-label="Clear search"
+                  title="Clear search"
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            )}
+            <span className="text-muted">
+              {filteredCustomers.length} {filteredCustomers.length === 1 ? "customer" : "customers"} found
+            </span>
+            <Button variant="ghost" size="sm" icon={RotateCcw} onClick={resetFilters} className="ml-auto h-10 sm:h-8">
+              Reset filters
+            </Button>
           </div>
-        </div>
-      )}
+        )}
+      </Card>
 
-      {/* Comprehensive Customer Transaction & Statement Modal */}
-      {activeHistoryCust && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-4xl rounded-3xl p-6 shadow-2xl flex flex-col max-h-[92vh]">
-            {/* Modal Header */}
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b border-slate-800 pb-4 mb-4 gap-3">
-              <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 font-black text-lg">
-                  {activeHistoryCust.name?.charAt(0)?.toUpperCase() || "C"}
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-bold text-slate-100 text-xl">{activeHistoryCust.name}</h3>
-                    {activeHistoryCust.sellerName && (
-                      <span className="text-[10px] px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-md font-semibold">
-                        Seller: {activeHistoryCust.sellerName}
-                      </span>
-                    )}
+      {/* Customer accounts */}
+      {filteredCustomers.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {filteredCustomers.map((cust) => {
+            // Pre-fetch last transaction info for preview
+            const custTx = getCustomerTransactions(cust);
+            const lastTx = custTx.length > 0 ? custTx[custTx.length - 1] : null;
+            const owes = Number(cust.totalPending || 0);
+
+            return (
+              <Card
+                key={cust.id}
+                onClick={() => setHistoryCust(cust)}
+                className="flex flex-col gap-4 cursor-pointer transition-colors hover:border-brand-200"
+              >
+                {/* Who */}
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="text-base font-semibold text-ink break-words">{cust.name}</h3>
+                    <p className="text-xs text-muted mt-0.5 break-words">
+                      {cust.phone || "No phone"}
+                      {cust.address && <span> · {cust.address}</span>}
+                    </p>
                   </div>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Phone: <span className="text-slate-200 font-mono">{activeHistoryCust.phone || "—"}</span>
-                    {activeHistoryCust.address && <span className="ml-2 text-slate-400">• {activeHistoryCust.address}</span>}
-                  </p>
-                </div>
-              </div>
-
-              {/* Action buttons inside header */}
-              <div className="flex items-center gap-2 flex-wrap justify-end self-end sm:self-auto">
-                <button
-                  onClick={() => setStatementCustomer(activeHistoryCust)}
-                  className="px-3 py-2 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-sm"
-                >
-                  <Printer size={14} />
-                  <span>Print Statement</span>
-                </button>
-
-                {activeHistoryCust.totalPending > 0 && (
-                  <button
-                    onClick={() => openPaymentModal(activeHistoryCust)}
-                    className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/20"
-                  >
-                    <DollarSign size={14} />
-                    <span>Record Payment</span>
-                  </button>
-                )}
-
-                <button
-                  onClick={() => openEditCustomer(activeHistoryCust)}
-                  className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/50 rounded-xl transition-all"
-                  title="Edit account"
-                >
-                  <Pencil size={14} />
-                </button>
-                <button
-                  onClick={() => handleDeleteCustomer(activeHistoryCust)}
-                  className="p-2 bg-slate-800 hover:bg-rose-600/30 text-slate-400 hover:text-rose-300 border border-slate-700/50 hover:border-rose-500/40 rounded-xl transition-all"
-                  title="Delete account"
-                >
-                  <Trash2 size={14} />
-                </button>
-
-                <button
-                  onClick={() => {
-                    setHistoryCust(null);
-                    setHistorySearch("");
-                    setHistoryFilter("all");
-                  }}
-                  className="text-slate-400 hover:text-white p-2 rounded-xl hover:bg-slate-800 transition-colors ml-1"
-                >
-                  <X size={20} />
-                </button>
-              </div>
-            </div>
-
-            {/* Customer KPI Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
-              <div className="bg-slate-950 p-3.5 rounded-2xl border border-slate-800">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                  Total Purchases / Bills
-                </span>
-                <p className="text-base font-extrabold text-slate-100 mt-0.5">
-                  {shopSettings.currencySymbol} {Number(activeHistoryCust.totalPurchases || 0).toLocaleString()}
-                </p>
-                <span className="text-[10px] text-slate-500">
-                  {activeTransactions.filter((t) => !t.isPayment).length} total sale bills
-                </span>
-              </div>
-
-              <div className="bg-slate-950 p-3.5 rounded-2xl border border-slate-800">
-                <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block">
-                  Total Payments Made
-                </span>
-                <p className="text-base font-extrabold text-emerald-400 mt-0.5">
-                  {shopSettings.currencySymbol} {Number(activeHistoryCust.totalPaid || 0).toLocaleString()}
-                </p>
-                <span className="text-[10px] text-slate-500">
-                  {activeTransactions.filter((t) => t.isPayment).length} payment receipts
-                </span>
-              </div>
-
-              <div className="bg-rose-950/20 p-3.5 rounded-2xl border border-rose-900/40">
-                <span className="text-[10px] font-bold text-rose-300 uppercase tracking-wider block">
-                  Current Outstanding Udhaar
-                </span>
-                <p className="text-xl font-black text-rose-400 mt-0.5">
-                  {shopSettings.currencySymbol} {Number(activeHistoryCust.totalPending || 0).toLocaleString()}
-                </p>
-                <span className="text-[10px] text-rose-400/80">
-                  {activeHistoryCust.totalPending > 0 ? "Requires payment" : "Fully settled"}
-                </span>
-              </div>
-            </div>
-
-            {/* Filter and Search Bar inside History */}
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 mb-3 bg-slate-950/70 p-2.5 rounded-2xl border border-slate-800">
-              {/* Type filter tabs */}
-              <div className="flex gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800/80 text-xs">
-                <button
-                  onClick={() => setHistoryFilter("all")}
-                  className={`px-3 py-1 rounded-lg transition-all font-semibold ${
-                    historyFilter === "all"
-                      ? "bg-indigo-600 text-white font-bold"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  All ({activeTransactions.length})
-                </button>
-                <button
-                  onClick={() => setHistoryFilter("payments")}
-                  className={`px-3 py-1 rounded-lg transition-all font-semibold ${
-                    historyFilter === "payments"
-                      ? "bg-emerald-600 text-white font-bold"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  Payments ({activeTransactions.filter((t) => t.isPayment).length})
-                </button>
-                <button
-                  onClick={() => setHistoryFilter("sales")}
-                  className={`px-3 py-1 rounded-lg transition-all font-semibold ${
-                    historyFilter === "sales"
-                      ? "bg-rose-600 text-white font-bold"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  Sales ({activeTransactions.filter((t) => !t.isPayment).length})
-                </button>
-              </div>
-
-              {/* Search and Sort */}
-              <div className="flex items-center gap-2">
-                <div className="relative flex-1 sm:w-56">
-                  <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="text"
-                    placeholder="Search day, item, IMEI, bill #..."
-                    value={historySearch}
-                    onChange={(e) => setHistorySearch(e.target.value)}
-                    className="w-full pl-8 pr-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded-xl text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-                  />
+                  {cust.sellerName && <Badge tone="neutral">{cust.sellerName}</Badge>}
                 </div>
 
-                <button
-                  onClick={() => setHistorySort((prev) => (prev === "newest" ? "oldest" : "newest"))}
-                  className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-xl text-xs text-slate-300 font-semibold flex items-center gap-1 whitespace-nowrap"
-                  title="Toggle Chronological Order"
-                >
-                  <span>{historySort === "newest" ? "Newest First" : "Oldest First"}</span>
-                </button>
-              </div>
-            </div>
+                {/* The balance is what matters */}
+                <div className={`rounded-xl px-4 py-3 ${owes > 0 ? "bg-khata-50" : "bg-paid-50"}`}>
+                  <div className={`text-xs font-semibold ${owes > 0 ? "text-khata-700" : "text-paid-700"}`}>
+                    {owes > 0 ? "Owes Udhaar" : "Balance"}
+                  </div>
+                  {owes > 0 ? (
+                    <div className="font-display text-3xl font-bold leading-tight text-khata-600 break-words">
+                      {cur} {owes.toLocaleString()}
+                    </div>
+                  ) : (
+                    <div className="font-display text-2xl font-bold leading-tight text-paid-600 flex items-center gap-1.5">
+                      <CheckCircle2 size={20} aria-hidden="true" /> Settled
+                    </div>
+                  )}
+                </div>
 
-            {/* Detailed Transaction List */}
-            <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-3">
-              {filteredHistoryTransactions.map((tx) => (
-                <div
-                  key={tx.id}
-                  className={`p-4 border rounded-2xl transition-all ${
-                    tx.isPayment
-                      ? "bg-emerald-950/20 border-emerald-900/40 hover:border-emerald-700/50"
-                      : tx.isReturned
-                      ? "bg-amber-950/10 border-amber-900/40 hover:border-amber-700/50"
-                      : tx.isCredit
-                      ? "bg-rose-950/20 border-rose-900/40 hover:border-rose-700/50"
-                      : "bg-slate-950/60 border-slate-800/80 hover:border-indigo-800/50"
-                  }`}
-                >
-                  {/* Top Bar: Date, Day, Type & Amounts */}
-                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-slate-800/80 pb-3">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {/* Prominent Day Badge */}
-                      <span className="px-2.5 py-1 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-lg text-xs font-black uppercase tracking-wider">
-                        {tx.dateInfo.day}
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <div className="text-muted">Total bought</div>
+                    <div className="font-semibold text-ink text-sm">
+                      {cur} {Number(cust.totalPurchases || 0).toLocaleString()}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-muted">Total paid</div>
+                    <div className="font-semibold text-paid-700 text-sm">
+                      {cur} {Number(cust.totalPaid || 0).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Last activity */}
+                {lastTx && (
+                  <div className="rounded-xl bg-sunken px-3 py-2 text-xs">
+                    <div className="text-muted">
+                      Last activity: {lastTx.dateInfo.day}, {lastTx.dateInfo.date}
+                    </div>
+                    <div className="mt-0.5 flex items-center justify-between gap-2">
+                      <span className="truncate font-medium text-ink-soft">
+                        {lastTx.isReturnEntry
+                          ? `Return on ${lastTx.billNumber}`
+                          : lastTx.isPayment
+                          ? "Payment received"
+                          : `Bill ${lastTx.billNumber}`}
                       </span>
-
-                      <span className="text-xs font-bold text-slate-200">{tx.dateInfo.date}</span>
-                      <span className="text-[11px] text-slate-400">at {tx.dateInfo.time}</span>
-
-                      {/* Type Badge */}
                       <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center gap-1 ${
-                          tx.isPayment
-                            ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                            : tx.isReturned
-                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
-                            : tx.isCredit
-                            ? "bg-rose-500/20 text-rose-400 border border-rose-500/30"
-                            : "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+                        className={`font-semibold whitespace-nowrap ${
+                          lastTx.isReturnEntry ? "text-saffron-700" : lastTx.isPayment ? "text-paid-700" : "text-ink"
                         }`}
                       >
+                        {lastTx.isReturnEntry
+                          ? `-${cur} ${lastTx.returnAmount.toLocaleString()}`
+                          : lastTx.isPayment
+                          ? `+${cur} ${lastTx.paymentReceived.toLocaleString()}`
+                          : `${cur} ${lastTx.grandTotal.toLocaleString()}`}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div className="mt-auto flex flex-wrap gap-2 border-t border-line pt-3">
+                  <Button
+                    variant="secondary"
+                    icon={FileText}
+                    className="flex-1"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setHistoryCust(cust);
+                    }}
+                  >
+                    View khata
+                  </Button>
+
+                  {cust.totalPending > 0 && (
+                    <Button
+                      variant="success"
+                      icon={Banknote}
+                      className="flex-1"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openPaymentModal(cust);
+                      }}
+                    >
+                      Record payment
+                    </Button>
+                  )}
+
+                  {isAdmin && (
+                    <div className="flex gap-1">
+                      <IconButton
+                        icon={Pencil}
+                        label="Edit account"
+                        variant="secondary"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEditCustomer(cust);
+                        }}
+                      />
+                      <IconButton
+                        icon={Trash2}
+                        label="Delete account"
+                        variant="danger-soft"
+                        disabled={!!deletingCustId}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteCustomer(cust);
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {filteredCustomers.length === 0 && (
+        <Card padded={false}>
+          <EmptyState
+            icon={searchTerm.trim() || selectedSeller !== "All" ? Search : CheckCircle2}
+            title={searchTerm.trim() || selectedSeller !== "All" || viewFilter !== "pending" ? "No customers found" : "Nobody owes Udhaar"}
+            description={
+              searchTerm.trim()
+                ? `No customer matches "${searchTerm}". Check the spelling or reset the filters.`
+                : selectedSeller !== "All"
+                ? `No customer accounts under ${selectedSeller}.`
+                : viewFilter === "pending"
+                ? "Every account is settled. Pick All accounts to see each customer's history."
+                : "Customer accounts appear here after their first Udhaar bill."
+            }
+            action={
+              hasFilters && (
+                <Button icon={RotateCcw} onClick={resetFilters}>
+                  Reset filters and show all
+                </Button>
+              )
+            }
+          />
+        </Card>
+      )}
+
+      {/* Customer khata: every bill, payment and return */}
+      {activeHistoryCust && (
+        <Modal
+          open
+          onClose={closeHistory}
+          size="xl"
+          title={activeHistoryCust.name || "Customer"}
+          description={
+            <>
+              Phone: <span className="font-mono">{activeHistoryCust.phone || "—"}</span>
+              {activeHistoryCust.address && <span> · {activeHistoryCust.address}</span>}
+              {activeHistoryCust.sellerName && <span> · Seller: {activeHistoryCust.sellerName}</span>}
+            </>
+          }
+          footer={
+            <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="text-xs text-muted space-y-0.5">
+                <div>
+                  {activeTransactions.length} {activeTransactions.length === 1 ? "entry" : "entries"} in this khata
+                </div>
+                {activeGap && (
+                  <div className="text-saffron-700 max-w-md">
+                    The entries above add up to {cur} {activeGap.ledgerEnd.toLocaleString()}; the saved account balance
+                    ({cur} {Number(activeHistoryCust.totalPending || 0).toLocaleString()}) also includes older records or
+                    bill edits and is the amount owed.
+                  </div>
+                )}
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs font-semibold text-ink-soft">Udhaar balance</span>
+                {Number(activeHistoryCust.totalPending || 0) > 0 ? (
+                  <span className="font-display text-xl font-bold text-khata-600">
+                    {cur} {Number(activeHistoryCust.totalPending || 0).toLocaleString()}
+                  </span>
+                ) : (
+                  <span className="font-display text-xl font-bold text-paid-600">Settled</span>
+                )}
+              </div>
+            </div>
+          }
+        >
+          <div className="space-y-4">
+            {/* Account actions */}
+            <div className="flex flex-wrap gap-2">
+              <Button variant="soft" icon={Printer} onClick={() => setStatementCustId(activeHistoryCust.id)}>
+                Statement
+              </Button>
+              {activeHistoryCust.totalPending > 0 && (
+                <Button variant="success" icon={Banknote} onClick={() => openPaymentModal(activeHistoryCust)}>
+                  Record payment
+                </Button>
+              )}
+              {isAdmin && (
+                <>
+                  <Button variant="secondary" icon={Pencil} onClick={() => openEditCustomer(activeHistoryCust)}>
+                    Edit
+                  </Button>
+                  <Button
+                    variant="danger-soft"
+                    icon={Trash2}
+                    onClick={() => handleDeleteCustomer(activeHistoryCust)}
+                    disabled={!!deletingCustId}
+                  >
+                    Delete
+                  </Button>
+                </>
+              )}
+            </div>
+
+            {/* Account totals */}
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Stat
+                label="Total bought"
+                value={`${cur} ${Number(activeHistoryCust.totalPurchases || 0).toLocaleString()}`}
+                hint={`${billCount} ${billCount === 1 ? "bill" : "bills"}`}
+              />
+              <Stat
+                label="Total paid"
+                value={`${cur} ${Number(activeHistoryCust.totalPaid || 0).toLocaleString()}`}
+                tone="paid"
+                hint={`${paymentCount} ${paymentCount === 1 ? "payment" : "payments"}`}
+              />
+              <Stat
+                label="Udhaar balance"
+                value={`${cur} ${Number(activeHistoryCust.totalPending || 0).toLocaleString()}`}
+                tone={activeHistoryCust.totalPending > 0 ? "khata" : "paid"}
+                hint={activeHistoryCust.totalPending > 0 ? "Still to collect" : "Fully settled"}
+                className={activeHistoryCust.totalPending > 0 ? "border-khata-200" : ""}
+              />
+            </div>
+
+            {/* Entry filters */}
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+              <Segmented
+                size="sm"
+                value={historyFilter}
+                onChange={setHistoryFilter}
+                options={[
+                  { value: "all", label: `All (${activeTransactions.length})` },
+                  { value: "payments", label: `Payments (${paymentCount})` },
+                  { value: "sales", label: `Bills and returns (${activeTransactions.length - paymentCount})` },
+                ]}
+              />
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1 lg:w-64">
+                  <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+                  <input
+                    type="text"
+                    placeholder="Search day, item, IMEI, bill no."
+                    aria-label="Search this khata"
+                    value={historySearch}
+                    onChange={(e) => setHistorySearch(e.target.value)}
+                    className={`${inputClass} pl-9`}
+                  />
+                </div>
+                <Button
+                  variant="secondary"
+                  icon={ArrowUpDown}
+                  onClick={() => setHistorySort((prev) => (prev === "newest" ? "oldest" : "newest"))}
+                  title="Change the order"
+                >
+                  {historySort === "newest" ? "Newest first" : "Oldest first"}
+                </Button>
+              </div>
+            </div>
+
+            {/* Entries */}
+            <div className="space-y-3">
+              {filteredHistoryTransactions.map((tx) =>
+                tx.isReturnEntry ? (
+                  /* Return: lowers the balance on the day it happened */
+                  <div key={tx.id} className="rounded-xl border border-saffron-200 bg-saffron-50/50 p-3 sm:p-4">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {dateLine(tx.dateInfo)}
+                        <Badge tone="saffron">
+                          <Undo2 size={11} aria-hidden="true" /> Items returned
+                        </Badge>
+                        {billChip(tx.billNumber)}
+                      </div>
+                      <div className="sm:text-right">
+                        <div className="font-display text-lg font-bold text-saffron-700">
+                          -{cur} {tx.returnAmount.toLocaleString()}
+                        </div>
+                        <div className="text-xs text-muted space-x-1.5">
+                          {tx.dueReduced > 0 && (
+                            <span className="text-khata-700 font-semibold">Udhaar reduced -{cur} {tx.dueReduced.toLocaleString()}</span>
+                          )}
+                          {tx.cashBack > 0 && (
+                            <span className="text-paid-700 font-semibold">Cash back {cur} {tx.cashBack.toLocaleString()}</span>
+                          )}
+                          <span>
+                            Balance <strong className="text-ink">{cur} {tx.runningBalance.toLocaleString()}</strong>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-xs text-ink-soft">
+                      {returnItemsText(tx.items) || "Items returned"}
+                      {tx.sellerName && <span className="text-muted"> · by {tx.sellerName}</span>}
+                    </div>
+                    {tx.notes && <p className="text-xs text-muted italic mt-0.5">Note: {tx.notes}</p>}
+                  </div>
+                ) : (
+                <div
+                  key={tx.id}
+                  className={`rounded-xl border p-3 sm:p-4 ${
+                    tx.isPayment
+                      ? "border-paid-200 bg-paid-50/50"
+                      : tx.isReturned
+                      ? "border-saffron-200 bg-saffron-50/40"
+                      : tx.isCredit
+                      ? "border-khata-200 bg-khata-50/40"
+                      : "border-line bg-surface"
+                  }`}
+                >
+                  {/* Top: date, type, amounts */}
+                  <div className="flex flex-col gap-2 border-b border-line pb-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {dateLine(tx.dateInfo)}
+                      <Badge tone={tx.isPayment ? "paid" : tx.isReturned ? "saffron" : tx.isCredit ? "khata" : "neutral"}>
                         {tx.isPayment ? (
                           <>
-                            <DollarSign size={11} /> Payment Received
+                            <Banknote size={11} aria-hidden="true" /> Payment received
                           </>
                         ) : tx.isReturned ? (
                           <>
-                            <Undo2 size={11} /> Returned
+                            <Undo2 size={11} aria-hidden="true" /> Returned
                           </>
                         ) : tx.isCredit ? (
                           <>
-                            <Clock size={11} /> Udhaar Sale / Bill
+                            <Clock size={11} aria-hidden="true" /> Udhaar bill
                           </>
                         ) : (
                           <>
-                            <CheckCircle2 size={11} /> Cash Sale
+                            <CheckCircle2 size={11} aria-hidden="true" /> Cash sale
                           </>
                         )}
-                      </span>
-
-                      {/* Bill / Ref # */}
-                      <span className="text-[11px] font-mono font-bold text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
-                        {tx.billNumber}
-                      </span>
-
+                      </Badge>
+                      {billChip(tx.billNumber)}
                       {/* Partly returned bill */}
                       {!tx.isPayment && !tx.isReturned && tx.returnedTotal > 0 && (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center gap-1 bg-amber-500/10 text-amber-300 border border-amber-500/30">
-                          <Undo2 size={11} /> Partly Returned
-                        </span>
+                        <Badge tone="saffron">
+                          <Undo2 size={11} aria-hidden="true" /> Partly returned
+                        </Badge>
                       )}
                     </div>
 
-                    {/* Amount & Balance column */}
-                    <div className="text-left sm:text-right w-full sm:w-auto">
+                    <div className="sm:text-right">
                       <div
-                        className={`text-lg font-black ${
+                        className={`font-display text-lg font-bold ${
                           tx.isPayment
-                            ? "text-emerald-400"
+                            ? "text-paid-600"
                             : tx.isReturned
-                            ? "text-amber-300"
+                            ? "text-saffron-700"
                             : tx.isCredit
-                            ? "text-rose-400"
-                            : "text-blue-400"
+                            ? "text-khata-600"
+                            : "text-ink"
                         }`}
                       >
                         {tx.isPayment
-                          ? `+${shopSettings.currencySymbol} ${tx.paymentReceived.toLocaleString()}`
-                          : `${shopSettings.currencySymbol} ${tx.grandTotal.toLocaleString()}`}
+                          ? `+${cur} ${tx.paymentReceived.toLocaleString()}`
+                          : `${cur} ${tx.grandTotal.toLocaleString()}`}
                       </div>
                       {!tx.isPayment && tx.returnedTotal > 0 && (
-                        <div className="text-[11px] text-amber-300/90 font-semibold">
-                          {tx.isReturned ? "Bill fully returned" : "After returns"} (returned: Rs.{" "}
+                        <div className="text-xs font-semibold text-saffron-700">
+                          {tx.isReturned ? "Bill fully returned" : "After returns"} (returned {cur}{" "}
                           {tx.returnedTotal.toLocaleString()})
                         </div>
                       )}
-                      <div className="text-[11px] text-slate-400">
+                      <div className="text-xs text-muted space-x-1.5">
                         {tx.isCredit && tx.paymentReceived > 0 && (
-                          <span className="text-emerald-400 font-semibold mr-1.5">
-                            (Paid: Rs. {tx.paymentReceived.toLocaleString()} | Due: +Rs. {tx.udhaarAdded.toLocaleString()})
+                          <span className="text-paid-700 font-semibold">
+                            Paid {cur} {tx.paymentReceived.toLocaleString()} · Udhaar +{cur} {tx.udhaarAdded.toLocaleString()}
                           </span>
                         )}
                         {tx.oldBalancePaid > 0 && (
-                          <span className="text-emerald-400 font-semibold mr-1.5">
-                            (Paid towards old balance: -Rs. {tx.oldBalancePaid.toLocaleString()})
+                          <span className="text-paid-700 font-semibold">
+                            Paid on old balance -{cur} {tx.oldBalancePaid.toLocaleString()}
                           </span>
                         )}
                         <span>
-                          Udhaar Balance:{" "}
-                          <strong className="text-slate-200">
-                            Rs. {tx.runningBalance.toLocaleString()}
-                          </strong>
+                          Balance <strong className="text-ink">{cur} {tx.runningBalance.toLocaleString()}</strong>
                         </span>
                       </div>
                     </div>
                   </div>
 
-                  {/* Body Details: Payment Note or Itemized Sold Products */}
+                  {/* Body: payment note or the items on the bill */}
                   {tx.isPayment ? (
-                    <div className="mt-3 text-xs text-slate-300 bg-emerald-950/30 border border-emerald-900/30 rounded-xl p-3 flex items-start gap-2.5">
-                      <CheckCircle2 size={16} className="text-emerald-400 mt-0.5 flex-shrink-0" />
-                      <div className="space-y-1 flex-1">
-                        <p className="font-semibold text-emerald-200">
-                          {tx.notes || "Received payment towards pending Udhaar balance."}
+                    <div className="mt-3 flex items-start gap-2.5 text-sm">
+                      <CheckCircle2 size={16} className="text-paid-600 mt-0.5 flex-shrink-0" aria-hidden="true" />
+                      <div className="flex-1 space-y-1">
+                        <p className="font-medium text-ink">
+                          {tx.notes || "Payment received towards the Udhaar balance."}
                         </p>
-                        <div className="flex justify-between items-center text-[10px] text-slate-400 pt-1 border-t border-emerald-900/40">
-                          <span>Payment Method: <strong className="text-slate-300">{tx.paymentMethod}</strong></span>
+                        <div className="flex flex-wrap justify-between gap-x-3 text-xs text-muted">
+                          <span>
+                            Method: <strong className="text-ink-soft">{tx.paymentMethod}</strong>
+                          </span>
                           {tx.sellerName && (
-                            <span>Received by: <strong className="text-slate-300">{tx.sellerName}</strong></span>
+                            <span>
+                              Received by: <strong className="text-ink-soft">{tx.sellerName}</strong>
+                            </span>
                           )}
                         </div>
                       </div>
                     </div>
                   ) : (
                     <div className="mt-3 space-y-2">
-                      {/* Products Sold List */}
                       {tx.items && tx.items.length > 0 ? (
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-x-3 text-xs font-semibold text-ink-soft">
                             <span className="flex items-center gap-1.5">
-                              <ShoppingBag size={13} className="text-indigo-400" />
-                              Items Sold in this Bill ({tx.items.length}):
+                              <ShoppingBag size={13} className="text-muted" aria-hidden="true" />
+                              Items on this bill ({tx.items.length})
                             </span>
                             {tx.sellerName && (
-                              <span className="text-slate-500 font-normal">
-                                Sold by: <strong className="text-slate-300">{tx.sellerName}</strong>
+                              <span className="font-normal text-muted">
+                                Sold by <strong className="text-ink-soft">{tx.sellerName}</strong>
                               </span>
                             )}
                           </div>
@@ -1690,79 +1373,71 @@ const PendingPayments = () => {
                             return (
                               <div
                                 key={idx}
-                                className={`border rounded-xl p-2.5 text-xs ${
-                                  ret.fullyReturned
-                                    ? "bg-slate-950/40 border-amber-900/40"
-                                    : "bg-slate-950/70 border-slate-800/80"
+                                className={`rounded-lg border p-2.5 text-sm ${
+                                  ret.fullyReturned ? "border-saffron-200 bg-sunken/60" : "border-line bg-surface"
                                 }`}
                               >
-                                <div className="flex justify-between items-start gap-2">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                  <div className="flex flex-wrap items-center gap-1.5 min-w-0">
                                     <span
-                                      className={`font-bold ${
-                                        ret.fullyReturned ? "text-slate-500 line-through" : "text-slate-200"
+                                      className={`font-semibold break-words ${
+                                        ret.fullyReturned ? "text-muted line-through" : "text-ink"
                                       }`}
                                     >
                                       {item.productName || item.name || "Product"}
                                     </span>
-                                    {item.category && (
-                                      <span className="text-[10px] text-slate-400 px-1.5 py-0.5 bg-slate-900 border border-slate-800 rounded">
-                                        {item.category}
-                                      </span>
-                                    )}
+                                    {item.category && <Badge tone="neutral">{item.category}</Badge>}
                                     {ret.fullyReturned ? (
-                                      <span className="text-[10px] font-bold px-1.5 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded">
-                                        Returned
-                                      </span>
+                                      <Badge tone="saffron">Returned</Badge>
                                     ) : ret.returnedCount > 0 ? (
-                                      <span className="text-[10px] font-bold px-1.5 py-0.5 bg-amber-500/10 text-amber-300 border border-amber-500/30 rounded">
+                                      <Badge tone="saffron">
                                         {ret.returnedCount} of {ret.qty} returned
-                                      </span>
+                                      </Badge>
                                     ) : null}
                                   </div>
-                                  <div className="flex items-start gap-2">
-                                    <div className="text-right whitespace-nowrap">
+                                  <div className="flex items-center justify-between gap-3 sm:justify-end">
+                                    <div className="sm:text-right whitespace-nowrap">
                                       <span
-                                        className={`font-extrabold ${
-                                          ret.fullyReturned ? "text-slate-500 line-through" : "text-slate-100"
+                                        className={`font-semibold ${
+                                          ret.fullyReturned ? "text-muted line-through" : "text-ink"
                                         }`}
                                       >
-                                        Rs. {itemSubtotal.toLocaleString()}
+                                        {cur} {itemSubtotal.toLocaleString()}
                                       </span>
-                                      <span className="block text-[10px] text-slate-400">
-                                        {itemQty} x Rs. {itemPrice.toLocaleString()}
+                                      <span className="block text-xs text-muted">
+                                        {itemQty} x {cur} {itemPrice.toLocaleString()}
                                       </span>
                                     </div>
-                                    {ret.remaining > 0 && (
-                                      <button
-                                        type="button"
+                                    {isAdmin && ret.remaining > 0 && (
+                                      <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        icon={Undo2}
                                         onClick={() => openReturnModal(tx, idx)}
-                                        className="px-2 py-1 bg-amber-500/10 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all"
+                                        className="h-10 sm:h-8"
                                         title="Return this item to stock"
                                       >
-                                        <Undo2 size={11} /> Return
-                                      </button>
+                                        Return
+                                      </Button>
                                     )}
                                   </div>
                                 </div>
 
-                                {/* IMEIs list if present (returned IMEIs struck through) */}
+                                {/* IMEIs (returned ones struck through) */}
                                 {imeis.length > 0 && (
-                                  <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-slate-900">
+                                  <div className="mt-2 flex flex-wrap gap-1.5 border-t border-line pt-2">
                                     {imeis.map((im, imIdx) => {
                                       const imReturned = ret.returnedImeis.includes(im);
                                       return (
                                         <span
                                           key={imIdx}
-                                          className={`inline-flex items-center gap-1 font-mono text-[10px] px-2 py-0.5 rounded-md border ${
-                                            imReturned
-                                              ? "bg-amber-950/30 text-amber-300/80 border-amber-800/50"
-                                              : "bg-indigo-950/40 text-indigo-300 border-indigo-800/50"
+                                          className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-mono text-[11px] break-all ${
+                                            imReturned ? "bg-saffron-50 text-saffron-700" : "bg-sunken text-ink-soft"
                                           }`}
                                         >
-                                          <Smartphone size={10} className={imReturned ? "text-amber-400" : "text-indigo-400"} />
-                                          <span className={imReturned ? "line-through" : ""}>IMEI: {im}</span>
-                                          {imReturned && <span className="font-sans font-bold not-italic">(returned)</span>}
+                                          <Smartphone size={11} aria-hidden="true" />
+                                          <span className={imReturned ? "line-through" : ""}>IMEI {im}</span>
+                                          {imReturned && <span className="font-sans font-semibold">(returned)</span>}
                                         </span>
                                       );
                                     })}
@@ -1773,62 +1448,48 @@ const PendingPayments = () => {
                           })}
                         </div>
                       ) : (
-                        <div className="text-xs text-slate-400 italic bg-slate-950/40 p-2.5 rounded-xl border border-slate-800/60">
-                          {tx.notes || "Sale recorded without itemized product details."}
+                        <div className="rounded-lg bg-sunken p-2.5 text-xs italic text-muted">
+                          {tx.notes || "Sale saved without item details."}
                         </div>
                       )}
 
-                      {/* Sale notes if present */}
-                      {tx.notes && (
-                        <p className="text-[11px] text-slate-400 italic pt-1">
-                          Note: {tx.notes}
-                        </p>
-                      )}
+                      {tx.notes && <p className="pt-1 text-xs italic text-muted">Note: {tx.notes}</p>}
 
-                      {/* Return history of this bill */}
+                      {/* Returns on this bill */}
                       {(tx.returns || []).length > 0 && (
-                        <div className="bg-amber-950/10 border border-amber-900/40 rounded-xl p-2.5 space-y-2">
-                          <div className="text-[11px] font-bold text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
-                            <Undo2 size={13} /> Returns on this bill ({tx.returns.length})
+                        <div className="space-y-2 rounded-lg border border-saffron-200 bg-saffron-50/50 p-2.5">
+                          <div className="flex items-center gap-1.5 text-xs font-semibold text-saffron-700">
+                            <Undo2 size={13} aria-hidden="true" /> Returns on this bill ({tx.returns.length})
                           </div>
                           {tx.returns.map((r, rIdx) => {
                             const rDate = formatDateWithDay(r.at || r.date);
                             return (
                               <div
                                 key={r.id || rIdx}
-                                className="text-[11px] text-slate-300 border-t border-amber-900/30 pt-1.5 first:border-t-0 first:pt-0 space-y-0.5"
+                                className="space-y-0.5 border-t border-saffron-200 pt-1.5 text-xs text-ink-soft first:border-t-0 first:pt-0"
                               >
-                                <div className="flex justify-between gap-2 flex-wrap">
-                                  <span className="font-semibold text-slate-200">
+                                <div className="flex flex-wrap justify-between gap-2">
+                                  <span className="font-semibold text-ink">
                                     {rDate.day}, {rDate.date}
-                                    {rDate.time !== "—" && <span className="text-slate-400 font-normal"> at {rDate.time}</span>}
+                                    {rDate.time !== "—" && <span className="font-normal text-muted"> at {rDate.time}</span>}
                                   </span>
-                                  <span className="font-extrabold text-amber-300">
-                                    Rs. {Number(r.amount || 0).toLocaleString()}
+                                  <span className="font-semibold text-saffron-700">
+                                    {cur} {Number(r.amount || 0).toLocaleString()}
                                   </span>
                                 </div>
-                                <div className="text-slate-400">
-                                  {(r.items || [])
-                                    .map((ri) => {
-                                      const ims = (ri.imeis || []).filter(Boolean);
-                                      return `${ri.productName || "Item"} x${Number(ri.qty || ims.length || 1)}${
-                                        ims.length ? ` (IMEI: ${ims.join(", ")})` : ""
-                                      }`;
-                                    })
-                                    .join(", ") || "Items returned"}
-                                </div>
-                                <div className="flex gap-3 flex-wrap text-[10px]">
+                                <div className="text-muted">{returnItemsText(r.items) || "Items returned"}</div>
+                                <div className="flex flex-wrap gap-3">
                                   <span>
                                     Udhaar reduced{" "}
-                                    <strong className="text-rose-300">Rs. {Number(r.dueReduced || 0).toLocaleString()}</strong>
+                                    <strong className="text-khata-700">{cur} {Number(r.dueReduced || 0).toLocaleString()}</strong>
                                   </span>
                                   <span>
-                                    cash back{" "}
-                                    <strong className="text-emerald-300">Rs. {Number(r.cashBack || 0).toLocaleString()}</strong>
+                                    Cash back{" "}
+                                    <strong className="text-paid-700">{cur} {Number(r.cashBack || 0).toLocaleString()}</strong>
                                   </span>
-                                  {r.by && <span className="text-slate-500">by {r.by}</span>}
+                                  {r.by && <span className="text-muted">by {r.by}</span>}
                                 </div>
-                                {r.note && <p className="text-[10px] text-slate-400 italic">Note: {r.note}</p>}
+                                {r.note && <p className="italic text-muted">Note: {r.note}</p>}
                               </div>
                             );
                           })}
@@ -1837,43 +1498,349 @@ const PendingPayments = () => {
                     </div>
                   )}
                 </div>
-              ))}
+                )
+              )}
 
               {filteredHistoryTransactions.length === 0 && (
-                <div className="text-center py-12 text-slate-500 text-xs bg-slate-950/30 rounded-2xl border border-slate-800/60">
-                  No matching transaction records found.
+                <div className="rounded-xl border border-dashed border-line">
+                  <EmptyState
+                    icon={FileText}
+                    title={activeTransactions.length ? "No entries match" : "No entries yet"}
+                    description={
+                      activeTransactions.length
+                        ? "Clear the search or pick All to see every entry."
+                        : "Bills and payments for this customer will show here."
+                    }
+                  />
                 </div>
               )}
             </div>
+          </div>
+        </Modal>
+      )}
 
-            {/* Modal Footer */}
-            <div className="pt-4 border-t border-slate-800 flex flex-col sm:flex-row justify-between items-center mt-4 gap-3">
-              <div className="text-xs text-slate-400">
-                Total recorded transactions: <strong className="text-slate-200">{activeTransactions.length}</strong>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-bold text-slate-400">Outstanding Udhaar Balance:</span>
-                <span className="text-xl font-black text-rose-400">
-                  {shopSettings.currencySymbol} {Number(activeHistoryCust.totalPending || 0).toLocaleString()}
-                </span>
+      {/* Record payment (above the khata, which can open it) */}
+      {payCust && (
+        <Modal
+          open
+          onClose={closePaymentModal}
+          z="z-[60]"
+          size="sm"
+          title="Record payment"
+          description="The amount comes off this customer's Udhaar."
+          footer={
+            <>
+              <Button variant="secondary" onClick={closePaymentModal} disabled={isSubmittingPayment}>
+                Cancel
+              </Button>
+              <Button type="submit" form="udhaar-payment-form" variant="success" loading={isSubmittingPayment}>
+                {isSubmittingPayment ? "Saving…" : "Save payment"}
+              </Button>
+            </>
+          }
+        >
+          <form id="udhaar-payment-form" onSubmit={handleSettlePayment} className="space-y-4">
+            <div className="rounded-xl bg-khata-50 px-4 py-3">
+              <div className="text-sm font-semibold text-ink">{payCust.name || "Customer"}</div>
+              <div className="text-xs text-khata-700 mt-1">Owes now</div>
+              <div className="font-display text-2xl font-bold text-khata-600">
+                {cur} {Number(payCust.totalPending || 0).toLocaleString()}
               </div>
             </div>
-          </div>
-        </div>
+
+            <Field label={`Amount received (${cur})`} htmlFor="udhaar-pay-amount">
+              <Input
+                id="udhaar-pay-amount"
+                type="number"
+                inputMode="decimal"
+                required
+                min="1"
+                max={Number(payCust.totalPending || 0)}
+                value={paymentAmountInput}
+                onChange={(e) => setPaymentAmountInput(e.target.value)}
+                className="h-12 text-lg font-semibold"
+              />
+            </Field>
+
+            <Field label="Received by" htmlFor="udhaar-pay-seller">
+              <Select
+                id="udhaar-pay-seller"
+                required
+                value={paymentSeller}
+                onChange={(e) => setPaymentSeller(e.target.value)}
+              >
+                <option value="">Select seller…</option>
+                {SELLERS.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </form>
+        </Modal>
       )}
-    </div>
 
-      {/* Printable Statement / Khata Slip Modal */}
-      {statementCustomer && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50 overflow-y-auto print:static print:bg-transparent print:p-0 print:block">
-          <div className="bg-white text-slate-900 w-full max-w-2xl rounded-2xl p-6 shadow-2xl relative print:shadow-none print:w-full print:max-w-none print:rounded-none print:p-0">
-            <button
-              onClick={() => setStatementCustomer(null)}
-              className="absolute top-3 right-3 text-slate-400 hover:text-slate-800 print:hidden p-1 rounded-full hover:bg-slate-100"
+      {/* Edit customer account (above the khata) — owner only */}
+      {isAdmin && editCust && (
+        <Modal
+          open
+          onClose={closeEditCustomer}
+          z="z-[60]"
+          size="md"
+          title="Edit customer account"
+          footer={
+            <>
+              <Button variant="secondary" onClick={closeEditCustomer} disabled={isSavingCustomer}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                form="udhaar-edit-form"
+                loading={isSavingCustomer}
+                disabled={!editForm.name.trim()}
+              >
+                {isSavingCustomer ? "Saving…" : "Save changes"}
+              </Button>
+            </>
+          }
+        >
+          <form id="udhaar-edit-form" onSubmit={handleSaveCustomer} className="space-y-4">
+            <Field label="Name" htmlFor="udhaar-edit-name">
+              <Input
+                id="udhaar-edit-name"
+                type="text"
+                required
+                value={editForm.name}
+                onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))}
+              />
+            </Field>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field label="Phone" htmlFor="udhaar-edit-phone">
+                <Input
+                  id="udhaar-edit-phone"
+                  type="tel"
+                  value={editForm.phone}
+                  onChange={(e) => setEditForm((f) => ({ ...f, phone: e.target.value }))}
+                  placeholder="03xx-xxxxxxx"
+                />
+              </Field>
+              <Field label="CNIC" htmlFor="udhaar-edit-cnic">
+                <Input
+                  id="udhaar-edit-cnic"
+                  type="text"
+                  value={editForm.cnic}
+                  onChange={(e) => setEditForm((f) => ({ ...f, cnic: e.target.value }))}
+                  placeholder="xxxxx-xxxxxxx-x"
+                />
+              </Field>
+            </div>
+            <Field label="Address" htmlFor="udhaar-edit-address">
+              <Input
+                id="udhaar-edit-address"
+                type="text"
+                value={editForm.address}
+                onChange={(e) => setEditForm((f) => ({ ...f, address: e.target.value }))}
+              />
+            </Field>
+            <Field
+              label="Seller"
+              htmlFor="udhaar-edit-seller"
+              hint="Balances are not edited here; only sales, payments and returns change them."
             >
-              <X size={18} />
-            </button>
+              <Select
+                id="udhaar-edit-seller"
+                value={editForm.sellerName}
+                onChange={(e) => setEditForm((f) => ({ ...f, sellerName: e.target.value }))}
+              >
+                <option value="">No seller assigned</option>
+                {SELLERS.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </form>
+        </Modal>
+      )}
 
+      {/* Return item (above the khata) — owner only */}
+      {isAdmin && returnTarget && (
+        <Modal
+          open
+          onClose={closeReturnModal}
+          z="z-[60]"
+          size="md"
+          title="Return item"
+          description="The item goes back into stock and the bill is lowered."
+          footer={
+            <>
+              <Button variant="secondary" onClick={closeReturnModal} disabled={isSubmittingReturn}>
+                Cancel
+              </Button>
+              <Button
+                icon={Undo2}
+                onClick={handleConfirmReturn}
+                loading={isSubmittingReturn}
+                disabled={!returnValid}
+              >
+                {isSubmittingReturn ? "Saving…" : "Return items"}
+              </Button>
+            </>
+          }
+        >
+          {!returnSale || !returnItem || !returnInfo ? (
+            <p className="text-sm text-muted">This bill line is no longer available.</p>
+          ) : returnInfo.remaining === 0 ? (
+            <p className="text-sm text-muted">Everything on this line has already been returned.</p>
+          ) : (
+            <div className="space-y-4">
+              <div className="rounded-xl bg-sunken p-3 text-sm space-y-1">
+                <p className="text-muted">
+                  Bill: <strong className="font-mono text-ink">{returnSale.billNumber}</strong>
+                </p>
+                <p className="text-muted">
+                  Item: <strong className="text-ink">{returnItem.productName || returnItem.name || "Product"}</strong>
+                </p>
+                <p className="text-muted">
+                  Sold: <strong className="text-ink">{returnInfo.qty}</strong> x {cur} {returnUnitPrice.toLocaleString()}
+                  {returnInfo.returnedCount > 0 && (
+                    <span className="text-saffron-700 font-semibold"> · {returnInfo.returnedCount} already returned</span>
+                  )}
+                </p>
+              </div>
+
+              {returnInfo.isPhone ? (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-ink-soft">IMEIs to return</span>
+                    {returnInfo.remainingImeis.length > 1 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          setReturnImeis(
+                            returnImeis.length === returnInfo.remainingImeis.length ? [] : [...returnInfo.remainingImeis]
+                          )
+                        }
+                      >
+                        {returnImeis.length === returnInfo.remainingImeis.length ? "Clear" : "Select all"}
+                      </Button>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    {returnInfo.remainingImeis.map((im) => (
+                      <label
+                        key={im}
+                        className={`flex min-h-10 cursor-pointer items-center gap-2.5 rounded-xl border px-3 py-2 font-mono text-sm transition-colors ${
+                          returnImeis.includes(im)
+                            ? "border-brand-500 bg-brand-50 text-brand-700"
+                            : "border-line-strong bg-surface text-ink-soft hover:bg-sunken"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={returnImeis.includes(im)}
+                          onChange={() => toggleReturnImei(im)}
+                          className="h-4 w-4 accent-brand-600"
+                        />
+                        <Smartphone size={14} className="text-muted" aria-hidden="true" />
+                        <span className="break-all">{im}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <Field label={`Quantity to return (1 to ${returnInfo.remaining})`} htmlFor="udhaar-return-qty">
+                  <Input
+                    id="udhaar-return-qty"
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    max={returnInfo.remaining}
+                    step="1"
+                    value={returnQty}
+                    onChange={(e) => setReturnQty(e.target.value)}
+                    className="font-semibold"
+                  />
+                </Field>
+              )}
+
+              <Field label="Note" htmlFor="udhaar-return-note" hint="Optional">
+                <Input
+                  id="udhaar-return-note"
+                  type="text"
+                  value={returnNote}
+                  onChange={(e) => setReturnNote(e.target.value)}
+                  placeholder="e.g. faulty, customer changed mind"
+                />
+              </Field>
+
+              {/* What will happen */}
+              <div className="rounded-xl border border-saffron-200 bg-saffron-50 p-3 text-sm space-y-1">
+                <div className="flex flex-wrap justify-between gap-2">
+                  <span className="text-ink-soft">Refund</span>
+                  <span className="font-display text-lg font-bold text-saffron-700">
+                    {cur} {returnEstimate.toLocaleString()}
+                    {returnCount > 0 && (
+                      <span className="font-sans text-xs font-medium text-muted">
+                        {" "}
+                        ({returnCount} x {cur} {returnUnitPrice.toLocaleString()})
+                      </span>
+                    )}
+                  </span>
+                </div>
+                {returnEstimate > 0 && (
+                  <p className="text-xs text-ink-soft">
+                    About {cur} {returnDuePart.toLocaleString()} comes off the Udhaar first
+                    {returnEstimate - returnDuePart > 0 &&
+                      `, ${cur} ${(returnEstimate - returnDuePart).toLocaleString()} cash back`}
+                    .
+                  </p>
+                )}
+                {Number(returnSale.discountAmount || 0) > 0 && (
+                  <p className="text-xs text-ink-soft">
+                    This bill had a discount of {cur} {Number(returnSale.discountAmount).toLocaleString()}, shared over
+                    its items, so the final refund may be a little lower.
+                  </p>
+                )}
+                <p className="text-xs text-ink-soft">
+                  The {returnInfo.isPhone ? "phone(s) go" : "item goes"} back into stock
+                  {returnInfo.isPhone && " and the warranty is voided"}.
+                </p>
+              </div>
+
+              {!returnValid && (
+                <p className="text-xs font-semibold text-khata-600">
+                  {returnInfo.isPhone ? "Select at least one IMEI." : `Enter a quantity from 1 to ${returnInfo.remaining}.`}
+                </p>
+              )}
+            </div>
+          )}
+        </Modal>
+      )}
+    </Page>
+
+      {/* Printable statement / khata slip */}
+      {statementCustomer && (
+        <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-ink/40 backdrop-blur-[2px] sm:items-center sm:p-4 print:static print:bg-transparent print:p-0 print:block">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Customer statement"
+            className="relative flex h-full w-full flex-col bg-surface shadow-pop sm:h-auto sm:max-h-[90vh] sm:max-w-2xl sm:rounded-2xl print:block print:h-auto print:max-h-none print:w-full print:max-w-none print:rounded-none print:shadow-none"
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-line px-5 pt-4 pb-3 print:hidden">
+              <div className="min-w-0">
+                <h2 className="text-lg font-bold leading-snug">Customer statement</h2>
+                <p className="text-xs text-muted mt-0.5">Print it or send it as a picture on WhatsApp.</p>
+              </div>
+              <IconButton icon={X} label="Close" size="sm" onClick={() => setStatementCustId(null)} />
+            </div>
+
+            <div className="flex-1 overflow-y-auto bg-sunken p-3 sm:p-4 custom-scrollbar print:overflow-visible print:bg-transparent print:p-0">
+              <div className="overflow-x-auto rounded-xl border border-line bg-white custom-scrollbar print:overflow-visible print:rounded-none print:border-0">
             <div id="statement-print-area" className="p-4 bg-white text-black print-target">
               {/* Header */}
               <div className="text-center border-b-2 border-black pb-3 mb-3">
@@ -1915,7 +1882,7 @@ const PendingPayments = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {getCustomerTransactions(statementCustomer).map((tx) => (
+                    {statementTransactions.map((tx) => (
                       <tr key={tx.id} className="border-b border-slate-200 text-[11px]">
                         <td className="py-1.5 whitespace-nowrap">
                           <span className="font-bold block">{tx.dateInfo.day}</span>
@@ -1923,7 +1890,16 @@ const PendingPayments = () => {
                         </td>
                         <td className="py-1.5 font-mono font-bold text-[10px]">{tx.billNumber}</td>
                         <td className="py-1.5">
-                          {tx.isPayment ? (
+                          {tx.isReturnEntry ? (
+                            <div>
+                              <span className="font-semibold">
+                                Return: {returnItemsText(tx.items) || "items returned"} (Rs. {tx.returnAmount.toLocaleString()})
+                              </span>
+                              {tx.cashBack > 0 && (
+                                <span className="text-[9px] block">Cash back Rs. {tx.cashBack.toLocaleString()}</span>
+                              )}
+                            </div>
+                          ) : tx.isPayment ? (
                             <span className="font-semibold text-emerald-700">{tx.notes || "Udhaar Payment"}</span>
                           ) : (
                             <div>
@@ -1932,7 +1908,7 @@ const PendingPayments = () => {
                                   .map((i) => {
                                     const r = lineReturnInfo(i);
                                     const tag = r.fullyReturned ? ", returned" : r.returnedCount > 0 ? `, ${r.returnedCount} returned` : "";
-                                    return `${i.productName || i.name} (x${i.quantity || 1}${tag})`;
+                                    return `${i.productName || i.name || "Item"} (x${r.qty}${tag})`;
                                   })
                                   .join(", ") || "Sale"}
                               </span>
@@ -1942,9 +1918,9 @@ const PendingPayments = () => {
                                   {tx.returnedTotal > 0 && `: Rs. ${tx.returnedTotal.toLocaleString()}`}
                                 </span>
                               )}
-                              {tx.items?.some((i) => i.imei || i.imeisArray?.length) && (
+                              {(tx.items || []).some((i) => itemImeis(i).length > 0) && (
                                 <span className="text-[9px] text-slate-500 block font-mono">
-                                  IMEI: {tx.items.map((i) => i.imei || i.imeisArray?.join(", ")).filter(Boolean).join(", ")}
+                                  IMEI: {tx.items.flatMap((i) => itemImeis(i)).join(", ")}
                                 </span>
                               )}
                             </div>
@@ -1954,7 +1930,11 @@ const PendingPayments = () => {
                           {tx.isCredit ? `Rs. ${tx.udhaarAdded.toLocaleString()}` : "—"}
                         </td>
                         <td className="py-1.5 text-right font-semibold text-emerald-700">
-                          {tx.isPayment
+                          {tx.isReturnEntry
+                            ? tx.dueReduced > 0
+                              ? `Rs. ${tx.dueReduced.toLocaleString()}`
+                              : "—"
+                            : tx.isPayment
                             ? `Rs. ${tx.paymentReceived.toLocaleString()}`
                             : tx.oldBalancePaid > 0
                             ? `Rs. ${tx.oldBalancePaid.toLocaleString()}`
@@ -1983,6 +1963,12 @@ const PendingPayments = () => {
                   <span>CURRENT OUTSTANDING UDHAAR:</span>
                   <span className="text-red-600">Rs. {Number(statementCustomer.totalPending || 0).toLocaleString()}</span>
                 </div>
+                {statementGap && (
+                  <p className="text-[10px] text-slate-600">
+                    The entries above add up to Rs. {statementGap.ledgerEnd.toLocaleString()}; the outstanding amount
+                    also includes older records or bill edits.
+                  </p>
+                )}
               </div>
 
               <div className="border-t border-dashed border-black mt-4 pt-3 flex justify-between text-[10px] text-slate-500">
@@ -1990,55 +1976,56 @@ const PendingPayments = () => {
                 <span>Customer Signature: __________________</span>
               </div>
             </div>
+              </div>
+            </div>
 
-            {/* Print & Share Actions */}
-            <div className="flex gap-2 pt-3 print:hidden mt-2 border-t border-slate-200">
-              <button
+            {/* Print & share */}
+            <div className="flex flex-wrap gap-2 border-t border-line px-5 py-3 print:hidden">
+              <Button
+                icon={Printer}
+                className="flex-1"
                 onClick={() => printElement("statement-print-area", "Statement")}
-                className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow"
               >
-                <Printer size={15} /> Print Statement
-              </button>
-              <button
+                Print statement
+              </Button>
+              <Button
+                variant="success"
+                icon={Share2}
+                className="flex-1"
                 onClick={handleWhatsAppStatementShare}
-                disabled={isCapturingImage}
-                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow disabled:opacity-60"
+                title="Preview the statement picture, then send it on WhatsApp or any app"
               >
-                {isCapturingImage ? (
-                  <>
-                    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                    </svg>{" "}
-                    Preparing...
-                  </>
-                ) : (
-                  <>
-                    <Smartphone size={15} /> WhatsApp Statement
-                  </>
-                )}
-              </button>
-              <button
-                onClick={() => setStatementCustomer(null)}
-                className="py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl"
-              >
+                Share on WhatsApp
+              </Button>
+              <Button variant="secondary" onClick={() => setStatementCustId(null)}>
                 Close
-              </button>
+              </Button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Payment Receipt Modal - Micro Thermal Roll Format */}
+      {/* Payment receipt (thermal roll slip) */}
       {paymentReceipt && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-[60] overflow-y-auto print:static print:bg-transparent print:p-0 print:block">
-          <div className="bg-white text-slate-900 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative print:shadow-none print:w-full print:max-w-none print:rounded-none print:p-0">
-            <button
-              onClick={() => setPaymentReceipt(null)}
-              className="absolute top-3 right-3 text-slate-400 hover:text-slate-800 print:hidden p-1 rounded-full hover:bg-slate-100"
-            >
-              <X size={18} />
-            </button>
+        <div className="fixed inset-0 z-[60] flex items-stretch justify-center bg-ink/40 backdrop-blur-[2px] sm:items-center sm:p-4 print:static print:bg-transparent print:p-0 print:block">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Payment receipt"
+            className="relative flex h-full w-full flex-col bg-surface shadow-pop sm:h-auto sm:max-h-[90vh] sm:max-w-sm sm:rounded-2xl print:block print:h-auto print:max-h-none print:w-full print:max-w-none print:rounded-none print:shadow-none"
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-line px-5 pt-4 pb-3 print:hidden">
+              <div className="min-w-0">
+                <h2 className="text-lg font-bold leading-snug flex items-center gap-2">
+                  <CheckCircle2 size={18} className="text-paid-600" aria-hidden="true" /> Payment saved
+                </h2>
+                <p className="text-xs text-muted mt-0.5">Print the slip or send it to the customer.</p>
+              </div>
+              <IconButton icon={X} label="Close" size="sm" onClick={() => setPaymentReceipt(null)} />
+            </div>
 
+            <div className="flex-1 overflow-y-auto bg-sunken p-3 sm:p-4 custom-scrollbar print:overflow-visible print:bg-transparent print:p-0">
+              <div className="rounded-xl border border-line bg-white print:rounded-none print:border-0">
             <div id="receipt-content" className="p-5 max-h-[70vh] overflow-y-auto print:max-h-none print:p-0 bg-white text-black print-target">
               {/* Header */}
               <div className="text-center mb-4">
@@ -2097,7 +2084,7 @@ const PendingPayments = () => {
                   return (
                     <div className="flex justify-between font-black text-sm pt-2 border-t-2 border-dashed border-black text-rose-600">
                       <span>REMAINING BALANCE:</span>
-                      <span>Rs. {currentCust.totalPending.toLocaleString()}</span>
+                      <span>Rs. {Number(currentCust.totalPending || 0).toLocaleString()}</span>
                     </div>
                   );
                 }
@@ -2107,61 +2094,49 @@ const PendingPayments = () => {
               <div className="border-t-2 border-dashed border-black my-3"></div>
               <div className="text-center text-xs font-bold mt-2">THANK YOU FOR YOUR PAYMENT</div>
             </div>
+              </div>
+            </div>
 
             {/* Actions */}
-            <div className="flex gap-2 pt-2 print:hidden flex-wrap p-4 bg-slate-50 border-t border-slate-100 rounded-b-2xl">
-              <button
-                onClick={() => printElement("receipt-content", "Payment Receipt")}
-                className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow"
-              >
-                <Printer size={15} /> Print
-              </button>
-              <button
+            <div className="flex flex-wrap gap-2 border-t border-line px-5 py-3 print:hidden">
+              <Button icon={Printer} className="flex-1" onClick={() => printElement("receipt-content", "Payment Receipt")}>
+                Print
+              </Button>
+              <Button
+                variant="success"
+                icon={Share2}
+                className="flex-1"
                 onClick={handleWhatsAppShare}
-                disabled={isCapturingImage}
-                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow disabled:opacity-60"
+                title="Preview the receipt picture, then send it on WhatsApp or any app"
               >
-                {isCapturingImage ? (
-                  <>
-                    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                    </svg>{" "}
-                    Preparing...
-                  </>
-                ) : (
-                  <>
-                    <Smartphone size={15} /> WhatsApp
-                  </>
-                )}
-              </button>
-              <button
-                onClick={() => setPaymentReceipt(null)}
-                className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl flex items-center justify-center gap-1"
-              >
-                <CheckCircle2 size={15} /> Done
-              </button>
+                Share
+              </Button>
+              <Button variant="secondary" icon={CheckCircle2} onClick={() => setPaymentReceipt(null)}>
+                Done
+              </Button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Status message (returns, account changes, WhatsApp sharing) */}
+      {/* Receipt / statement image preview & share (z-[80], above every other modal) */}
+      {shareDialog}
+
+      {/* Status message (returns, account changes) */}
       {notice && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[70] w-[calc(100%-2rem)] max-w-md print:hidden">
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[70] w-[calc(100%-2rem)] max-w-md print:hidden" role="status">
           <div
-            className={`flex items-start gap-2.5 p-3.5 rounded-2xl border shadow-2xl text-xs font-semibold backdrop-blur-md ${
+            className={`flex items-start gap-2.5 rounded-xl border p-3.5 text-sm font-medium shadow-pop ${
               notice.type === "error"
-                ? "bg-rose-950/90 border-rose-500/40 text-rose-200"
+                ? "bg-khata-50 border-khata-200 text-khata-700"
                 : notice.type === "info"
-                ? "bg-slate-900/95 border-slate-700 text-slate-200"
-                : "bg-emerald-950/90 border-emerald-500/40 text-emerald-200"
+                ? "bg-surface border-line text-ink"
+                : "bg-paid-50 border-paid-200 text-paid-700"
             }`}
           >
-            <CheckCircle2 size={16} className="flex-shrink-0 mt-0.5" />
+            <CheckCircle2 size={16} className="flex-shrink-0 mt-0.5" aria-hidden="true" />
             <span className="flex-1">{notice.text}</span>
-            <button onClick={() => setNotice(null)} className="text-slate-400 hover:text-white p-0.5 rounded-md">
-              <X size={14} />
-            </button>
+            <IconButton icon={X} label="Dismiss" size="sm" onClick={() => setNotice(null)} className="-my-1 -mr-1" />
           </div>
         </div>
       )}

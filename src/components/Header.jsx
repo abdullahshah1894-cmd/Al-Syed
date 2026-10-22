@@ -1,34 +1,75 @@
-import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useRef, useEffect } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useApp, SELLERS, getProductStock } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
-import {
-  Search,
-  Bell,
-  ShoppingCart,
-  PlusCircle,
-  AlertTriangle,
-  ChevronDown,
-} from "lucide-react";
+import { Search, Bell, ShoppingCart, Menu, PackageX } from "lucide-react";
 
-const Header = () => {
+const PAGE_TITLES = {
+  "/dashboard": "Dashboard",
+  "/pos": "New sale",
+  "/ledger": "Billing ledger",
+  "/bills": "Bills",
+  "/pending-payments": "Udhaar accounts",
+  "/sellers": "Sellers",
+  "/inventory": "Inventory",
+  "/imei-checker": "IMEI checker",
+  "/suppliers": "Suppliers",
+  "/warranties": "Warranties",
+  "/mobile-issues": "Repair tickets",
+  "/expenses": "Expenses",
+  "/reports": "Sales reports",
+  "/valuation": "Stock value",
+  "/zakat": "Zakat",
+  "/settings": "Settings",
+};
+
+const Header = ({ onMenu }) => {
   const { products, customers, suppliers, activeSeller, setActiveSeller } = useApp();
-  const { user } = useAuth();
+  const { isAdmin } = useAuth();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const [searchTerm, setSearchTerm] = useState("");
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showSearch, setShowSearch] = useState(false); // phone: search opens under the bar
+  const bellRef = useRef(null);
 
-  const lowStockItems = products.filter((p) => getProductStock(p) <= p.minStockAlert);
+  const lowStockItems = (products || []).filter(
+    (p) => p && !p.isDeleted && getProductStock(p) <= Number(p.minStockAlert || 0)
+  );
+
+  // Close the low-stock list when clicking elsewhere
+  useEffect(() => {
+    if (!showNotifications) return;
+    const close = (e) => bellRef.current && !bellRef.current.contains(e.target) && setShowNotifications(false);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [showNotifications]);
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
     const query = searchTerm.trim();
     if (!query) return;
+    setShowSearch(false);
 
-    // Check if input looks like a 15 digit IMEI
-    if (/^\d{15}$/.test(query)) {
-      navigate(`/imei-checker?imei=${query}`);
+    // A 15 digit IMEI (scanners / copies may add spaces or dashes)
+    const digits = query.replace(/[\s-]/g, "");
+    if (/^\d{15}$/.test(digits)) {
+      navigate(`/imei-checker?imei=${digits}`);
       return;
+    }
+
+    // A product barcode or part of an IMEI in stock goes straight to Inventory
+    // (otherwise a number could match part of a customer's phone first)
+    if (/^\d{5,}$/.test(digits)) {
+      const isProductCode = (products || []).some(
+        (p) =>
+          String(p.barcode || "") === digits ||
+          (p.imeis || []).some((i) => [i?.imei, i?.imei1, i?.imei2].some((k) => k && String(k).includes(digits)))
+      );
+      if (isProductCode) {
+        navigate(`/inventory?search=${encodeURIComponent(digits)}`);
+        return;
+      }
     }
 
     // Bill / payment receipt numbers go to the Bills page
@@ -37,27 +78,24 @@ const Header = () => {
       return;
     }
 
-    // Check if query matches a customer name or phone
+    // Customer name or phone -> their Udhaar account
     const isCustomer = (customers || []).some(
-      (c) =>
-        (c.name || "").toLowerCase().includes(query.toLowerCase()) ||
-        (c.phone || "").includes(query)
+      (c) => (c.name || "").toLowerCase().includes(query.toLowerCase()) || (c.phone || "").includes(query)
     );
-
-    // Customer accounts live in Pending Payments (the old Customers page is gone)
     if (isCustomer) {
       navigate(`/pending-payments?search=${encodeURIComponent(query)}`);
       return;
     }
 
-    // Supplier name / company / phone opens the Suppliers page filtered to it
-    const isSupplier = (suppliers || []).some(
-      (s) =>
-        (s.name || "").toLowerCase().includes(query.toLowerCase()) ||
-        (s.company || "").toLowerCase().includes(query.toLowerCase()) ||
-        (s.phone || "").includes(query)
-    );
-
+    // Supplier name / company / phone (owner only)
+    const isSupplier =
+      isAdmin &&
+      (suppliers || []).some(
+        (s) =>
+          (s.name || "").toLowerCase().includes(query.toLowerCase()) ||
+          (s.company || "").toLowerCase().includes(query.toLowerCase()) ||
+          (s.phone || "").includes(query)
+      );
     if (isSupplier) {
       navigate(`/suppliers?search=${encodeURIComponent(query)}`);
       return;
@@ -66,124 +104,144 @@ const Header = () => {
     navigate(`/inventory?search=${encodeURIComponent(query)}`);
   };
 
-  return (
-    <header className="bg-slate-900/90 backdrop-blur border-b border-slate-800 px-6 py-3.5 flex items-center justify-between sticky top-0 z-20 shadow-sm print:hidden">
-      {/* Global Quick Search */}
-      <form onSubmit={handleSearchSubmit} className="relative w-96">
-        <Search size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-        <input
-          type="text"
-          placeholder="Search products, customers, IMEIs, bills..."
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          className="w-full pl-10 pr-4 py-2 bg-slate-800/80 border border-slate-700/80 rounded-xl text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
-        />
-      </form>
+  const searchForm = (className) => (
+    <form onSubmit={handleSearchSubmit} className={`relative ${className}`} role="search">
+      <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+      <input
+        type="search"
+        placeholder="Search IMEI, product, customer or bill no."
+        value={searchTerm}
+        onChange={(e) => setSearchTerm(e.target.value)}
+        aria-label="Search"
+        className="w-full h-10 pl-9 pr-3 rounded-xl bg-sunken border border-transparent text-sm text-ink placeholder:text-muted focus:outline-none focus:bg-surface focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+      />
+    </form>
+  );
 
-      {/* Header Actions */}
-      <div className="flex items-center gap-3">
-        
-        {/* Global Seller Selector */}
-        <div className="relative group flex items-center">
-          <span className="text-xs font-bold text-slate-500 mr-2 uppercase tracking-wide">Seller:</span>
-          <select 
-            value={activeSeller} 
-            onChange={(e) => setActiveSeller(e.target.value)}
-            className="appearance-none bg-slate-800 border border-slate-700 text-slate-200 text-sm rounded-xl pl-3 pr-8 py-1.5 focus:outline-none focus:border-indigo-500 font-semibold cursor-pointer shadow-sm hover:bg-slate-700 transition-colors"
-          >
-            <option value="All Sellers">All Sellers</option>
-            {SELLERS.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-          <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
-        </div>
-        
-        <div className="w-px h-6 bg-slate-800 mx-1"></div>
-        {/* Quick Action: New Sale POS */}
+  return (
+    <header className="sticky top-0 z-30 bg-surface/95 backdrop-blur border-b border-line print:hidden">
+      <div className="h-16 px-4 sm:px-6 flex items-center gap-3">
         <button
-          onClick={() => navigate("/pos")}
-          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl text-sm flex items-center gap-2 transition-all shadow-md shadow-indigo-600/20 active:scale-95"
+          type="button"
+          onClick={onMenu}
+          className="lg:hidden h-10 w-10 -ml-1 inline-flex items-center justify-center rounded-lg text-ink-soft hover:bg-sunken"
+          aria-label="Open menu"
         >
-          <ShoppingCart size={16} />
-          <span>New Sale (POS)</span>
+          <Menu size={20} />
         </button>
 
-        {/* Low Stock Alerts Notification */}
-        <div className="relative">
+        <div className="font-display font-bold text-lg text-ink truncate lg:hidden">{PAGE_TITLES[pathname] || "Al-Syed"}</div>
+
+        {searchForm("hidden md:block flex-1 max-w-md")}
+
+        <div className="ml-auto flex items-center gap-2">
           <button
-            onClick={() => setShowNotifications(!showNotifications)}
-            className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl relative transition-all border border-slate-700/60"
-            title="Low Stock Alerts"
+            type="button"
+            onClick={() => setShowSearch((v) => !v)}
+            className="md:hidden h-10 w-10 inline-flex items-center justify-center rounded-lg text-ink-soft hover:bg-sunken"
+            aria-label="Search"
           >
-            <Bell size={18} />
-            {lowStockItems.length > 0 && (
-              <span className="absolute -top-1 -right-1 w-5 h-5 bg-amber-500 text-slate-950 font-bold text-[10px] rounded-full flex items-center justify-center border-2 border-slate-900 shadow">
-                {lowStockItems.length}
-              </span>
-            )}
+            <Search size={19} />
           </button>
 
-          {/* Low Stock Dropdown */}
-          {showNotifications && (
-            <div className="absolute right-0 mt-3 w-80 bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2">
-              <div className="p-4 bg-slate-900 border-b border-slate-700/80 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <AlertTriangle size={18} className="text-amber-400" />
-                  <h3 className="font-semibold text-slate-100 text-sm">Low Stock Alerts</h3>
-                </div>
-                <span className="text-xs bg-amber-500/20 text-amber-300 font-bold px-2 py-0.5 rounded-full border border-amber-500/30">
-                  {lowStockItems.length} Item(s)
+          {/* Seller filter for the whole app */}
+          <label className="hidden sm:flex items-center gap-2 text-xs text-muted">
+            <span>Seller</span>
+            <select
+              value={activeSeller}
+              onChange={(e) => setActiveSeller(e.target.value)}
+              className="h-10 rounded-xl border border-line-strong bg-surface pl-3 pr-8 text-sm font-semibold text-ink focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+            >
+              <option value="All Sellers">All sellers</option>
+              {SELLERS.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {/* Low stock */}
+          <div className="relative" ref={bellRef}>
+            <button
+              type="button"
+              onClick={() => setShowNotifications((v) => !v)}
+              className="relative h-10 w-10 inline-flex items-center justify-center rounded-xl border border-line text-ink-soft hover:bg-sunken"
+              aria-label={`Low stock: ${lowStockItems.length} product(s)`}
+              aria-expanded={showNotifications}
+            >
+              <Bell size={18} />
+              {lowStockItems.length > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1 rounded-full bg-saffron-500 text-white text-[10px] font-bold flex items-center justify-center ring-2 ring-surface">
+                  {lowStockItems.length}
                 </span>
-              </div>
+              )}
+            </button>
 
-              <div className="max-h-64 overflow-y-auto divide-y divide-slate-700/50">
-                {lowStockItems.length === 0 ? (
-                  <div className="p-4 text-center text-xs text-slate-400">
-                    All inventory levels are healthy!
-                  </div>
-                ) : (
-                  lowStockItems.map((item) => {
-                    const currentStock = getProductStock(item);
-
-                    return (
-                      <div
-                        key={item.id}
-                        onClick={() => {
-                          setShowNotifications(false);
-                          navigate("/inventory");
-                        }}
-                        className="p-3 hover:bg-slate-700/50 cursor-pointer flex items-center justify-between transition-colors"
-                      >
-                        <div>
-                          <p className="text-xs font-semibold text-slate-200">{item.name}</p>
-                          <p className="text-[11px] text-slate-400">{item.brand} • {item.category}</p>
-                        </div>
-                        <div className="text-right">
-                          <span className="text-xs font-bold text-amber-400">
-                            {currentStock} Left
+            {showNotifications && (
+              <div className="absolute right-0 mt-2 w-[min(20rem,calc(100vw-2rem))] bg-surface border border-line rounded-2xl shadow-pop overflow-hidden z-50">
+                <div className="px-4 py-3 border-b border-line flex items-center justify-between">
+                  <h3 className="font-sans text-sm font-semibold">Low stock</h3>
+                  <span className="text-xs text-muted">{lowStockItems.length} product(s)</span>
+                </div>
+                <div className="max-h-72 overflow-y-auto custom-scrollbar">
+                  {lowStockItems.length === 0 ? (
+                    <div className="p-6 text-center text-sm text-muted">Every product is above its low-stock level.</div>
+                  ) : (
+                    lowStockItems.map((item) => {
+                      const left = getProductStock(item);
+                      return (
+                        <button
+                          type="button"
+                          key={item.id}
+                          onClick={() => {
+                            setShowNotifications(false);
+                            navigate(`/inventory?search=${encodeURIComponent(item.name || "")}`);
+                          }}
+                          className="w-full text-left px-4 py-3 hover:bg-sunken flex items-center justify-between gap-3 border-b border-line last:border-0"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-ink truncate">{item.name}</p>
+                            <p className="text-xs text-muted truncate">
+                              {item.brand} {item.category ? `· ${item.category}` : ""}
+                            </p>
+                          </div>
+                          <span className={`text-xs font-semibold whitespace-nowrap ${left <= 0 ? "text-khata-600" : "text-saffron-700"}`}>
+                            {left <= 0 ? "Out of stock" : `${left} left`}
                           </span>
-                          <p className="text-[10px] text-slate-400">Min: {item.minStockAlert}</p>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-
-              <div className="p-2.5 bg-slate-900 border-t border-slate-700/80 text-center">
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
                 <button
+                  type="button"
                   onClick={() => {
                     setShowNotifications(false);
                     navigate("/inventory");
                   }}
-                  className="text-xs text-indigo-400 hover:text-indigo-300 font-medium"
+                  className="w-full px-4 py-2.5 text-sm font-semibold text-brand-700 hover:bg-brand-50 border-t border-line flex items-center justify-center gap-2"
                 >
-                  View Full Inventory →
+                  <PackageX size={15} /> Open inventory
                 </button>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => navigate("/pos")}
+            className="h-10 px-3 sm:px-4 inline-flex items-center gap-2 rounded-xl bg-brand-600 text-white text-sm font-semibold hover:bg-brand-700 shadow-sm"
+          >
+            <ShoppingCart size={16} aria-hidden="true" />
+            <span className="hidden sm:inline">New sale</span>
+          </button>
         </div>
       </div>
+
+      {/* Phone search row */}
+      {showSearch && <div className="px-4 pb-3 md:hidden">{searchForm("w-full")}</div>}
+
     </header>
   );
 };

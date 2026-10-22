@@ -1,11 +1,61 @@
-import React, { useState } from "react";
+import { useState, useCallback } from "react";
 import { useApp } from "../context/AppContext";
-import { Wrench, Plus, X, Search, FileText, CheckCircle2, Clock, AlertTriangle, Info, Trash2 } from "lucide-react";
+import { useAuth } from "../context/AuthContext";
+import { Wrench, Plus, Search, FileText, Info, Trash2 } from "lucide-react";
+import {
+  Page,
+  PageHeader,
+  Card,
+  Badge,
+  Button,
+  IconButton,
+  Field,
+  Input,
+  Textarea,
+  Segmented,
+  TableWrap,
+  Th,
+  Td,
+  EmptyState,
+  Modal,
+} from "../components/ui";
 
-const MobileIssues = () => {
+const STATUSES = ["Pending", "Under Inspection", "Repaired", "Delivered", "Rejected"];
+
+// Shown in sentence case; the saved values stay as they are
+const STATUS_LABEL = { "Under Inspection": "Under inspection" };
+const statusLabel = (s) => STATUS_LABEL[s] || s;
+
+// Colour per status (badge tone + matching select colours)
+const STATUS_TONE = { Pending: "saffron", "Under Inspection": "brand", Repaired: "paid", Delivered: "neutral", Rejected: "neutral" };
+const SELECT_TONE = {
+  saffron: "bg-saffron-50 text-saffron-700 border-saffron-200",
+  brand: "bg-brand-50 text-brand-700 border-brand-200",
+  paid: "bg-paid-50 text-paid-700 border-paid-200",
+  neutral: "bg-sunken text-ink-soft border-line-strong",
+};
+
+// "12 Oct 2026" in local time; "—" when the date is missing or unreadable
+const formatDay = (d) => {
+  const date = d ? new Date(d) : null;
+  return date && !isNaN(date.getTime())
+    ? date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
+    : "—";
+};
+
+// Inside the Warranties page the repairs list is shown without its own page frame and title
+const EmbeddedWrap = ({ children }) => <div className="space-y-4">{children}</div>;
+
+const MobileIssues = ({ embedded = false }) => {
+  const Wrap = embedded ? EmbeddedWrap : Page;
   const { issues, addIssue, updateIssueStatus, deleteIssue } = useApp();
+  // Deleting a ticket is for the owner only (the server refuses it for cashiers)
+  const { isAdmin } = useAuth();
   const [searchTerm, setSearchTerm] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all"); // view filter only
   const [showAddModal, setShowAddModal] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [busyId, setBusyId] = useState(null); // ticket whose status change / delete is being saved
 
   // Form State
   const [customerName, setCustomerName] = useState("");
@@ -13,271 +63,310 @@ const MobileIssues = () => {
   const [phoneIssue, setPhoneIssue] = useState("");
   const [companyName, setCompanyName] = useState("");
 
+  // Stable, so the modal does not grab focus back from the inputs on every keystroke
+  const closeAddModal = useCallback(() => {
+    if (isSaving) return;
+    setShowAddModal(false);
+  }, [isSaving]);
+
   const handleAddIssue = async (e) => {
     e.preventDefault();
-    if (!customerName || !imei || !phoneIssue || !companyName) {
+    if (isSaving) return;
+    const name = customerName.trim();
+    const issueText = phoneIssue.trim();
+    const company = companyName.trim();
+    if (!name || !imei || !issueText || !company) {
       alert("Please fill all required fields.");
       return;
     }
-    if (imei.length !== 15) {
+    if (!/^\d{15}$/.test(imei)) {
       alert("IMEI must be exactly 15 digits.");
       return;
     }
-    if (!companyName.trim()) {
-      alert("Please specify the mobile company.");
-      return;
-    }
 
-    const newIssue = await addIssue({
-      customerName,
-      imei,
-      phoneIssue,
-      companyName: companyName.trim()
-    });
-    
-    if (newIssue) {
-      setShowAddModal(false);
-      setCustomerName("");
-      setImei("");
-      setPhoneIssue("");
-      setCompanyName("");
+    setIsSaving(true);
+    try {
+      // addIssue alerts the user itself on failure; the form keeps what was typed
+      const newIssue = await addIssue({ customerName: name, imei, phoneIssue: issueText, companyName: company });
+      if (newIssue) {
+        setShowAddModal(false);
+        setCustomerName("");
+        setImei("");
+        setPhoneIssue("");
+        setCompanyName("");
+      }
+    } finally {
+      setIsSaving(false);
     }
   };
 
-  const handleStatusChange = (id, newStatus) => {
-    updateIssueStatus(id, newStatus);
+  // updateIssueStatus alerts on failure; the select then shows the saved status again
+  const handleStatusChange = async (id, newStatus) => {
+    if (busyId) return;
+    setBusyId(id);
+    try {
+      await updateIssueStatus(id, newStatus);
+    } finally {
+      setBusyId(null);
+    }
   };
 
   // deleteIssue alerts the user itself if the database refuses
-  const handleDelete = (issue) => {
+  const handleDelete = async (issue) => {
+    if (!isAdmin || busyId) return;
     if (!window.confirm(`Delete repair ticket ${issue.ticketNumber || ""} for ${issue.customerName || "customer"}?`)) return;
-    deleteIssue(issue.id);
-  };
-
-  const filteredIssues = issues.filter(issue => {
-    const s = searchTerm.toLowerCase();
-    const matchTicket = issue.ticketNumber?.toLowerCase().includes(s) || false;
-    const matchCust = issue.customerName?.toLowerCase().includes(s) || false;
-    const matchImei = String(issue.imei || "").includes(s);
-    return matchTicket || matchCust || matchImei;
-  });
-
-  const getStatusBadge = (status) => {
-    switch (status) {
-      case "Pending": return "bg-amber-500/20 text-amber-300 border-amber-500/30";
-      case "Under Inspection": return "bg-blue-500/20 text-blue-300 border-blue-500/30";
-      case "Repaired": return "bg-emerald-500/20 text-emerald-300 border-emerald-500/30";
-      case "Delivered": return "bg-indigo-500/20 text-indigo-300 border-indigo-500/30";
-      case "Rejected": return "bg-rose-500/20 text-rose-300 border-rose-500/30";
-      default: return "bg-slate-500/20 text-slate-300 border-slate-500/30";
+    setBusyId(issue.id);
+    try {
+      await deleteIssue(issue.id);
+    } finally {
+      setBusyId(null);
     }
   };
 
-  return (
-    <div className="flex flex-col gap-4 h-[calc(100vh-200px)]">
-      {/* Header Bar */}
-      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm">
-        <div className="flex items-center gap-2">
-          <div className="p-2 rounded-xl bg-orange-500/10 text-orange-400 border border-orange-500/20">
-            <Wrench size={22} />
-          </div>
-          <div>
-            <h2 className="text-base font-bold text-slate-100">Mobile Repair Tickets</h2>
-            <p className="text-[11px] text-slate-400">Manage customer repair issues</p>
-          </div>
-        </div>
+  const searchedIssues = (issues || []).filter((issue) => {
+    const s = searchTerm.trim().toLowerCase();
+    if (!s) return true;
+    return [issue.ticketNumber, issue.customerName, issue.imei, issue.companyName, issue.phoneIssue].some((v) =>
+      String(v || "").toLowerCase().includes(s)
+    );
+  });
+  const filteredIssues =
+    statusFilter === "all" ? searchedIssues : searchedIssues.filter((i) => (i.status || "Pending") === statusFilter);
 
-        <div className="flex items-center gap-3 w-full md:w-auto">
-          <div className="relative flex-1 md:w-64">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input
+  const filterOptions = [
+    { value: "all", label: `All (${searchedIssues.length})` },
+    ...STATUSES.map((st) => ({
+      value: st,
+      label: `${statusLabel(st)} (${searchedIssues.filter((i) => (i.status || "Pending") === st).length})`,
+    })),
+  ];
+
+  const statusSelect = (issue, className = "") => (
+    <select
+      aria-label={`Status of ticket ${issue.ticketNumber || ""}`}
+      value={issue.status || "Pending"}
+      disabled={!!busyId}
+      onChange={(e) => handleStatusChange(issue.id, e.target.value)}
+      className={`h-10 rounded-xl border px-2.5 pr-7 text-sm font-semibold cursor-pointer focus:outline-none focus:ring-2 focus:ring-brand-100 disabled:opacity-60 disabled:cursor-wait ${
+        SELECT_TONE[STATUS_TONE[issue.status || "Pending"] || "neutral"]
+      } ${className}`}
+    >
+      {STATUSES.map((st) => (
+        <option key={st} value={st}>
+          {statusLabel(st)}
+        </option>
+      ))}
+      {issue.status && !STATUSES.includes(issue.status) && <option value={issue.status}>{issue.status}</option>}
+    </select>
+  );
+
+  const deleteButton = (issue) =>
+    isAdmin ? (
+      <IconButton
+        icon={Trash2}
+        label="Delete ticket"
+        variant="danger-soft"
+        onClick={() => handleDelete(issue)}
+        disabled={!!busyId}
+      />
+    ) : null;
+
+  const emptyState = (
+    <EmptyState
+      icon={FileText}
+      title={(issues || []).length === 0 ? "No repair tickets yet" : "No ticket matches"}
+      description={
+        (issues || []).length === 0
+          ? "When a customer leaves a phone for repair, add a ticket with New repair ticket."
+          : "Try another search or status."
+      }
+    />
+  );
+
+  return (
+    <Wrap>
+      {embedded ? (
+        <div className="flex justify-end">
+          <Button icon={Plus} onClick={() => setShowAddModal(true)}>
+            New repair ticket
+          </Button>
+        </div>
+      ) : (
+        <PageHeader
+          title="Repair tickets"
+          description="Phones customers left for repair. Change the status as the work moves on."
+          actions={
+            <Button icon={Plus} onClick={() => setShowAddModal(true)}>
+              New repair ticket
+            </Button>
+          }
+        />
+      )}
+
+      <Card padded={false}>
+        <div className="p-4 sm:p-5 space-y-3 border-b border-line">
+          <div className="relative">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+            <Input
               type="text"
-              placeholder="Search Ticket, IMEI, Customer..."
+              aria-label="Search tickets"
+              placeholder="Search ticket, IMEI, customer, company…"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-orange-500"
+              className="pl-9"
             />
           </div>
-          <button 
-            onClick={() => setShowAddModal(true)}
-            className="px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all shadow-lg shadow-orange-600/20 shrink-0"
-          >
-            <Plus size={16} /> <span className="hidden sm:inline">Mobile Issue</span>
-          </button>
+          <Segmented options={filterOptions} value={statusFilter} onChange={setStatusFilter} size="sm" />
         </div>
-      </div>
 
-      {/* Issues Table */}
-      <div className="flex-1 bg-slate-900 border border-slate-800 rounded-3xl shadow-sm overflow-hidden flex flex-col">
-        <div className="overflow-y-auto flex-1 custom-scrollbar">
-          <table className="w-full text-left border-collapse">
-            <thead className="bg-slate-950/50 sticky top-0 z-10">
-              <tr>
-                <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800">Ticket No.</th>
-                <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800">Customer</th>
-                <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800">Mobile Details</th>
-                <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800">Issue Description</th>
-                <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800">Date Registered</th>
-                <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800">Status</th>
-                <th className="px-4 py-3 text-xs font-semibold text-slate-400 border-b border-slate-800 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800">
-              {filteredIssues.length === 0 ? (
-                <tr>
-                  <td colSpan="7" className="px-4 py-12 text-center text-slate-500 text-sm">
-                    <div className="flex flex-col items-center gap-2">
-                      <FileText size={32} className="opacity-30" />
-                      <p>No mobile issues found.</p>
+        {filteredIssues.length === 0 ? (
+          emptyState
+        ) : (
+          <>
+            {/* Phones: one card per ticket */}
+            <ul className="md:hidden divide-y divide-line">
+              {filteredIssues.map((issue) => (
+                <li key={issue.id} className="p-4 space-y-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-xs font-semibold text-brand-700">{issue.ticketNumber}</span>
+                        <Badge tone={STATUS_TONE[issue.status || "Pending"] || "neutral"}>{statusLabel(issue.status || "Pending")}</Badge>
+                      </div>
+                      <p className="mt-1 text-sm font-semibold text-ink truncate">{issue.customerName}</p>
+                      <p className="text-xs text-muted">
+                        {issue.companyName} · <span className="font-mono">{issue.imei}</span>
+                      </p>
                     </div>
-                  </td>
-                </tr>
-              ) : (
-                filteredIssues.map((issue) => (
-                  <tr key={issue.id} className="hover:bg-slate-950/50 transition-colors">
-                    <td className="px-4 py-3">
-                      <span className="font-mono text-xs font-bold text-orange-400">{issue.ticketNumber}</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="text-sm font-semibold text-slate-200">{issue.customerName}</div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="text-sm font-semibold text-slate-200">{issue.companyName}</div>
-                      <div className="text-[11px] font-mono text-slate-400 mt-0.5">IMEI: {issue.imei}</div>
-                    </td>
-                    <td className="px-4 py-3 max-w-[200px]">
-                      <div className="text-xs text-slate-300 truncate" title={issue.phoneIssue}>
-                        {issue.phoneIssue}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="text-xs font-medium text-slate-400">
-                        {new Date(issue.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <select
-                        value={issue.status}
-                        onChange={(e) => handleStatusChange(issue.id, e.target.value)}
-                        className={`text-[10px] font-bold px-2 py-1 rounded border outline-none cursor-pointer ${getStatusBadge(issue.status)} bg-slate-950`}
-                      >
-                        <option value="Pending">Pending</option>
-                        <option value="Under Inspection">Under Inspection</option>
-                        <option value="Repaired">Repaired</option>
-                        <option value="Delivered">Delivered</option>
-                        <option value="Rejected">Rejected</option>
-                      </select>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => handleDelete(issue)}
-                        className="p-2 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors"
-                        title="Delete Ticket"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </td>
+                    <span className="text-xs text-muted shrink-0">{formatDay(issue.createdAt)}</span>
+                  </div>
+                  <p className="text-sm text-ink-soft break-words">{issue.phoneIssue}</p>
+                  <div className="flex items-center gap-2">
+                    {statusSelect(issue, "flex-1 min-w-0")}
+                    {deleteButton(issue)}
+                  </div>
+                </li>
+              ))}
+            </ul>
+
+            {/* Tablet and up: table */}
+            <div className="hidden md:block p-4 sm:p-5 pt-2 sm:pt-3">
+              <TableWrap>
+                <thead>
+                  <tr>
+                    <Th>Ticket</Th>
+                    <Th>Customer</Th>
+                    <Th>Phone</Th>
+                    <Th>Problem</Th>
+                    <Th>Received</Th>
+                    <Th>Status</Th>
+                    {isAdmin && <Th className="text-right">Delete</Th>}
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+                </thead>
+                <tbody>
+                  {filteredIssues.map((issue) => (
+                    <tr key={issue.id} className="hover:bg-sunken/60 transition-colors">
+                      <Td>
+                        <span className="font-mono text-xs font-semibold text-brand-700 whitespace-nowrap">{issue.ticketNumber}</span>
+                      </Td>
+                      <Td>
+                        <div className="font-semibold text-ink">{issue.customerName}</div>
+                      </Td>
+                      <Td>
+                        <div className="font-semibold text-ink">{issue.companyName}</div>
+                        <div className="text-xs font-mono text-muted mt-0.5 whitespace-nowrap">IMEI {issue.imei}</div>
+                      </Td>
+                      <Td className="max-w-[260px]">
+                        <div className="text-ink-soft truncate" title={issue.phoneIssue}>
+                          {issue.phoneIssue}
+                        </div>
+                      </Td>
+                      <Td className="whitespace-nowrap text-ink-soft">{formatDay(issue.createdAt)}</Td>
+                      <Td>{statusSelect(issue)}</Td>
+                      {isAdmin && <Td className="text-right">{deleteButton(issue)}</Td>}
+                    </tr>
+                  ))}
+                </tbody>
+              </TableWrap>
+            </div>
+          </>
+        )}
+      </Card>
 
       {/* Add Issue Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-lg shadow-2xl overflow-hidden">
-            <div className="flex items-center justify-between p-5 border-b border-slate-800 bg-slate-800/20">
-              <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-                <Wrench size={20} className="text-orange-400" /> Register Mobile Issue
-              </h2>
-              <button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-white transition-colors">
-                <X size={20} />
-              </button>
-            </div>
+      <Modal
+        open={showAddModal}
+        onClose={closeAddModal}
+        title="New repair ticket"
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeAddModal} disabled={isSaving}>
+              Cancel
+            </Button>
+            <Button type="submit" form="add-issue-form" icon={Wrench} loading={isSaving}>
+              {isSaving ? "Saving…" : "Save ticket"}
+            </Button>
+          </>
+        }
+      >
+        <form id="add-issue-form" onSubmit={handleAddIssue} className="space-y-4">
+          <Field label="Customer name *" htmlFor="issue-customer">
+            <Input
+              id="issue-customer"
+              type="text"
+              required
+              value={customerName}
+              onChange={(e) => setCustomerName(e.target.value)}
+              placeholder="Customer's name"
+            />
+          </Field>
 
-            <form onSubmit={handleAddIssue} className="p-5 space-y-4">
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-400 uppercase">Customer Name *</label>
-                <input
-                  type="text"
-                  required
-                  value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
-                  placeholder="Enter customer name"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-orange-500"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-400 uppercase">Company Name *</label>
-                  <input
-                    type="text"
-                    required
-                    value={companyName}
-                    onChange={(e) => setCompanyName(e.target.value)}
-                    placeholder="Enter company name"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-orange-500"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-400 uppercase">IMEI Number *</label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={15}
-                    minLength={15}
-                    pattern="\d{15}"
-                    value={imei}
-                    onChange={(e) => setImei(e.target.value.replace(/\D/g, ''))}
-                    placeholder="15-digit IMEI"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm font-mono text-slate-100 focus:outline-none focus:border-orange-500"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-400 uppercase">Phone Issue / Description *</label>
-                <textarea
-                  required
-                  value={phoneIssue}
-                  onChange={(e) => setPhoneIssue(e.target.value)}
-                  placeholder="Describe the mobile problem..."
-                  rows={4}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-orange-500 resize-none"
-                ></textarea>
-              </div>
-
-              <div className="flex items-center gap-2 p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-xl">
-                <Info size={16} className="text-indigo-400 shrink-0" />
-                <p className="text-[11px] text-indigo-300">
-                  The current date and a unique Ticket ID will be automatically generated upon saving.
-                </p>
-              </div>
-
-              <div className="pt-2 flex justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setShowAddModal(false)}
-                  className="px-4 py-2 text-sm font-bold text-slate-300 hover:text-white"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-orange-600 hover:bg-orange-500 text-white text-sm font-bold rounded-xl transition-colors shadow-lg shadow-orange-600/20"
-                >
-                  Save Issue
-                </button>
-              </div>
-            </form>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Phone company *" htmlFor="issue-company">
+              <Input
+                id="issue-company"
+                type="text"
+                required
+                value={companyName}
+                onChange={(e) => setCompanyName(e.target.value)}
+                placeholder="e.g. Samsung"
+              />
+            </Field>
+            <Field label="IMEI *" htmlFor="issue-imei" hint={`${imei.length}/15 digits`}>
+              <Input
+                id="issue-imei"
+                type="text"
+                inputMode="numeric"
+                required
+                maxLength={15}
+                minLength={15}
+                pattern="\d{15}"
+                value={imei}
+                onChange={(e) => setImei(e.target.value.replace(/\D/g, "").slice(0, 15))}
+                placeholder="15-digit IMEI"
+                className="font-mono"
+              />
+            </Field>
           </div>
-        </div>
-      )}
-    </div>
+
+          <Field label="What is wrong with the phone? *" htmlFor="issue-problem">
+            <Textarea
+              id="issue-problem"
+              required
+              value={phoneIssue}
+              onChange={(e) => setPhoneIssue(e.target.value)}
+              placeholder="e.g. Screen cracked, battery drains fast"
+              rows={4}
+            />
+          </Field>
+
+          <div className="flex items-start gap-2 p-3 bg-brand-50 rounded-xl">
+            <Info size={16} className="text-brand-700 shrink-0 mt-0.5" aria-hidden="true" />
+            <p className="text-xs text-brand-700">Today's date and a unique ticket number are added automatically when you save.</p>
+          </div>
+        </form>
+      </Modal>
+    </Wrap>
   );
 };
 

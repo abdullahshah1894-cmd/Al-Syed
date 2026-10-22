@@ -50,6 +50,16 @@ const request = async (url, options = {}) => {
     if (window.location.pathname !== "/login") window.location.href = "/login";
     throw new Error("Your session has expired. Please log in again.");
   }
+  // Sliding session: the server sends a fresh token while you keep working
+  const renewed = res.headers.get("X-New-Token");
+  if (renewed) {
+    memoryToken = renewed;
+    try {
+      localStorage.setItem(TOKEN_KEY, renewed);
+    } catch {
+      // storage blocked: the in-memory token is used
+    }
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.message || err.error || res.statusText);
@@ -110,6 +120,7 @@ export const api = {
   login: (data) => send("POST", `${API_BASE}/auth/login`, data),
   getUsers: () => fetchJson(`${API_BASE}/auth/users`),
   createUser: (data) => send("POST", `${API_BASE}/auth/users`, data),
+  changePassword: (currentPassword, newPassword) => send("POST", `${API_BASE}/auth/password`, { currentPassword, newPassword }),
 
   // ── Mobile Issues ─────────────────────────────────
   getMobileIssues: () => fetchJson(`${API_BASE}/issues`),

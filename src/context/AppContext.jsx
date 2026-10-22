@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { api } from "../services/api";
 import { useAuth } from "./AuthContext";
 import { localDate } from "../utils/dates";
@@ -35,6 +35,7 @@ export const AppProvider = ({ children }) => {
   const [warranties, setWarranties] = useState([]);
   const [issues, setIssues] = useState([]);
   const [expenses, setExpenses] = useState([]);
+  const [activeSeller, setActiveSeller] = useState("All Sellers");
   const [suppliers, setSuppliers] = useState([]);
   const [supplierTransactions, setSupplierTransactions] = useState([]);
   const [backendOnline, setBackendOnline] = useState(false);
@@ -101,6 +102,7 @@ const normalizeProduct = (p) => {
     notes: s.notes || "",
     dueDate: s.due_date || s.dueDate || null,
     returns: s.returns || [],
+    balanceEffect: s.balance_effect ?? null,
     updatedAt: s.updated_at || s.updatedAt || null,
     createdAt: s.created_at || s.createdAt || new Date().toISOString(),
   });
@@ -194,7 +196,7 @@ const normalizeProduct = (p) => {
     description: e.description || "",
     sellerName: e.seller_name || "",
     paymentMethod: e.payment_method || "Cash",
-    expenseDate: e.expense_date || e.created_at?.slice(0, 10) || new Date().toISOString().slice(0, 10),
+    expenseDate: e.expense_date || (e.created_at ? localDate(e.created_at) : localDate()),
     createdAt: e.created_at || new Date().toISOString(),
   });
 
@@ -204,18 +206,18 @@ const normalizeProduct = (p) => {
     alert(`${what} was NOT saved.\n\n${err.message}\n\nNothing was lost on screen — please try again.`);
   };
 
-  const refreshProducts = async () => {
-    const data = await api.getProducts();
-    if (Array.isArray(data)) setProducts(data.map(normalizeProduct));
+  const requestSeq = useRef({ products: 0, customers: 0, warranties: 0, suppliers: 0 });
+  const latestOnly = async (key, load, apply) => {
+    const seq = ++requestSeq.current[key];
+    const data = await load();
+    if (seq === requestSeq.current[key]) apply(data);
   };
-  const refreshCustomers = async () => {
-    const data = await api.getCustomers();
-    if (Array.isArray(data)) setCustomers(data.map(normalizeCustomer));
-  };
-  const refreshWarranties = async () => {
-    const data = await api.getWarranties();
-    if (Array.isArray(data)) setWarranties(data.map(normalizeWarranty));
-  };
+  const refreshProducts = () =>
+    latestOnly("products", api.getProducts, (data) => Array.isArray(data) && setProducts(data.map(normalizeProduct)));
+  const refreshCustomers = () =>
+    latestOnly("customers", api.getCustomers, (data) => Array.isArray(data) && setCustomers(data.map(normalizeCustomer)));
+  const refreshWarranties = () =>
+    latestOnly("warranties", api.getWarranties, (data) => Array.isArray(data) && setWarranties(data.map(normalizeWarranty)));
 
   // Fetch all data from Supabase-backed backend once someone is logged in; clear it on logout
   const { token } = useAuth();
@@ -231,10 +233,12 @@ const normalizeProduct = (p) => {
       setExpenses([]);
       setSuppliers([]);
       setSupplierTransactions([]);
+      setActiveSeller("All Sellers");
     }
   }
   useEffect(() => {
     if (!token) return;
+    let cancelled = false;
     const fetchAllData = async () => {
       try {
         const [dbProducts, dbSales, dbCustomers, dbWarranties, dbIssues, dbExpenses, dbSettings, dbSuppliers] = await Promise.all([
@@ -247,6 +251,7 @@ const normalizeProduct = (p) => {
           api.getSettings(),
           api.getSuppliers(),
         ]);
+        if (cancelled) return;
 
         if (dbSuppliers && Array.isArray(dbSuppliers.suppliers)) {
           setSuppliers(dbSuppliers.suppliers.map(normalizeSupplier));
@@ -281,15 +286,14 @@ const normalizeProduct = (p) => {
       }
     };
     fetchAllData();
+    return () => {
+      cancelled = true;
+    };
   }, [token]);
 
   // Add new sale — saved to Supabase first; the screen only shows it once the database has it.
   // The backend marks IMEIs sold, reduces stock, creates warranties and updates the customer balance.
   const recordSale = async (newSaleData) => {
-    const billNumber =
-      newSaleData.billNumber ||
-      `INV-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(sales.length + 1).padStart(3, "0")}`;
-
     // Carry each item's cost so profit is stored with the sale
     const items = (newSaleData.items || []).map((item) => {
       const prod = products.find((p) => p.id === (item.productId || item.product || item.id));
@@ -305,14 +309,14 @@ const normalizeProduct = (p) => {
       customerId: newSaleData.customer || newSaleData.customerId || null,
       customerName: newSaleData.customerName || "Walk-in Customer",
       sellerName: newSaleData.sellerName || newSaleData.cashierName || "",
-      billNumber,
     };
+    delete formattedSale.billNumber;
 
     let saved;
     try {
       saved = await api.createSale(formattedSale);
     } catch (err) {
-      notifyError(`Sale ${billNumber}`, err);
+      notifyError("Sale", err);
       return null;
     }
 
@@ -450,7 +454,6 @@ const normalizeProduct = (p) => {
 
     if (customer) {
       const settlementRecord = {
-        billNumber: `PAY-${Date.now().toString().slice(-6)}`,
         customerId: customer.id,
         customerName: customer.name,
         customerPhone: customer.phone,
@@ -493,7 +496,7 @@ const normalizeProduct = (p) => {
         description: expenseData.description || null,
         seller_name: expenseData.sellerName || null,
         payment_method: expenseData.paymentMethod || "Cash",
-        expense_date: expenseData.expenseDate || new Date().toISOString().slice(0, 10),
+        expense_date: expenseData.expenseDate || localDate(),
       });
       const normalized = normalizeExpense(saved);
       setExpenses((prev) => [normalized, ...prev]);
@@ -728,7 +731,6 @@ const normalizeProduct = (p) => {
     }
   };
 
-  const [activeSeller, setActiveSeller] = useState("All Sellers");
 
   const filteredSales =
     activeSeller === "All Sellers" || activeSeller === "All"

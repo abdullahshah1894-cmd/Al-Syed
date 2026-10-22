@@ -18,8 +18,11 @@ export const formatWAPhone = (phone) => {
 // PNG blob of a DOM element (white background, 2x for sharp text)
 export const elementToPng = async (element) => {
   if (!element) throw new Error("Nothing to capture");
+  // iPhones refuse canvases above ~16.7 million pixels; long statements get a lower ratio instead of a blank image
+  const area = Math.max(1, element.scrollWidth * element.scrollHeight);
+  const pixelRatio = Math.max(1, Math.min(2, Math.sqrt(16e6 / area)));
   const blob = await toBlob(element, {
-    pixelRatio: 2,
+    pixelRatio,
     backgroundColor: "#ffffff",
     cacheBust: true,
     // Some browsers need the element's own size when it sits inside a scrolling modal

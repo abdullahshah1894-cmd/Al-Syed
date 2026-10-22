@@ -115,6 +115,13 @@ BEGIN
 
   v_items := COALESCE(v_sale.items, '[]'::jsonb);
 
+  PERFORM 1 FROM products
+   WHERE id IN (
+     SELECT COALESCE(e->>'productId', e->>'product')::uuid
+       FROM jsonb_array_elements(v_items) e
+      WHERE COALESCE(e->>'productId', e->>'product', '') ~* uuid_re)
+   ORDER BY id FOR UPDATE;
+
   -- Bill-level discount / tax are shared over the lines: refund = line price x (original bill total / lines value)
   SELECT COALESCE(sum(COALESCE(NULLIF(e->>'subtotal', '')::numeric,
                                COALESCE(NULLIF(e->>'unitSalePrice', '')::numeric, NULLIF(e->>'price', '')::numeric, 0)
@@ -144,6 +151,9 @@ BEGIN
       IF cardinality(v_ret_imeis) = 0 THEN
         v_ret_imeis := ARRAY(SELECT k FROM unnest(v_item_imeis) k WHERE NOT k = ANY(v_done_imeis)
                              LIMIT GREATEST(1, COALESCE(NULLIF(v_req->>'qty', '')::int, 1)));
+      END IF;
+      IF cardinality(v_ret_imeis) <> (SELECT count(DISTINCT k) FROM unnest(v_ret_imeis) k) THEN
+        RAISE EXCEPTION 'The same IMEI was chosen twice.';
       END IF;
       FOREACH v_key IN ARRAY v_ret_imeis LOOP
         IF NOT v_key = ANY(v_item_imeis) THEN RAISE EXCEPTION 'IMEI % is not on this bill line.', v_key; END IF;
@@ -233,7 +243,7 @@ BEGIN
          due_amount = v_new_due,
          paid_amount = GREATEST(0, COALESCE(paid_amount, 0) - v_cash_back),
          balance_effect = CASE WHEN v_sale.customer_id IS NOT NULL AND balance_effect IS NOT NULL
-                               THEN balance_effect - v_acct_red ELSE balance_effect END,
+                               THEN balance_effect - v_due_red ELSE balance_effect END,
          net_profit = CASE WHEN v_has_cost THEN COALESCE(net_profit, 0) - (v_refund - v_cost) ELSE net_profit END,
          payment_status = CASE WHEN v_new_total = 0 THEN 'returned'
                                WHEN v_new_due = 0 THEN 'paid'
@@ -353,6 +363,9 @@ BEGIN
 
   v_money_change := (p ? 'rates' AND jsonb_array_length(COALESCE(p->'rates', '[]'::jsonb)) > 0)
                     OR p ? 'discount_amount' OR p ? 'paid_amount';
+  IF COALESCE(p->>'discount_amount', '0') !~ '^[0-9]+(.[0-9]+)?$' OR COALESCE(p->>'paid_amount', '0') !~ '^[0-9]+(.[0-9]+)?$' THEN
+    RAISE EXCEPTION 'Discount and paid amount must be numbers of 0 or more.';
+  END IF;
   IF v_money_change AND jsonb_array_length(COALESCE(v_sale.returns, '[]'::jsonb)) > 0 THEN
     RAISE EXCEPTION 'This bill has returned items, so its amounts cannot be edited. You can still edit the customer, seller and notes.';
   END IF;
@@ -372,11 +385,17 @@ BEGIN
   IF v_sale.payment_method = 'Udhaar Settlement' THEN
     -- A payment receipt: only its amount can change
     v_paid := GREATEST(0, COALESCE(NULLIF(p->>'paid_amount', '')::numeric, v_sale.paid_amount));
+    IF v_paid <= 0 THEN RAISE EXCEPTION 'A payment receipt must be more than 0. Delete it instead.'; END IF;
     IF v_sale.customer_id IS NOT NULL THEN
       SELECT COALESCE(outstanding_balance, 0) INTO v_old_ob FROM customers WHERE id = v_sale.customer_id FOR UPDATE;
-      v_new_ob := GREATEST(0, v_old_ob - (v_paid - COALESCE(v_sale.paid_amount, 0)));
+      IF v_sale.balance_effect IS NOT NULL THEN
+        -- Balance as if this receipt never happened, then apply the new amount
+        v_new_ob := GREATEST(0, (v_old_ob - v_sale.balance_effect) - v_paid);
+        UPDATE sales SET balance_effect = v_new_ob - (v_old_ob - v_sale.balance_effect) WHERE id = p_sale;
+      ELSE
+        v_new_ob := GREATEST(0, v_old_ob - (v_paid - COALESCE(v_sale.paid_amount, 0)));
+      END IF;
       UPDATE customers SET outstanding_balance = v_new_ob, updated_at = v_now WHERE id = v_sale.customer_id;
-      UPDATE sales SET balance_effect = balance_effect + (v_new_ob - v_old_ob) WHERE id = p_sale AND balance_effect IS NOT NULL;
     END IF;
     UPDATE sales SET paid_amount = v_paid, updated_at = v_now WHERE id = p_sale RETURNING * INTO v_sale;
     RETURN to_jsonb(v_sale);
@@ -388,6 +407,9 @@ BEGIN
     v_item := v_items->v_idx;
     IF v_item IS NULL THEN RAISE EXCEPTION 'Item % is not on this bill.', v_idx + 1; END IF;
     v_qty := GREATEST(1, COALESCE(NULLIF(v_item->>'quantity', '')::numeric, NULLIF(v_item->>'qty', '')::numeric, 1));
+    IF COALESCE(v_rate->>'unitSalePrice', '') !~ '^[0-9]+(.[0-9]+)?$' THEN
+      RAISE EXCEPTION 'Invalid price for item %.', v_idx + 1;
+    END IF;
     v_items := jsonb_set(v_items, ARRAY[v_idx::text], v_item || jsonb_build_object(
       'unitSalePrice', GREATEST(0, (v_rate->>'unitSalePrice')::numeric),
       'price', GREATEST(0, (v_rate->>'unitSalePrice')::numeric),
@@ -412,9 +434,19 @@ BEGIN
   v_old_effect := COALESCE(v_sale.due_amount, 0) - GREATEST(0, COALESCE(v_sale.paid_amount, 0) - COALESCE(v_sale.grand_total, 0));
   v_new_effect := v_due - GREATEST(0, v_paid - v_total);
 
+  IF v_due > 0 AND v_sale.customer_id IS NULL THEN
+    RAISE EXCEPTION 'This bill has no customer, so it cannot be left with Rs % to pay.', v_due;
+  END IF;
   IF v_sale.customer_id IS NOT NULL THEN
     SELECT COALESCE(outstanding_balance, 0) INTO v_old_ob FROM customers WHERE id = v_sale.customer_id FOR UPDATE;
-    v_new_ob := GREATEST(0, v_old_ob + (v_new_effect - v_old_effect));
+    IF v_sale.balance_effect IS NOT NULL THEN
+      -- Balance without this bill, plus the bill's new effect
+      v_old_effect := v_sale.balance_effect;
+      v_new_ob := GREATEST(0, (v_old_ob - v_sale.balance_effect) + v_new_effect);
+      v_new_effect := v_new_ob - (v_old_ob - v_sale.balance_effect);
+    ELSE
+      v_new_ob := GREATEST(0, v_old_ob + (v_new_effect - v_old_effect));
+    END IF;
     UPDATE customers
        SET outstanding_balance = v_new_ob,
            total_purchases = GREATEST(0, COALESCE(total_purchases, 0) + (v_total - COALESCE(v_sale.grand_total, 0))),
@@ -430,7 +462,7 @@ BEGIN
     items = v_items, subtotal_amount = v_subtotal, tax_amount = v_tax, discount_amount = v_discount,
     grand_total = v_total, paid_amount = v_paid, due_amount = v_due,
     balance_effect = CASE WHEN v_sale.customer_id IS NOT NULL AND balance_effect IS NOT NULL
-                          THEN balance_effect + (v_new_ob - v_old_ob) ELSE balance_effect END,
+                          THEN v_new_effect ELSE balance_effect END,
     -- Profit only when the items carry their cost; otherwise it stays "unknown"
     net_profit = CASE WHEN v_cost > 0 THEN v_total - v_cost ELSE net_profit END,
     payment_status = CASE WHEN v_due = 0 THEN 'paid' WHEN v_paid > 0 THEN 'partial' ELSE 'unpaid' END,

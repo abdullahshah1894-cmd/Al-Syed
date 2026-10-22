@@ -1,4 +1,5 @@
 const supabase = require("../config/supabase");
+const { fetchAll } = require("../lib/fetchAll");
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const toUUID = (val) => (val && UUID_REGEX.test(String(val)) ? val : null);
@@ -27,17 +28,16 @@ const toRow = (body) => ({
 // Item rows without an invoice are left out: older builds saved one per scan with no link.
 exports.getLedgerEntries = async (req, res) => {
   try {
-    let query = supabase
-      .from("ledger_entries")
-      .select("*")
-      .or("type.neq.item,parent_invoice_id.not.is.null")
-      .order("created_at", { ascending: true });
-
-    if (req.query.from) query = query.gte("date", req.query.from);
-    if (req.query.to) query = query.lte("date", req.query.to);
-
-    const { data, error } = await query;
-    if (error) throw new Error(error.message);
+    const data = await fetchAll(() => {
+      let query = supabase
+        .from("ledger_entries")
+        .select("*")
+        .or("type.neq.item,parent_invoice_id.not.is.null")
+        .order("created_at", { ascending: true });
+      if (req.query.from) query = query.gte("date", req.query.from);
+      if (req.query.to) query = query.lte("date", req.query.to);
+      return query;
+    });
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -90,15 +90,8 @@ exports.setOpeningBalance = async (req, res) => {
     const { date, amount } = req.body;
     if (!date) return res.status(400).json({ error: "date is required" });
 
-    const { error: delError } = await supabase.from("ledger_entries").delete().eq("type", "opening").eq("date", date);
-    if (delError) throw new Error(delError.message);
-
-    const { data, error } = await supabase
-      .from("ledger_entries")
-      .insert([{ type: "opening", date, description: "Opening Balance", debit: num(amount) }])
-      .select()
-      .single();
-
+    // One row per day, written in a single statement (public.set_opening_balance)
+    const { data, error } = await supabase.rpc("set_opening_balance", { p_date: date, p_amount: num(amount) });
     if (error) throw new Error(error.message);
     res.json(data);
   } catch (err) {

@@ -2,23 +2,8 @@ import { useState, useMemo } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
 import { localDate, isBetween } from "../utils/dates";
 import { isSettlement, realSales, saleProfit, totalProfit as sumProfit, udhaarAdded } from "../utils/sales";
-import {
-  BarChart3,
-  TrendingUp,
-  DollarSign,
-  ShoppingBag,
-  Award,
-  Layers,
-  ArrowUpRight,
-  Sparkles,
-  PieChart,
-  Clock,
-  Wallet,
-  HandCoins,
-  Undo2,
-  Users,
-  User,
-} from "lucide-react";
+import { BarChart3, TrendingUp, DollarSign, ShoppingBag, Award, PieChart, Clock, Wallet, HandCoins, Undo2 } from "lucide-react";
+import { Page, PageHeader, Card, CardHeader, Stat, Segmented, TableWrap, Th, Td, EmptyState } from "../components/ui";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const TIMEFRAMES = ["Today", "Weekly", "Monthly", "Yearly"];
@@ -42,11 +27,23 @@ const expenseDay = (e) => e.expenseDate || (e.createdAt ? localDate(e.createdAt)
 // Return records carry the shop date ("date"); fall back to the timestamp
 const returnDay = (r) => (r?.date ? String(r.date).slice(0, 10) : r?.at ? localDate(r.at) : null);
 const inRange = (day, range) => !!day && (!range.from || day >= range.from) && (!range.to || day <= range.to);
+// Smallest "round" step (1, 1.5, 2, 2.5 ... x 10^n) times 4 that covers the value, for even axis steps
+const niceCeil = (value) => {
+  const step = Math.max(4, value) / 4;
+  const mag = 10 ** Math.floor(Math.log10(step));
+  const nice = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find((m) => m * mag >= step) || 10;
+  return nice * mag * 4;
+};
+// Axis labels: 2.5k, 1.2M
+const shortMoney = (n) => {
+  if (n >= 1e6) return `${+(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${+(n / 1e3).toFixed(1)}k`;
+  return `${Math.round(n)}`;
+};
 
-// Local-date bounds (YYYY-MM-DD, inclusive) of a timeframe; never later than today
-const periodRange = (timeframe) => {
-  const now = new Date();
-  const today = localDate(now);
+// Local-date bounds (YYYY-MM-DD, inclusive) of a timeframe; never later than today (YYYY-MM-DD)
+const periodRange = (timeframe, today) => {
+  const now = new Date(`${today}T12:00:00`);
   if (timeframe === "Today") return { from: today, to: today };
   if (timeframe === "Weekly") {
     const start = new Date(now);
@@ -93,13 +90,18 @@ const computeStats = (allSales, allExpenses, seller, range) => {
 };
 
 const SalesReports = () => {
-  const { allSales, allExpenses, products, shopSettings } = useApp();
+  const { allSales, allExpenses, products, shopSettings, activeSeller } = useApp();
   const [timeframe, setTimeframe] = useState("Weekly");
-  const [seller, setSeller] = useState("All");
-  const curr = shopSettings.currencySymbol;
+  // The seller follows the header seller picker until one is chosen here
+  const headerSeller = SELLERS.find((s) => sameName(s, activeSeller)) || "All";
+  const [sellerChoice, setSeller] = useState(null);
+  const seller = sellerChoice ?? headerSeller;
+  const curr = shopSettings.currencySymbol || "Rs.";
   const fmt = (n) => `${curr} ${Math.round(num(n)).toLocaleString()}`;
 
-  const range = useMemo(() => periodRange(timeframe), [timeframe]);
+  // Recomputed when the date changes too (the page can stay open past midnight)
+  const todayStr = localDate();
+  const range = useMemo(() => periodRange(timeframe, todayStr), [timeframe, todayStr]);
 
   const stats = useMemo(() => computeStats(allSales, allExpenses, seller, range), [allSales, allExpenses, seller, range]);
   const filteredSales = stats.sales;
@@ -162,10 +164,10 @@ const SalesReports = () => {
   const graphData = useMemo(() => {
     let buckets;
     let bucketOf;
-    const now = new Date();
+    const now = new Date(`${range.to}T12:00:00`);
     if (timeframe === "Today") {
       // 2-hour slots covering 8 AM - 10 PM, widened to include any earlier / later sale
-      const hours = filteredSales.map((s) => new Date(saleTime(s)).getHours());
+      const hours = filteredSales.map((s) => new Date(saleTime(s)).getHours()).filter(Number.isFinite);
       const first = Math.min(8, ...hours.map((h) => h - (h % 2)));
       const last = Math.max(22, ...hours.map((h) => h - (h % 2)));
       const slots = [];
@@ -177,8 +179,8 @@ const SalesReports = () => {
       const keys = [];
       buckets = [];
       for (let i = 6; i >= 0; i--) {
-        const d = new Date();
-        d.setDate(d.getDate() - i);
+        const d = new Date(now);
+        d.setDate(now.getDate() - i);
         keys.push(localDate(d));
         buckets.push({ label: i === 0 ? "Today" : d.toLocaleDateString("en-US", { weekday: "short" }) });
       }
@@ -208,458 +210,339 @@ const SalesReports = () => {
       data[idx].bills += 1;
     });
     return data.map((d) => ({ ...d, revenue: Math.round(d.revenue), profit: Math.round(d.profit) }));
-  }, [timeframe, filteredSales]);
+  }, [timeframe, filteredSales, range]);
 
   const maxGraphRevenue = Math.max(1, ...graphData.map((g) => g.revenue), ...graphData.map((g) => g.profit));
-  const scopeLabel = `${seller === "All" ? "All sellers" : seller} • ${TIMEFRAME_LABEL[timeframe]}`;
+  const scopeLabel = `${seller === "All" ? "All sellers" : seller} · ${TIMEFRAME_LABEL[timeframe]}`;
+  // Round the chart top up to a readable number so the axis shows clean steps
+  const chartMax = niceCeil(maxGraphRevenue);
+  const chartTicks = [4, 3, 2, 1, 0].map((i) => (chartMax * i) / 4);
 
   const compareRows = [
     { label: "Bills", key: "bills", format: (v) => v.toLocaleString() },
     { label: "Revenue", key: "revenue", format: fmt },
-    { label: "Gross Profit", key: "grossProfit", format: fmt },
-    { label: "Items Sold", key: "items", format: (v) => v.toLocaleString() },
-    { label: "Udhaar Given", key: "udhaarGiven", format: fmt, lowerIsBetter: true },
-    { label: "Udhaar Collected", key: "udhaarCollected", format: fmt },
+    { label: "Gross profit", key: "grossProfit", format: fmt },
+    { label: "Items sold", key: "items", format: (v) => v.toLocaleString() },
+    { label: "Udhaar given", key: "udhaarGiven", format: fmt, lowerIsBetter: true },
+    { label: "Udhaar collected", key: "udhaarCollected", format: fmt },
     { label: "Returns", key: "returnsAmount", format: fmt, lowerIsBetter: true, sub: (r) => `${r.returnsCount} return(s)` },
   ];
+  const SHARE_COLORS = ["bg-brand-500", "bg-saffron-400"];
 
   return (
-    <div className="p-6 space-y-6 text-slate-100 min-h-screen pb-12">
-      {/* Header & Controls */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-900/90 border border-slate-800 rounded-3xl p-6 shadow-xl backdrop-blur-md">
-        <div>
-          <div className="flex items-center gap-3 mb-1">
-            <div className="p-2.5 bg-indigo-600/20 border border-indigo-500/30 rounded-2xl text-indigo-400">
-              <BarChart3 size={24} />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold tracking-tight text-white">Sales & Performance Analytics</h1>
-              <p className="text-xs text-slate-400">
-                Revenue, profit, Udhaar, returns and top products — {scopeLabel}
-              </p>
-            </div>
-          </div>
-        </div>
+    <Page>
+      <PageHeader title="Sales reports" description={`Revenue, profit, Udhaar, returns and top products · ${scopeLabel}`} />
 
-        <div className="flex flex-col sm:flex-row gap-2 self-start lg:self-auto">
-          {/* Seller selector */}
-          <div className="flex items-center gap-1.5 bg-slate-950 p-1.5 rounded-2xl border border-slate-800">
-            {["All", ...SELLERS].map((s) => (
-              <button
-                key={s}
-                onClick={() => setSeller(s)}
-                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all duration-200 flex items-center gap-1.5 ${
-                  seller === s
-                    ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/30"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-                }`}
-              >
-                {s === "All" ? <Users size={13} /> : <User size={13} />}
-                {s === "All" ? "All Sellers" : s}
-              </button>
-            ))}
-          </div>
-
-          {/* Timeframe Filter Buttons */}
-          <div className="flex items-center gap-1.5 bg-slate-950 p-1.5 rounded-2xl border border-slate-800">
-            {TIMEFRAMES.map((tf) => (
-              <button
-                key={tf}
-                onClick={() => setTimeframe(tf)}
-                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all duration-200 ${
-                  timeframe === tf
-                    ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/30"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-                }`}
-              >
-                {tf}
-              </button>
-            ))}
-          </div>
-        </div>
+      {/* Timeframe and seller */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
+        <Segmented
+          options={TIMEFRAMES.map((tf) => ({ value: tf, label: TIMEFRAME_LABEL[tf] }))}
+          value={timeframe}
+          onChange={setTimeframe}
+          className="self-start"
+        />
+        <Segmented
+          options={["All", ...SELLERS].map((s) => ({ value: s, label: s === "All" ? "All sellers" : s }))}
+          value={seller}
+          onChange={setSeller}
+          className="self-start"
+        />
       </div>
 
-      {/* KPI Cards Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Total Revenue */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-emerald-500/30 transition-all">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-xl group-hover:bg-emerald-500/10 transition-all" />
-          <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Sales Revenue</span>
-            <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400 border border-emerald-500/20">
-              <DollarSign size={16} />
-            </div>
-          </div>
-          <div className="text-2xl font-extrabold text-white tracking-tight">{fmt(stats.revenue)}</div>
-          <div className="flex items-center gap-1 mt-2 text-xs text-emerald-400 font-medium">
-            <ArrowUpRight size={14} />
-            <span>{stats.bills} bill(s)</span>
-          </div>
-        </div>
-
-        {/* Gross Profit */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-indigo-500/30 transition-all">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/5 rounded-full blur-xl group-hover:bg-indigo-500/10 transition-all" />
-          <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Gross Profit</span>
-            <div className="p-2 bg-indigo-500/10 rounded-xl text-indigo-400 border border-indigo-500/20">
-              <TrendingUp size={16} />
-            </div>
-          </div>
-          <div className="text-2xl font-extrabold text-indigo-400 tracking-tight">{fmt(stats.grossProfit)}</div>
-          <div className="flex items-center gap-1 mt-2 text-xs text-indigo-300 font-medium">
-            <Sparkles size={14} />
-            <span>{grossMargin}% gross margin</span>
-          </div>
-          {stats.salesWithoutCost > 0 && (
-            <div className="mt-1 text-[11px] text-amber-400 font-medium">
-              {stats.salesWithoutCost} sale(s) without cost data
-            </div>
-          )}
-        </div>
-
-        {/* Expenses */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-amber-500/30 transition-all">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-amber-500/5 rounded-full blur-xl group-hover:bg-amber-500/10 transition-all" />
-          <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Expenses</span>
-            <div className="p-2 bg-amber-500/10 rounded-xl text-amber-400 border border-amber-500/20">
-              <Wallet size={16} />
-            </div>
-          </div>
-          <div className="text-2xl font-extrabold text-amber-400 tracking-tight">{fmt(stats.expenses)}</div>
-          <div className="mt-2 text-xs text-amber-300 font-medium">
-            {seller === "All" ? "All expenses in this period" : `Expenses saved under ${seller}`}
-          </div>
-          {stats.unassignedExpenses > 0 && (
-            <div className="mt-1 text-[11px] text-slate-400">
-              + {fmt(stats.unassignedExpenses)} with no seller (not included)
-            </div>
-          )}
-        </div>
-
-        {/* Net Profit (gross profit minus expenses) */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-rose-500/30 transition-all">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-rose-500/5 rounded-full blur-xl group-hover:bg-rose-500/10 transition-all" />
-          <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Net Profit</span>
-            <div className="p-2 bg-rose-500/10 rounded-xl text-rose-400 border border-rose-500/20">
-              <TrendingUp size={16} />
-            </div>
-          </div>
-          <div className={`text-2xl font-extrabold tracking-tight ${stats.netProfit < 0 ? "text-rose-400" : "text-white"}`}>
-            {fmt(stats.netProfit)}
-          </div>
-          <div className="mt-2 text-xs text-rose-300 font-medium">
-            Gross profit − {fmt(stats.expenses)} expenses
-          </div>
-        </div>
-
-        {/* Units Sold */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-cyan-500/30 transition-all">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-cyan-500/5 rounded-full blur-xl group-hover:bg-cyan-500/10 transition-all" />
-          <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Items Sold</span>
-            <div className="p-2 bg-cyan-500/10 rounded-xl text-cyan-400 border border-cyan-500/20">
-              <ShoppingBag size={16} />
-            </div>
-          </div>
-          <div className="text-2xl font-extrabold text-white tracking-tight">
-            {stats.items.toLocaleString()} <span className="text-sm font-normal text-slate-400">Items</span>
-          </div>
-          <div className="flex items-center gap-1 mt-2 text-xs text-cyan-400 font-medium">
-            <Layers size={14} />
-            <span>
-              {categorySplit.length} categor{categorySplit.length === 1 ? "y" : "ies"} • avg bill {fmt(stats.avgBill)}
-            </span>
-          </div>
-        </div>
-
-        {/* Udhaar Given */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-rose-500/30 transition-all">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-rose-500/5 rounded-full blur-xl group-hover:bg-rose-500/10 transition-all" />
-          <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Udhaar Given</span>
-            <div className="p-2 bg-rose-500/10 rounded-xl text-rose-400 border border-rose-500/20">
-              <Clock size={16} />
-            </div>
-          </div>
-          <div className="text-2xl font-extrabold text-rose-400 tracking-tight">{fmt(stats.udhaarGiven)}</div>
-          <div className="mt-2 text-xs text-slate-400 font-medium">
-            Still unpaid on {stats.sales.filter((s) => udhaarAdded(s) > 0).length} bill(s)
-          </div>
-        </div>
-
-        {/* Udhaar Collected */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-emerald-500/30 transition-all">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-xl group-hover:bg-emerald-500/10 transition-all" />
-          <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Udhaar Collected</span>
-            <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400 border border-emerald-500/20">
-              <HandCoins size={16} />
-            </div>
-          </div>
-          <div className="text-2xl font-extrabold text-emerald-400 tracking-tight">{fmt(stats.udhaarCollected)}</div>
-          <div className="mt-2 text-xs text-slate-400 font-medium">{stats.collections} payment(s) received</div>
-        </div>
-
-        {/* Returns */}
-        <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden group hover:border-orange-500/30 transition-all">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-orange-500/5 rounded-full blur-xl group-hover:bg-orange-500/10 transition-all" />
-          <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">
-            <span>Returns</span>
-            <div className="p-2 bg-orange-500/10 rounded-xl text-orange-400 border border-orange-500/20">
-              <Undo2 size={16} />
-            </div>
-          </div>
-          <div className="text-2xl font-extrabold text-orange-300 tracking-tight">{fmt(stats.returnsAmount)}</div>
-          <div className="mt-2 text-xs text-slate-400 font-medium">{stats.returnsCount} return(s) in this period</div>
-        </div>
+      {/* Figures */}
+      <div className="grid grid-cols-1 min-[420px]:grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4">
+        <Stat label="Sales revenue" icon={DollarSign} value={fmt(stats.revenue)} hint={`${stats.bills} bill(s)`} />
+        <Stat
+          label="Gross profit"
+          icon={TrendingUp}
+          tone={stats.grossProfit < 0 ? "saffron" : "paid"}
+          value={fmt(stats.grossProfit)}
+          hint={
+            <>
+              {grossMargin}% gross margin
+              {stats.salesWithoutCost > 0 && (
+                <span className="block text-saffron-700">{stats.salesWithoutCost} sale(s) without cost data</span>
+              )}
+            </>
+          }
+        />
+        <Stat
+          label="Expenses"
+          icon={Wallet}
+          value={fmt(stats.expenses)}
+          hint={
+            <>
+              {seller === "All" ? "All expenses in this period" : `Expenses saved under ${seller}`}
+              {stats.unassignedExpenses > 0 && (
+                <span className="block">+ {fmt(stats.unassignedExpenses)} with no seller (not included)</span>
+              )}
+            </>
+          }
+        />
+        <Stat
+          label="Net profit"
+          icon={TrendingUp}
+          tone={stats.netProfit < 0 ? "saffron" : "neutral"}
+          value={fmt(stats.netProfit)}
+          hint={`Gross profit − ${fmt(stats.expenses)} expenses`}
+        />
+        <Stat
+          label="Items sold"
+          icon={ShoppingBag}
+          value={stats.items.toLocaleString()}
+          hint={`${categorySplit.length} categor${categorySplit.length === 1 ? "y" : "ies"} · average bill ${fmt(stats.avgBill)}`}
+        />
+        <Stat
+          label="Udhaar given"
+          icon={Clock}
+          tone={stats.udhaarGiven > 0 ? "khata" : "neutral"}
+          value={fmt(stats.udhaarGiven)}
+          hint={`Credit on ${stats.sales.filter((s) => udhaarAdded(s) > 0).length} bill(s) in this period`}
+        />
+        <Stat
+          label="Udhaar collected"
+          icon={HandCoins}
+          tone="paid"
+          value={fmt(stats.udhaarCollected)}
+          hint={`${stats.collections} payment(s) received`}
+        />
+        <Stat
+          label="Returns"
+          icon={Undo2}
+          tone={stats.returnsCount > 0 ? "saffron" : "neutral"}
+          value={fmt(stats.returnsAmount)}
+          hint={`${stats.returnsCount} return(s) in this period`}
+        />
       </div>
 
-      {/* Main Grid: Sales Trend Graph & Top 5 Best-Selling Products */}
+      {/* Trend chart and top products */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Sales Performance Chart (2 cols wide on desktop) */}
-        <div className="lg:col-span-2 bg-slate-900/90 border border-slate-800 rounded-3xl p-6 shadow-xl flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-6">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-indigo-500/10 text-indigo-400 rounded-xl">
-                  <BarChart3 size={20} />
-                </div>
-                <div>
-                  <h2 className="font-bold text-slate-100 text-lg">Sales & Profit Trend</h2>
-                  <p className="text-xs text-slate-400">{scopeLabel}</p>
-                </div>
+        <Card className="lg:col-span-2 flex flex-col min-w-0">
+          <CardHeader
+            title="Sales and profit"
+            description={scopeLabel}
+            actions={
+              <div className="flex items-center gap-4 text-xs font-medium text-ink-soft">
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-brand-500 inline-block" aria-hidden="true" /> Revenue
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-paid-400 inline-block" aria-hidden="true" /> Profit
+                </span>
               </div>
-              <div className="flex items-center gap-4 text-xs font-medium">
-                <div className="flex items-center gap-1.5">
-                  <span className="w-3 h-3 rounded-full bg-indigo-500 inline-block" />
-                  <span className="text-slate-300">Revenue</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-3 h-3 rounded-full bg-emerald-400 inline-block" />
-                  <span className="text-slate-300">Profit</span>
-                </div>
+            }
+          />
+
+          {filteredSales.length === 0 ? (
+            <EmptyState icon={BarChart3} title="No sales in this period" description="Pick a longer period or another seller to see the trend." />
+          ) : (
+            <div className="flex gap-2 sm:gap-3">
+              {/* Y axis */}
+              <div className="relative h-64 w-10 sm:w-12 shrink-0 text-[11px] text-muted tabular-nums" aria-hidden="true">
+                {chartTicks.map((t, i) => (
+                  <span key={i} className="absolute right-0 -translate-y-1/2 leading-none" style={{ top: `${(i / 4) * 100}%` }}>
+                    {shortMoney(t)}
+                  </span>
+                ))}
               </div>
-            </div>
 
-            {/* Custom Bar Chart Visualization */}
-            <div className="h-64 flex items-end justify-between gap-2 sm:gap-4 pt-6 pb-2 px-2 border-b border-slate-800/80">
-              {graphData.map((item, index) => {
-                const revHeightPercent = item.revenue > 0 ? Math.max(2, Math.round((item.revenue / maxGraphRevenue) * 100)) : 0;
-                const profitHeightPercent = item.profit > 0 ? Math.max(2, Math.round((item.profit / maxGraphRevenue) * 100)) : 0;
-                return (
-                  <div key={index} className="flex-1 flex flex-col items-center gap-2 group h-full justify-end">
-                    {/* Bar pair container */}
-                    <div className="w-full flex items-end justify-center gap-1.5 h-full relative">
-                      {/* Tooltip on hover */}
-                      <div className="absolute -top-14 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-950 border border-slate-700 text-[10px] p-2 rounded-xl shadow-2xl z-20 pointer-events-none whitespace-nowrap">
-                        <div className="text-indigo-400 font-bold">Rev: {fmt(item.revenue)}</div>
-                        <div className="text-emerald-400 font-bold">Profit: {fmt(item.profit)}</div>
-                        <div className="text-slate-400">{item.bills} bill(s)</div>
-                      </div>
-
-                      {/* Revenue Bar */}
+              <div className="flex-1 min-w-0 overflow-x-auto custom-scrollbar">
+                <div style={{ minWidth: `${graphData.length * 40}px` }}>
+                  {/* Plot with grid lines */}
+                  <div className="relative h-64">
+                    {chartTicks.map((t, i) => (
                       <div
-                        style={{ height: `${revHeightPercent}%` }}
-                        className="w-1/2 max-w-[28px] bg-gradient-to-t from-indigo-700 to-indigo-500 rounded-t-lg transition-all duration-500 group-hover:brightness-125"
+                        key={i}
+                        className={`absolute inset-x-0 border-t ${i === 4 ? "border-line-strong" : "border-line border-dashed"}`}
+                        style={{ top: `${(i / 4) * 100}%` }}
+                        aria-hidden="true"
                       />
-                      {/* Profit Bar */}
-                      <div
-                        style={{ height: `${profitHeightPercent}%` }}
-                        className="w-1/2 max-w-[28px] bg-gradient-to-t from-emerald-600 to-emerald-400 rounded-t-lg transition-all duration-500 group-hover:brightness-125"
-                      />
+                    ))}
+                    <div className="absolute inset-0 flex items-end gap-1 sm:gap-3 px-1">
+                      {graphData.map((item, index) => {
+                        const revHeightPercent = item.revenue > 0 ? Math.max(1, (item.revenue / chartMax) * 100) : 0;
+                        const profitHeightPercent = item.profit > 0 ? Math.max(1, (item.profit / chartMax) * 100) : 0;
+                        return (
+                          <div
+                            key={index}
+                            className="group relative flex-1 h-full flex items-end justify-center gap-0.5 sm:gap-1"
+                          >
+                            <span className="sr-only">{`${item.label}: revenue ${fmt(item.revenue)}, profit ${fmt(item.profit)}, ${item.bills} bill(s)`}</span>
+                            {/* Hover details */}
+                            <div
+                              className={`pointer-events-none absolute top-1 z-20 hidden group-hover:block ${
+                                index === 0 ? "left-0" : index === graphData.length - 1 ? "right-0" : "left-1/2 -translate-x-1/2"
+                              } whitespace-nowrap rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] shadow-pop`}
+                            >
+                              <div className="font-semibold text-ink">{item.label}</div>
+                              <div className="text-ink-soft">Revenue {fmt(item.revenue)}</div>
+                              <div className="text-ink-soft">Profit {fmt(item.profit)}</div>
+                              <div className="text-muted">{item.bills} bill(s)</div>
+                            </div>
+                            <div
+                              style={{ height: `${revHeightPercent}%` }}
+                              className="w-1/2 max-w-[22px] rounded-t bg-brand-500 group-hover:bg-brand-600 transition-colors"
+                            />
+                            <div
+                              style={{ height: `${profitHeightPercent}%` }}
+                              className="w-1/2 max-w-[22px] rounded-t bg-paid-400 group-hover:bg-paid-500 transition-colors"
+                            />
+                          </div>
+                        );
+                      })}
                     </div>
-                    {/* Label */}
-                    <span className="text-[11px] font-bold text-slate-400 group-hover:text-slate-100 transition-colors text-center">
-                      {item.label}
-                    </span>
                   </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="mt-4 flex items-center justify-between text-xs text-slate-400 pt-2">
-            <span>Showing <strong>{scopeLabel}</strong></span>
-            <span className="text-indigo-400 font-semibold">{filteredSales.length} bill(s) recorded</span>
-          </div>
-        </div>
-
-        {/* Top 5 Best Selling Products Card */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 bg-amber-500/10 text-amber-400 rounded-xl">
-                <Award size={20} />
-              </div>
-              <div>
-                <h2 className="font-bold text-slate-100 text-base">Top 5 Best-Selling Products</h2>
-                <p className="text-xs text-slate-400">Ranked by quantity sold (returns taken off)</p>
+                  {/* X axis labels */}
+                  <div className="flex gap-1 sm:gap-3 px-1 pt-2">
+                    {graphData.map((item, index) => (
+                      <span key={index} className="flex-1 text-center text-[11px] font-medium text-ink-soft leading-tight">
+                        {item.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
-          <div className="space-y-4">
-            {topProducts.length === 0 ? (
-              <div className="text-center py-8 text-slate-500 text-xs">No sales recorded in this period.</div>
-            ) : (
-              topProducts.map((item, index) => (
-                <div key={item.name} className="space-y-1.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-2 max-w-[65%] truncate">
+          <div className="mt-4 pt-3 border-t border-line flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+            <span>
+              Showing <span className="font-semibold text-ink-soft">{scopeLabel}</span>
+            </span>
+            <span className="font-semibold text-ink-soft">{filteredSales.length} bill(s) recorded</span>
+          </div>
+        </Card>
+
+        {/* Top 5 products */}
+        <Card>
+          <CardHeader title="Top 5 products" description="By quantity sold, returns taken off" />
+          {topProducts.length === 0 ? (
+            <EmptyState icon={Award} title="No sales in this period" description="Best sellers will show here once bills are made." />
+          ) : (
+            <ol className="space-y-4">
+              {topProducts.map((item, index) => (
+                <li key={item.name} className="space-y-1.5">
+                  <div className="flex items-start justify-between gap-3 text-sm">
+                    <div className="flex items-center gap-2 min-w-0">
                       <span
-                        className={`w-5 h-5 rounded-lg flex items-center justify-center font-black text-[10px] ${
-                          index === 0
-                            ? "bg-amber-500 text-slate-950"
-                            : index === 1
-                            ? "bg-slate-300 text-slate-950"
-                            : index === 2
-                            ? "bg-amber-700 text-white"
-                            : "bg-slate-800 text-slate-400"
+                        className={`w-6 h-6 shrink-0 rounded-md flex items-center justify-center text-xs font-bold ${
+                          index === 0 ? "bg-brand-600 text-white" : "bg-sunken text-ink-soft"
                         }`}
                       >
-                        #{index + 1}
+                        {index + 1}
                       </span>
-                      <span className="font-semibold text-slate-200 truncate">{item.name}</span>
+                      <span className="font-medium text-ink truncate">{item.name}</span>
                     </div>
-                    <div className="text-right">
-                      <span className="font-extrabold text-emerald-400">{fmt(item.revenue)}</span>
-                      <span className="text-slate-400 text-[10px] ml-1.5">({item.qty} pcs)</span>
+                    <div className="text-right shrink-0">
+                      <span className="font-semibold text-ink tabular-nums">{fmt(item.revenue)}</span>
+                      <span className="block text-xs text-muted">{item.qty} pcs</span>
                     </div>
                   </div>
-
-                  {/* Progress Bar */}
-                  <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
-                    <div
-                      className={`h-full rounded-full transition-all duration-700 ${
-                        index === 0
-                          ? "bg-gradient-to-r from-amber-500 to-amber-300"
-                          : index === 1
-                          ? "bg-gradient-to-r from-indigo-500 to-indigo-300"
-                          : "bg-gradient-to-r from-cyan-500 to-emerald-400"
-                      }`}
-                      style={{ width: `${item.percent}%` }}
-                    />
+                  <div className="w-full bg-sunken rounded-full h-1.5 overflow-hidden">
+                    <div className="h-full rounded-full bg-brand-500" style={{ width: `${item.percent}%` }} />
                   </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </Card>
       </div>
 
-      {/* Category split & seller comparison */}
+      {/* Category split and seller comparison */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-4">
-          <div className="flex items-center gap-2.5 border-b border-slate-800 pb-4">
-            <div className="p-2 bg-indigo-500/10 text-indigo-400 rounded-xl">
-              <PieChart size={20} />
-            </div>
-            <div>
-              <h2 className="font-bold text-slate-100 text-base">Sales by Category</h2>
-              <p className="text-xs text-slate-400">Share of item revenue</p>
-            </div>
-          </div>
+        <Card>
+          <CardHeader title="Sales by category" description="Share of item revenue" />
           {categorySplit.length === 0 ? (
-            <div className="text-center py-8 text-slate-500 text-xs">No sales recorded in this period.</div>
+            <EmptyState icon={PieChart} title="No sales in this period" />
           ) : (
-            <div className="space-y-3">
+            <ul className="space-y-3">
               {categorySplit.map((c) => (
-                <div key={c.name}>
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-slate-200 truncate">
-                      {c.name} <span className="text-slate-500 font-normal">({c.qty} pcs)</span>
+                <li key={c.name}>
+                  <div className="flex items-baseline justify-between gap-3 text-sm">
+                    <span className="font-medium text-ink truncate min-w-0">
+                      {c.name} <span className="text-muted font-normal">({c.qty} pcs)</span>
                     </span>
-                    <span className="font-bold text-slate-100 shrink-0">
-                      {fmt(c.revenue)} <span className="text-slate-500 font-normal">{c.percent}%</span>
+                    <span className="font-semibold text-ink shrink-0 tabular-nums">
+                      {fmt(c.revenue)} <span className="text-muted font-normal text-xs">{c.percent}%</span>
                     </span>
                   </div>
-                  <div className="w-full bg-slate-950 rounded-full h-2 mt-1 overflow-hidden border border-slate-800">
-                    <div className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400" style={{ width: `${c.percent}%` }} />
+                  <div className="w-full bg-sunken rounded-full h-1.5 mt-1.5 overflow-hidden">
+                    <div className="h-full rounded-full bg-brand-500" style={{ width: `${c.percent}%` }} />
                   </div>
-                </div>
+                </li>
               ))}
-            </div>
+            </ul>
           )}
-        </div>
+        </Card>
 
-        <div className="lg:col-span-2 bg-slate-900/90 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 bg-emerald-500/10 text-emerald-400 rounded-xl">
-                <Users size={20} />
-              </div>
-              <div>
-                <h2 className="font-bold text-slate-100 text-base">{SELLERS.join(" vs ")}</h2>
-                <p className="text-xs text-slate-400">{TIMEFRAME_LABEL[timeframe]} • side by side</p>
-              </div>
-            </div>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="text-slate-400 uppercase">
-                <tr>
-                  <th className="p-3 font-semibold">Figure</th>
-                  {comparison.map((c) => (
-                    <th key={c.name} className="p-3 font-semibold text-right">{c.name}</th>
-                  ))}
-                  <th className="p-3 font-semibold w-1/3">Share</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {compareRows.map((row) => {
-                  const values = comparison.map((c) => num(c[row.key]));
-                  const total = values.reduce((a, b) => a + Math.max(0, b), 0);
-                  const best = values.some((v) => v !== values[0])
-                    ? row.lowerIsBetter
-                      ? Math.min(...values)
-                      : Math.max(...values)
-                    : null;
-                  return (
-                    <tr key={row.key}>
-                      <td className="p-3 font-semibold text-slate-300">{row.label}</td>
-                      {comparison.map((c, i) => (
-                        <td key={c.name} className={`p-3 text-right font-bold ${values[i] === best ? "text-emerald-400" : "text-slate-200"}`}>
-                          {row.format(values[i])}
-                          {row.sub && <div className="text-[10px] text-slate-500 font-normal">{row.sub(c)}</div>}
-                        </td>
-                      ))}
-                      <td className="p-3">
-                        {total > 0 ? (
-                          <div className="flex h-2 rounded-full overflow-hidden bg-slate-950 border border-slate-800">
-                            {values.map((v, i) => (
-                              <div
-                                key={comparison[i].name}
-                                className={i === 0 ? "bg-indigo-500" : "bg-amber-400"}
-                                style={{ width: `${(Math.max(0, v) / total) * 100}%` }}
-                                title={`${comparison[i].name}: ${Math.round((Math.max(0, v) / total) * 100)}%`}
-                              />
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="text-slate-600">—</span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div className="flex items-center gap-4 text-[11px] text-slate-400">
+        <Card className="lg:col-span-2 min-w-0">
+          <CardHeader title={SELLERS.join(" vs ")} description={`${TIMEFRAME_LABEL[timeframe]} · side by side`} />
+          <TableWrap>
+            <thead>
+              <tr>
+                <Th>Figure</Th>
+                {comparison.map((c) => (
+                  <Th key={c.name} className="text-right">
+                    {c.name}
+                  </Th>
+                ))}
+                <Th className="w-1/3 min-w-[7rem]">Share</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {compareRows.map((row) => {
+                const values = comparison.map((c) => num(c[row.key]));
+                const total = values.reduce((a, b) => a + Math.max(0, b), 0);
+                const best = values.some((v) => v !== values[0])
+                  ? row.lowerIsBetter
+                    ? Math.min(...values)
+                    : Math.max(...values)
+                  : null;
+                return (
+                  <tr key={row.key}>
+                    <Td className="font-medium text-ink-soft whitespace-nowrap">{row.label}</Td>
+                    {comparison.map((c, i) => (
+                      <Td
+                        key={c.name}
+                        className={`text-right tabular-nums whitespace-nowrap ${values[i] === best ? "text-paid-600 font-bold" : "text-ink font-semibold"}`}
+                      >
+                        {row.format(values[i])}
+                        {row.sub && <div className="text-[11px] text-muted font-normal">{row.sub(c)}</div>}
+                      </Td>
+                    ))}
+                    <Td>
+                      {total > 0 ? (
+                        <div className="flex h-2 rounded-full overflow-hidden bg-sunken">
+                          {values.map((v, i) => (
+                            <div
+                              key={comparison[i].name}
+                              className={SHARE_COLORS[i % SHARE_COLORS.length]}
+                              style={{ width: `${(Math.max(0, v) / total) * 100}%` }}
+                              title={`${comparison[i].name}: ${Math.round((Math.max(0, v) / total) * 100)}%`}
+                            />
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-muted">—</span>
+                      )}
+                    </Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </TableWrap>
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-soft">
             {comparison.map((c, i) => (
               <span key={c.name} className="flex items-center gap-1.5">
-                <span className={`w-2.5 h-2.5 rounded-full inline-block ${i === 0 ? "bg-indigo-500" : "bg-amber-400"}`} />
+                <span className={`w-2.5 h-2.5 rounded-full inline-block ${SHARE_COLORS[i % SHARE_COLORS.length]}`} aria-hidden="true" />
                 {c.name}
               </span>
             ))}
-            <span className="text-slate-500">Green = better figure</span>
+            <span className="text-muted">Green figure = the better one</span>
           </div>
-        </div>
+        </Card>
       </div>
-    </div>
+    </Page>
   );
 };
 

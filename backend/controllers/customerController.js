@@ -1,14 +1,11 @@
 const supabase = require("../config/supabase");
+const { fetchAll } = require("../lib/fetchAll");
 
 exports.getCustomers = async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("customers")
-      .select("*")
-      .eq("is_deleted", false)
-      .order("created_at", { ascending: false });
-
-    if (error) throw new Error(error.message);
+    const data = await fetchAll(() =>
+      supabase.from("customers").select("*").eq("is_deleted", false).order("created_at", { ascending: false })
+    );
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });

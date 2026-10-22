@@ -25,7 +25,9 @@ export const saleProfit = (s) => {
 // Sum of profit over sales; sales with unknown cost add nothing
 export const totalProfit = (sales) => (sales || []).reduce((sum, s) => sum + (saleProfit(s) || 0), 0);
 
-export const itemCount = (s) => (s?.items || []).reduce((sum, i) => sum + itemQty(i), 0);
+// Units still sold on the bill (returned units are not counted)
+export const itemCount = (s) =>
+  (s?.items || []).reduce((sum, i) => sum + Math.max(0, itemQty(i) - Number(i.returnedQty || 0)), 0);
 
 // Does this sale belong to this customer? A sale with a customerId only matches that customer;
 // name / phone matching is only used for old sales saved without a customerId.
