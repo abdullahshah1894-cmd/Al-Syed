@@ -9,6 +9,9 @@ const { Pool } = require("pg");
 
 const SQL = `
 ALTER TABLE sales ADD COLUMN IF NOT EXISTS due_date DATE;
+-- How much this bill / receipt actually changed the customer's Udhaar (after the 0 floor);
+-- returns, edits and deletes use it to reverse exactly that amount. NULL on older bills.
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS balance_effect NUMERIC(14,2);
 
 CREATE OR REPLACE FUNCTION public.create_sale(p JSONB) RETURNS JSONB
 LANGUAGE plpgsql AS $fn$
@@ -38,6 +41,8 @@ DECLARE
   v_due NUMERIC := COALESCE(NULLIF(p->>'due_amount', '')::numeric, 0);
   v_sale sales%ROWTYPE;
   v_w JSONB;
+  v_old_ob NUMERIC;
+  v_new_ob NUMERIC;
 BEGIN
   v_bill := v_base_bill;
   IF COALESCE(p->>'customer_id', '') ~* uuid_re THEN v_cust := (p->>'customer_id')::uuid; END IF;
@@ -175,18 +180,20 @@ BEGIN
 
   -- Customer balance in one statement (no read-then-write race)
   IF v_cust IS NOT NULL THEN
+    SELECT COALESCE(outstanding_balance, 0) INTO v_old_ob FROM customers WHERE id = v_cust FOR UPDATE;
     IF v_sale.payment_method = 'Udhaar Settlement' THEN
-      UPDATE customers
-         SET outstanding_balance = GREATEST(0, COALESCE(outstanding_balance, 0) - v_paid), updated_at = v_now
-       WHERE id = v_cust;
+      v_new_ob := GREATEST(0, v_old_ob - v_paid);
+      UPDATE customers SET outstanding_balance = v_new_ob, updated_at = v_now WHERE id = v_cust;
     ELSE
       -- Anything paid above this bill goes against the old Udhaar
+      v_new_ob := GREATEST(0, v_old_ob + v_due - GREATEST(0, v_paid - v_total));
       UPDATE customers
          SET total_purchases = COALESCE(total_purchases, 0) + v_total,
-             outstanding_balance = GREATEST(0, COALESCE(outstanding_balance, 0) + v_due - GREATEST(0, v_paid - v_total)),
+             outstanding_balance = v_new_ob,
              updated_at = v_now
        WHERE id = v_cust;
     END IF;
+    UPDATE sales SET balance_effect = v_new_ob - v_old_ob WHERE id = v_sale_id RETURNING * INTO v_sale;
   END IF;
 
   RETURN to_jsonb(v_sale);

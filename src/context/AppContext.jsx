@@ -35,6 +35,8 @@ export const AppProvider = ({ children }) => {
   const [warranties, setWarranties] = useState([]);
   const [issues, setIssues] = useState([]);
   const [expenses, setExpenses] = useState([]);
+  const [suppliers, setSuppliers] = useState([]);
+  const [supplierTransactions, setSupplierTransactions] = useState([]);
   const [backendOnline, setBackendOnline] = useState(false);
 
   // Shop Settings
@@ -98,6 +100,8 @@ const normalizeProduct = (p) => {
     sellerName: s.seller_name || s.sellerName || s.cashier_name || s.cashierName || "",
     notes: s.notes || "",
     dueDate: s.due_date || s.dueDate || null,
+    returns: s.returns || [],
+    updatedAt: s.updated_at || s.updatedAt || null,
     createdAt: s.created_at || s.createdAt || new Date().toISOString(),
   });
 
@@ -153,6 +157,35 @@ const normalizeProduct = (p) => {
     updatedAt: i.updated_at,
   });
 
+  const normalizeSupplier = (s) => ({
+    id: s.id,
+    name: s.name,
+    phone: s.phone || "",
+    company: s.company || "",
+    address: s.address || "",
+    notes: s.notes || "",
+    openingBalance: Number(s.opening_balance || 0),
+    totalPurchased: Number(s.total_purchased || 0),
+    totalPaid: Number(s.total_paid || 0),
+    balance: Number(s.balance || 0),
+    lastActivity: s.last_activity || "",
+    createdAt: s.created_at,
+  });
+
+  const normalizeSupplierTx = (t) => ({
+    id: t.id,
+    supplierId: t.supplier_id,
+    type: t.type,
+    date: t.date,
+    invoiceNumber: t.invoice_number || "",
+    items: t.items || [],
+    total: Number(t.total || 0),
+    paid: Number(t.paid || 0),
+    notes: t.notes || "",
+    stockAdded: !!t.stock_added,
+    createdAt: t.created_at,
+  });
+
   const normalizeExpense = (e) => ({
     id: e.id,
     title: e.title,
@@ -196,13 +229,15 @@ const normalizeProduct = (p) => {
       setWarranties([]);
       setIssues([]);
       setExpenses([]);
+      setSuppliers([]);
+      setSupplierTransactions([]);
     }
   }
   useEffect(() => {
     if (!token) return;
     const fetchAllData = async () => {
       try {
-        const [dbProducts, dbSales, dbCustomers, dbWarranties, dbIssues, dbExpenses, dbSettings] = await Promise.all([
+        const [dbProducts, dbSales, dbCustomers, dbWarranties, dbIssues, dbExpenses, dbSettings, dbSuppliers] = await Promise.all([
           api.getProducts(),
           api.getSales(),
           api.getCustomers(),
@@ -210,8 +245,13 @@ const normalizeProduct = (p) => {
           api.getMobileIssues ? api.getMobileIssues() : Promise.resolve([]),
           api.getExpenses ? api.getExpenses() : Promise.resolve([]),
           api.getSettings(),
+          api.getSuppliers(),
         ]);
 
+        if (dbSuppliers && Array.isArray(dbSuppliers.suppliers)) {
+          setSuppliers(dbSuppliers.suppliers.map(normalizeSupplier));
+          setSupplierTransactions((dbSuppliers.transactions || []).map(normalizeSupplierTx));
+        }
         if (dbSettings && typeof dbSettings === "object" && Object.keys(dbSettings).length > 0) {
           setShopSettings((prev) => ({ ...prev, ...dbSettings }));
         }
@@ -528,6 +568,154 @@ const normalizeProduct = (p) => {
     }
   };
 
+  // ── Bill returns / edit / delete ───────────────────────────────────────────
+  // The server changes stock, the bill, warranties and the customer balance together;
+  // afterwards the affected lists are reloaded from the database.
+  const afterBillChange = async (saved) => {
+    if (saved && saved.id) {
+      const normalized = normalizeSale(saved);
+      setSales((prev) =>
+        saved.is_deleted ? prev.filter((x) => x.id !== saved.id) : prev.map((x) => (x.id === saved.id ? normalized : x))
+      );
+    }
+    await Promise.all([refreshProducts(), refreshCustomers(), refreshWarranties()]);
+  };
+
+  // items: [{ index, qty, imeis }] — index is the item position on the bill
+  const returnSaleItems = async (saleId, items, note = "") => {
+    try {
+      const saved = await api.returnSaleItems(saleId, { items, note });
+      await afterBillChange(saved);
+      return normalizeSale(saved);
+    } catch (err) {
+      notifyError("Return", err);
+      return null;
+    }
+  };
+
+  // data: { customerName, customerPhone, sellerName, notes, dueDate, discountAmount, paidAmount, rates: [{index, unitSalePrice}] }
+  const updateSale = async (saleId, data) => {
+    try {
+      const saved = await api.updateSale(saleId, data);
+      await afterBillChange(saved);
+      return normalizeSale(saved);
+    } catch (err) {
+      notifyError("Bill update", err);
+      return null;
+    }
+  };
+
+  // Deletes a bill as if it never happened: stock back, its Udhaar off, payment reversed
+  const deleteSale = async (saleId) => {
+    try {
+      const saved = await api.deleteSale(saleId);
+      await afterBillChange({ ...saved, is_deleted: true });
+      return true;
+    } catch (err) {
+      notifyError("Bill delete", err);
+      return false;
+    }
+  };
+
+  // ── Suppliers ──────────────────────────────────────────────────────────────
+  const refreshSuppliers = async () => {
+    const data = await api.getSuppliers();
+    if (data && Array.isArray(data.suppliers)) {
+      setSuppliers(data.suppliers.map(normalizeSupplier));
+      setSupplierTransactions((data.transactions || []).map(normalizeSupplierTx));
+    }
+  };
+
+  const toSupplierPayload = (d) => ({
+    name: d.name,
+    phone: d.phone,
+    company: d.company,
+    address: d.address,
+    notes: d.notes,
+    opening_balance: d.openingBalance,
+  });
+
+  const addSupplier = async (data) => {
+    try {
+      const saved = await api.createSupplier(toSupplierPayload(data));
+      await refreshSuppliers();
+      return normalizeSupplier(saved);
+    } catch (err) {
+      notifyError(`Supplier "${data.name}"`, err);
+      return null;
+    }
+  };
+
+  const updateSupplier = async (id, data) => {
+    try {
+      await api.updateSupplier(id, toSupplierPayload(data));
+      await refreshSuppliers();
+      return true;
+    } catch (err) {
+      notifyError("Supplier update", err);
+      return false;
+    }
+  };
+
+  const deleteSupplier = async (id) => {
+    try {
+      await api.deleteSupplier(id);
+      await refreshSuppliers();
+      return true;
+    } catch (err) {
+      notifyError("Supplier delete", err);
+      return false;
+    }
+  };
+
+  // data: { date, invoiceNumber, notes, paid, total, addToStock, items: [{ productId?, name, brand, model,
+  //   category, quantity, imeis: [{imei1, imei2, ptaStatus}], costPrice, salePrice, warrantyDuration, warrantyType }] }
+  const addSupplierPurchase = async (supplierId, data) => {
+    try {
+      const saved = await api.addSupplierPurchase(supplierId, data);
+      await Promise.all([refreshSuppliers(), refreshProducts()]);
+      return normalizeSupplierTx(saved);
+    } catch (err) {
+      notifyError("Purchase", err);
+      return null;
+    }
+  };
+
+  // data: { amount, date, notes, reference }
+  const addSupplierPayment = async (supplierId, data) => {
+    try {
+      const saved = await api.addSupplierPayment(supplierId, data);
+      await refreshSuppliers();
+      return normalizeSupplierTx(saved);
+    } catch (err) {
+      notifyError("Supplier payment", err);
+      return null;
+    }
+  };
+
+  // data: { date, invoiceNumber, notes, paid, total }
+  const updateSupplierTransaction = async (txId, data) => {
+    try {
+      await api.updateSupplierTransaction(txId, data);
+      await refreshSuppliers();
+      return true;
+    } catch (err) {
+      notifyError("Supplier entry update", err);
+      return false;
+    }
+  };
+
+  const deleteSupplierTransaction = async (txId) => {
+    try {
+      await api.deleteSupplierTransaction(txId);
+      await refreshSuppliers();
+      return true;
+    } catch (err) {
+      notifyError("Supplier entry delete", err);
+      return false;
+    }
+  };
+
   // ── Shop Settings ──────────────────────────────────────────────────────────
   const saveShopSettings = async (newSettings) => {
     try {
@@ -611,6 +799,19 @@ const normalizeProduct = (p) => {
         addWarrantyClaim,
         refreshProducts,
         refreshCustomers,
+        returnSaleItems,
+        updateSale,
+        deleteSale,
+        suppliers,
+        supplierTransactions,
+        refreshSuppliers,
+        addSupplier,
+        updateSupplier,
+        deleteSupplier,
+        addSupplierPurchase,
+        addSupplierPayment,
+        updateSupplierTransaction,
+        deleteSupplierTransaction,
       }}
     >
       {children}

@@ -12,7 +12,6 @@ import Dashboard from "./pages/Dashboard";
 import POS from "./pages/POS";
 import Inventory from "./pages/Inventory";
 import ImeiChecker from "./pages/ImeiChecker";
-import Customers from "./pages/Customers";
 import Bills from "./pages/Bills";
 import PendingPayments from "./pages/PendingPayments";
 import Warranties from "./pages/Warranties";
@@ -24,6 +23,7 @@ import Ledger from "./pages/Ledger";
 import MobileIssues from "./pages/MobileIssues";
 import Expenses from "./pages/Expenses";
 import Sellers from "./pages/Sellers";
+import Suppliers from "./pages/Suppliers";
 
 // Main App Layout Wrapper
 const MainLayout = ({ children }) => {
@@ -85,13 +85,10 @@ function App() {
                   </MainLayout>
                 }
               />
+              {/* Customer accounts live in Pending Payments now */}
               <Route
                 path="/customers"
-                element={
-                  <MainLayout>
-                    <Customers />
-                  </MainLayout>
-                }
+                element={<Navigate to="/pending-payments" replace />}
               />
               <Route
                 path="/bills"
@@ -153,6 +150,14 @@ function App() {
 
             {/* Admin-Only Protected Routes */}
             <Route element={<ProtectedRoute allowedRoles={["admin"]} />}>
+              <Route
+                path="/suppliers"
+                element={
+                  <MainLayout>
+                    <Suppliers />
+                  </MainLayout>
+                }
+              />
               <Route
                 path="/reports"
                 element={

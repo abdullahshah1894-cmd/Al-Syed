@@ -32,6 +32,9 @@ app.use("/api", requireAuth);
 
 // API Routes — Supabase-backed
 app.use("/api/products", require("./routes/productRoutes"));
+// Editing or deleting a bill can reverse money: owner only. Returns stay open to cashiers.
+app.put("/api/sales/:id", requireAdmin);
+app.delete("/api/sales/:id", requireAdmin);
 app.use("/api/sales", require("./routes/saleRoutes"));
 app.use("/api/ledger", require("./routes/ledgerRoutes"));
 app.use("/api/customers", require("./routes/customerRoutes"));
@@ -39,6 +42,7 @@ app.use("/api/warranties", require("./routes/warrantyRoutes"));
 app.use("/api/issues", require("./routes/issueRoutes"));
 app.use("/api/upload", require("./routes/uploadRoutes"));
 app.use("/api/expenses", require("./routes/expenseRoutes"));
+app.use("/api/suppliers", requireAdmin, require("./routes/supplierRoutes"));
 app.put("/api/settings", requireAdmin);
 app.use("/api/settings", require("./routes/settingsRoutes"));
 

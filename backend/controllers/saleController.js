@@ -6,6 +6,7 @@ exports.getSales = async (req, res) => {
     const { data, error } = await supabase
       .from("sales")
       .select("*")
+      .eq("is_deleted", false)
       .order("created_at", { ascending: false });
 
     if (error) throw new Error(error.message);
@@ -59,10 +60,64 @@ exports.createSale = async (req, res) => {
   }
 };
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const byName = (req) => req.user?.name || req.user?.username || null;
+
+// Return items from a bill: body { items: [{ index, qty, imeis }], note }
+// (public.return_sale_items: stock back, bill and Udhaar reduced, warranties voided — one transaction)
+exports.returnItems = async (req, res) => {
+  try {
+    if (!UUID_REGEX.test(req.params.id)) return res.status(400).json({ error: "Invalid bill id" });
+    const { data, error } = await supabase.rpc("return_sale_items", {
+      p_sale: req.params.id,
+      p_items: req.body.items || [],
+      p_note: req.body.note || null,
+      p_by: byName(req),
+    });
+    if (error) throw new Error(error.message);
+    res.json(data);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
+
+// Edit a bill: body { customerName, customerPhone, sellerName, notes, dueDate, discountAmount, paidAmount, rates }
+exports.updateSale = async (req, res) => {
+  try {
+    if (!UUID_REGEX.test(req.params.id)) return res.status(400).json({ error: "Invalid bill id" });
+    const b = req.body;
+    const map = {
+      customer_name: b.customerName, customer_phone: b.customerPhone, seller_name: b.sellerName,
+      notes: b.notes, due_date: b.dueDate, discount_amount: b.discountAmount, paid_amount: b.paidAmount,
+    };
+    const p = {};
+    Object.entries(map).forEach(([k, v]) => { if (v !== undefined) p[k] = v === null ? "" : v; });
+    if (Array.isArray(b.rates) && b.rates.length > 0) p.rates = b.rates;
+
+    const { data, error } = await supabase.rpc("update_sale", { p_sale: req.params.id, p });
+    if (error) throw new Error(error.message);
+    res.json(data);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
+
+// Delete a bill: reverses stock, Udhaar and payment (public.void_sale), keeps the record as deleted
+exports.deleteSale = async (req, res) => {
+  try {
+    if (!UUID_REGEX.test(req.params.id)) return res.status(400).json({ error: "Invalid bill id" });
+    const { data, error } = await supabase.rpc("void_sale", { p_sale: req.params.id, p_by: byName(req) });
+    if (error) throw new Error(error.message);
+    res.json(data);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
+
 // Get analytics: top 5 products, totals
 exports.getAnalytics = async (req, res) => {
   try {
-    const { data: sales, error } = await supabase.from("sales").select("*");
+    const { data: sales, error } = await supabase.from("sales").select("*").eq("is_deleted", false);
     if (error) throw new Error(error.message);
 
     let totalRevenue = 0;

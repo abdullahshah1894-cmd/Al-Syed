@@ -1,8 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
 import { api } from "../services/api";
-import html2canvas from "html2canvas";
-import { formatWAPhone } from "./POS";
+import { shareImageToWhatsApp } from "../utils/shareImage";
 import { localDate } from "../utils/dates";
 import { itemImeis } from "../utils/sales";
 import {
@@ -112,6 +111,7 @@ const Ledger = () => {
   const scanRef = useRef(null);
   const receiptRef = useRef(null);
   const [isCapturingImage, setIsCapturingImage] = useState(false);
+  const [shareMessage, setShareMessage] = useState(""); // result of the last WhatsApp share
 
   // Invoice tracking — each scan session groups items under an auto-created invoice
   const [invoiceCounter, setInvoiceCounter] = useState(1);
@@ -124,7 +124,8 @@ const Ledger = () => {
 
   // Checkout State
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
-  const [paymentMethod, setPaymentMethod] = useState("Cash");
+  // Ledger bills are usually Udhaar, so checkout starts on Pending Bill
+  const [paymentMethod, setPaymentMethod] = useState("Pending Bill");
   const [selectedSeller, setSelectedSeller] = useState(SELLERS[0]);
   const [selectedCustomer, setSelectedCustomer] = useState("");
   const [paidAmountInput, setPaidAmountInput] = useState("");
@@ -615,6 +616,12 @@ const Ledger = () => {
   };
 
   // ── Checkout & Finalize Invoice ────────────────────────────────────────────
+  // Item lines of an invoice with no rate (0 or empty). A bill cannot be checked out until each has one.
+  const missingRateLines = (list, invId) =>
+    invId ? list.filter((e) => e.type === "item" && e.parentInvoiceId === invId && !(Number(e.rate) > 0)) : [];
+  const rateLineNames = (lines) =>
+    [...new Set(lines.map((e) => e.fullName || (e.description || "").split(" (")[0] || "Item"))];
+
   const handleCheckoutClick = () => {
     if (!currentInvoiceId) {
       alert("Please start a New Invoice and scan items first.");
@@ -625,6 +632,12 @@ const Ledger = () => {
     const invoiceItems = entries.filter(e => e.type === "item" && e.parentInvoiceId === currentInvoiceId);
     if (invoiceItems.length === 0) {
       alert("Please add items to the invoice before checking out.");
+      return;
+    }
+
+    const noRate = missingRateLines(entries, currentInvoiceId);
+    if (noRate.length > 0) {
+      alert(`Please enter a rate for: ${rateLineNames(noRate).join(", ")}`);
       return;
     }
 
@@ -647,6 +660,13 @@ const Ledger = () => {
     const invoiceItems = entries.filter(e => e.type === "item" && e.parentInvoiceId === currentInvoiceId);
 
     if (!invoiceHeader || invoiceItems.length === 0) return;
+
+    // Every line needs a rate; a 0 rate would sell the item for nothing
+    const noRate = missingRateLines(entries, currentInvoiceId);
+    if (noRate.length > 0) {
+      alert(`Please enter a rate for: ${rateLineNames(noRate).join(", ")}`);
+      return;
+    }
 
     let customerObj = null;
     if (selectedCustomer) {
@@ -717,10 +737,11 @@ const Ledger = () => {
     setEntries((prev) => prev.map((e) => (e.id === invoiceHeader.id ? { ...e, saleId: recorded.id } : e)));
 
     setCompletedSaleInvoice(recorded);
+    setShareMessage("");
     setShowCheckoutModal(false);
 
-    // Reset the checkout form for the next bill
-    setPaymentMethod("Cash");
+    // Reset the checkout form for the next bill (back to Pending Bill / Udhaar)
+    setPaymentMethod("Pending Bill");
     setSelectedCustomer("");
     setPaidAmountInput("");
     setDueDate("");
@@ -783,98 +804,25 @@ const Ledger = () => {
     return text;
   };
 
+  // WhatsApp: send the receipt as a picture (text goes along as the message)
   const handleWhatsAppShareModal = async () => {
-    if (!completedSaleInvoice) return;
-    const receiptElement = document.getElementById("invoice-print-area");
+    if (!completedSaleInvoice || isCapturingImage) return;
     const udhaar = receiptUdhaar(completedSaleInvoice);
-    const waText = generateTextReceipt(completedSaleInvoice, udhaar.previous, true, udhaar.total);
-    const formattedPhone = formatWAPhone(completedSaleInvoice.customerPhone);
-    const waUrl = formattedPhone
-      ? `https://wa.me/${formattedPhone}?text=${encodeURIComponent(waText)}`
-      : `https://web.whatsapp.com/send?text=${encodeURIComponent(waText)}`;
-
     setIsCapturingImage(true);
-
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-
-    // 1. Mobile native share attempt
-    if (isMobile && receiptElement && navigator.canShare) {
-      try {
-        const canvas = await html2canvas(receiptElement, {
-          scale: 2,
-          backgroundColor: "#ffffff",
-          useCORS: true,
-          allowTaint: true,
-          logging: false,
-        });
-
-        const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
-        if (blob) {
-          const file = new File([blob], `Receipt_${completedSaleInvoice.billNumber || "INV"}.png`, { type: "image/png" });
-          if (navigator.canShare({ files: [file] })) {
-            await navigator.share({
-              files: [file],
-              title: `Receipt — ${completedSaleInvoice.billNumber || "INV"}`,
-              text: waText,
-            });
-            setIsCapturingImage(false);
-            return;
-          }
-        }
-      } catch (shareErr) {
-        if (shareErr.name === "AbortError") {
-          setIsCapturingImage(false);
-          return;
-        }
-        console.warn("Native share fallback to WhatsApp link:", shareErr);
-      }
-    }
-
-    // 2. Desktop Flow: copy image to clipboard & download image slip
-    if (receiptElement) {
-      try {
-        const canvas = await html2canvas(receiptElement, {
-          scale: 2,
-          backgroundColor: "#ffffff",
-          useCORS: true,
-          allowTaint: true,
-          logging: false,
-        });
-
-        canvas.toBlob(async (blob) => {
-          if (blob) {
-            try {
-              if (navigator.clipboard && window.ClipboardItem) {
-                await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-              }
-            } catch (clipErr) {
-              console.log("Clipboard copy not supported:", clipErr);
-            }
-
-            try {
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = `Receipt_${completedSaleInvoice.billNumber || "INV"}.png`;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              setTimeout(() => URL.revokeObjectURL(url), 1000);
-            } catch (dlErr) {
-              console.log("Download fallback skipped:", dlErr);
-            }
-          }
-        }, "image/png");
-      } catch (canvasErr) {
-        console.warn("Canvas capture warning:", canvasErr);
-      }
-    }
-
-    // 3. Always open WhatsApp with pre-filled message
-    setTimeout(() => {
-      window.open(waUrl, "_blank");
+    setShareMessage("");
+    try {
+      const { message } = await shareImageToWhatsApp({
+        element: receiptRef.current || document.getElementById("invoice-print-area"),
+        phone: completedSaleInvoice.customerPhone,
+        text: generateTextReceipt(completedSaleInvoice, udhaar.previous, true, udhaar.total),
+        fileName: `Invoice_${completedSaleInvoice.billNumber || "INV"}.png`,
+      });
+      setShareMessage(message);
+    } catch (err) {
+      setShareMessage(`Could not create the invoice image: ${err.message || err}`);
+    } finally {
       setIsCapturingImage(false);
-    }, 300);
+    }
   };
 
   const handlePrintReceipt = () => {
@@ -1011,6 +959,11 @@ const Ledger = () => {
   const checkoutDue = checkoutAmounts(checkoutTotal).due;
   const needsCustomer = checkoutDue > 0 && !selectedCustomer;
 
+  // Lines of the current invoice still without a rate (checkout stays blocked)
+  const noRateLines = missingRateLines(entries, currentInvoiceId);
+  const noRateIds = new Set(noRateLines.map((e) => e.id));
+  const noRateNames = rateLineNames(noRateLines);
+
   const completedUdhaar = receiptUdhaar(completedSaleInvoice);
 
   // ── Print ─────────────────────────────────────────────────────────────────
@@ -1051,7 +1004,9 @@ const Ledger = () => {
 
           {currentInvoiceId && (
             <button onClick={handleCheckoutClick}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all shadow shadow-emerald-600/30 active:scale-95 animate-pulse">
+              disabled={noRateLines.length > 0}
+              title={noRateLines.length > 0 ? "Enter a rate for every item first" : undefined}
+              className={`px-4 py-2 bg-emerald-600 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all ${noRateLines.length > 0 ? "opacity-50 cursor-not-allowed" : "hover:bg-emerald-500 shadow shadow-emerald-600/30 active:scale-95 animate-pulse"}`}>
               <CheckCircle2 size={14} /> Checkout & Finalize
             </button>
           )}
@@ -1097,6 +1052,16 @@ const Ledger = () => {
             </span>
           )}
         </div>
+
+        {/* Lines without a rate block the checkout */}
+        {noRateLines.length > 0 && (
+          <div className="flex items-start gap-2 px-3 py-2 rounded-xl text-xs font-semibold border bg-rose-500/10 text-rose-300 border-rose-500/30">
+            <AlertCircle size={14} className="shrink-0 mt-0.5" />
+            <span>
+              Rate required before checkout: {noRateNames.join(", ")}. Enter the rate in the highlighted Rate box.
+            </span>
+          </div>
+        )}
 
         {/* Scan status feedback */}
         {scanStatus && (
@@ -1198,6 +1163,7 @@ const Ledger = () => {
                   const isPayment = row.type === "payment";
                   const isActive = !!currentInvoiceId && (row.id === currentInvoiceId || row.parentInvoiceId === currentInvoiceId);
                   const locked = lockedInvoiceIds.has(isInvoice ? row.id : row.parentInvoiceId);
+                  const needsRate = !locked && row.type === "item" && row.groupIds.some((id) => noRateIds.has(id));
 
                   let displayDesc = row.description;
                   if (row.type === "item") {
@@ -1250,9 +1216,9 @@ const Ledger = () => {
                             onChange={(e) => handleRateChange(row, e.target.value)}
                             onFocus={(e) => !locked && e.target.select()}
                             readOnly={locked}
-                            className={`w-24 font-extrabold text-center text-slate-900 rounded-lg px-1.5 py-1 focus:outline-none transition-all print:bg-transparent print:border-none print:w-auto ${locked ? "bg-transparent border-2 border-transparent cursor-default" : "bg-amber-50 border-2 border-amber-400 focus:bg-yellow-200 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 shadow-sm"}`}
+                            className={`w-24 font-extrabold text-center text-slate-900 rounded-lg px-1.5 py-1 focus:outline-none transition-all print:bg-transparent print:border-none print:w-auto ${locked ? "bg-transparent border-2 border-transparent cursor-default" : needsRate ? "bg-rose-50 border-2 border-rose-500 ring-2 ring-rose-500/30 focus:bg-yellow-200 focus:border-indigo-600 shadow-sm" : "bg-amber-50 border-2 border-amber-400 focus:bg-yellow-200 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 shadow-sm"}`}
                             placeholder="Rate"
-                            title={locked ? "Checked out — cannot be edited" : "Click to edit custom rate required"}
+                            title={locked ? "Checked out — cannot be edited" : needsRate ? "Rate required — enter the selling price" : "Click to edit custom rate required"}
                           />
                         ) : (
                           ""
@@ -1650,10 +1616,16 @@ const Ledger = () => {
               )}
             </div>
 
+            {noRateLines.length > 0 && (
+              <div className="px-6 py-3 bg-rose-50 border-t border-rose-100 text-rose-600 text-xs font-semibold flex items-start gap-1.5">
+                <AlertCircle size={14} className="shrink-0 mt-0.5" />
+                <span>Rate required for: {noRateNames.join(", ")}. Close this window and enter the rate in the highlighted box.</span>
+              </div>
+            )}
             <div className="p-6 bg-slate-50 border-t border-slate-100 flex gap-4">
               <button
                 onClick={finalizeCheckout}
-                disabled={isSubmitting || needsCustomer}
+                disabled={isSubmitting || needsCustomer || noRateLines.length > 0}
                 className="flex-1 py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-2xl flex items-center justify-center gap-2 shadow-xl shadow-emerald-600/30 transition-all disabled:opacity-50 disabled:shadow-none"
               >
                 <CheckCircle2 size={20} />
@@ -1671,8 +1643,8 @@ const Ledger = () => {
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 print:static print:p-0 print:block print:bg-transparent">
           <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl relative max-h-[95vh] overflow-y-auto print:shadow-none print:w-full print:max-w-none print:rounded-none">
             
-            {/* MICRO POS THERMAL RECEIPT SLIP */}
-            <div id="invoice-print-area" ref={receiptRef} className="p-5 max-h-[70vh] overflow-y-auto print:max-h-none print:p-0 bg-white text-black print-target">
+            {/* MICRO POS THERMAL RECEIPT SLIP — the modal box scrolls, so the image gets the whole receipt */}
+            <div id="invoice-print-area" ref={receiptRef} className="p-5 print:p-0 bg-white text-black print-target">
               {/* Shop Header */}
               <div className="text-center mb-4">
                 <h2 className="text-xl font-black uppercase tracking-tight">{shopSettings.shopName || "AL-SYED MOBILE SHOP"}</h2>
@@ -1761,6 +1733,12 @@ const Ledger = () => {
               <div className="text-center text-xs font-bold mt-2">THANK YOU FOR YOUR BUSINESS</div>
               <div className="text-center text-[10px] mt-1 mb-2">Developed By Syed</div>
             </div>
+
+            {shareMessage && (
+              <div className="px-4 py-2 text-[11px] font-semibold text-emerald-800 bg-emerald-50 border-t border-emerald-100 print:hidden">
+                {shareMessage}
+              </div>
+            )}
 
             {/* Actions */}
             <div className="flex gap-2 p-4 border-t border-slate-100 bg-slate-50 print:hidden">

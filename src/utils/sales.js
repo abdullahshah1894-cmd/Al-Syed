@@ -12,9 +12,12 @@ const itemQty = (i) => Number(i.quantity || i.qty || 1);
 // revenue minus item cost. Returns null when no item has a recorded cost.
 export const saleProfit = (s) => {
   if (!s || isSettlement(s)) return 0;
-  if (Number(s.netProfit)) return Number(s.netProfit);
   const items = s.items || [];
-  if (!items.some((i) => i.unitPurchasePrice !== undefined && i.unitPurchasePrice !== null)) return null;
+  const hasCost = items.some((i) => i.unitPurchasePrice !== undefined && i.unitPurchasePrice !== null);
+  // After a return the server keeps netProfit up to date (it can legitimately be 0)
+  if ((s.returns || []).length > 0) return hasCost ? Number(s.netProfit || 0) : null;
+  if (Number(s.netProfit)) return Number(s.netProfit);
+  if (!hasCost) return null;
   const cost = items.reduce((sum, i) => sum + Number(i.unitPurchasePrice || 0) * itemQty(i), 0);
   return Number(s.grandTotal || 0) - cost;
 };
