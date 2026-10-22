@@ -1,7 +1,15 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { useApp } from "../context/AppContext";
-import { ShieldCheck, Search, Calendar, Smartphone, User, AlertCircle, CheckCircle2, Clock, Wrench, X, FileText } from "lucide-react";
+import { ShieldCheck, Search, Wrench, X, FileText } from "lucide-react";
 import MobileIssues from "./MobileIssues";
+
+// Warranty dates are stored as YYYY-MM-DD (or a timestamp): show the local day, "—" when missing
+const showDate = (d) => {
+  if (!d) return "—";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(d))) return String(d);
+  const date = new Date(d);
+  return isNaN(date.getTime()) ? String(d) : date.toLocaleDateString("en-CA");
+};
 
 const Warranties = () => {
   const { warranties, addWarrantyClaim } = useApp();
@@ -16,19 +24,20 @@ const Warranties = () => {
   const [claimNotes, setClaimNotes] = useState("");
   const [savingClaim, setSavingClaim] = useState(false);
 
-  const statusOptions = ["All", "Active", "Expiring Soon", "Expired", "Pending Claims"];
+  const statusOptions = ["All", "Active", "Expiring Soon", "Expired", "Void", "Pending Claims"];
 
   const hasPendingClaim = (w) => (w.claims || []).some((c) => c.status === "Pending");
 
-  const filteredWarranties = warranties.filter((w) => {
+  const filteredWarranties = (warranties || []).filter((w) => {
     // Walk-in sales may have no phone / customer name, so guard every field
     const q = searchTerm.trim();
     const qLower = q.toLowerCase();
+    const qDigits = q.replace(/[\s-]/g, "");
     const matchesSearch =
-      (w.imei || "").includes(q) ||
-      (w.productName || "").toLowerCase().includes(qLower) ||
-      (w.customerName || "").toLowerCase().includes(qLower) ||
-      (w.customerPhone || "").includes(q);
+      !q ||
+      String(w.imei || "").includes(qDigits || q) ||
+      [w.productName, w.brand, w.model, w.customerName].some((v) => String(v || "").toLowerCase().includes(qLower)) ||
+      (!!qDigits && String(w.customerPhone || "").replace(/[\s-]/g, "").includes(qDigits));
     const matchesStatus =
       selectedStatusFilter === "All" ||
       (selectedStatusFilter === "Pending Claims" ? hasPendingClaim(w) : w.status === selectedStatusFilter);
@@ -46,15 +55,23 @@ const Warranties = () => {
     e.preventDefault();
     if (!claimWarranty || !claimIssue.trim() || savingClaim) return;
     setSavingClaim(true);
-    // addWarrantyClaim alerts the user itself if the database refuses
-    const saved = await addWarrantyClaim(claimWarranty.imei, {
-      issue: claimIssue.trim(),
-      claimType,
-      status: "Pending",
-      notes: claimNotes.trim(),
-    });
-    setSavingClaim(false);
-    if (saved) setClaimWarranty(null);
+    try {
+      // addWarrantyClaim alerts the user itself if the database refuses; the modal keeps the input
+      const saved = await addWarrantyClaim(claimWarranty.imei, {
+        issue: claimIssue.trim(),
+        claimType,
+        status: "Pending",
+        notes: claimNotes.trim(),
+      });
+      if (saved) setClaimWarranty(null);
+    } finally {
+      setSavingClaim(false);
+    }
+  };
+
+  const closeClaimModal = () => {
+    if (savingClaim) return;
+    setClaimWarranty(null);
   };
 
   return (
@@ -93,13 +110,13 @@ const Warranties = () => {
         </div>
       ) : (
         <div className="space-y-6 animate-in fade-in zoom-in-95 duration-300">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div className="flex items-center gap-2 overflow-x-auto pb-1">
               {statusOptions.map((st) => (
                 <button
                   key={st}
                   onClick={() => setSelectedStatusFilter(st)}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
                     selectedStatusFilter === st
                       ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
                       : "bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800"
@@ -110,7 +127,7 @@ const Warranties = () => {
               ))}
             </div>
             
-            <div className="relative w-full sm:w-72 hidden md:block">
+            <div className="relative w-full md:w-72 shrink-0">
               <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 type="text"
@@ -163,18 +180,18 @@ const Warranties = () => {
                     </td>
 
                     <td className="p-3.5">
-                      <div className="font-semibold text-slate-200">{warr.customerName}</div>
-                      <div className="text-[11px] text-slate-400">{warr.customerPhone}</div>
+                      <div className="font-semibold text-slate-200">{warr.customerName || "Walk-in Customer"}</div>
+                      <div className="text-[11px] text-slate-400">{warr.customerPhone || "No phone"}</div>
                     </td>
 
                     <td className="p-3.5 text-slate-300">
-                      <div>Start: {warr.warrantyStartDate}</div>
-                      <div className="font-semibold text-indigo-300">Expiry: {warr.warrantyExpiryDate}</div>
+                      <div>Start: {showDate(warr.warrantyStartDate || warr.purchaseDate)}</div>
+                      <div className="font-semibold text-indigo-300">Expiry: {showDate(warr.warrantyExpiryDate)}</div>
                     </td>
 
                     <td className="p-3.5">
                       <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-950 text-indigo-300 border border-slate-800">
-                        {warr.warrantyType}
+                        {warr.warrantyType || "—"}
                       </span>
                     </td>
 
@@ -212,13 +229,19 @@ const Warranties = () => {
                     </td>
 
                     <td className="p-3.5 text-right">
-                      <button
-                        onClick={() => openClaimModal(warr)}
-                        className="px-3 py-1.5 bg-slate-950 hover:bg-slate-800 text-indigo-300 border border-slate-800 rounded-xl text-[11px] font-bold transition-colors whitespace-nowrap"
-                        title="Log Warranty Claim"
-                      >
-                        Log Claim
-                      </button>
+                      {/* A void warranty belongs to a returned phone; the server would put the claim on
+                          the IMEI's latest warranty instead, so no claim is logged here */}
+                      {warr.status === "Void" ? (
+                        <span className="text-[11px] text-slate-500 whitespace-nowrap">Returned — void</span>
+                      ) : (
+                        <button
+                          onClick={() => openClaimModal(warr)}
+                          className="px-3 py-1.5 bg-slate-950 hover:bg-slate-800 text-indigo-300 border border-slate-800 rounded-xl text-[11px] font-bold transition-colors whitespace-nowrap"
+                          title="Log Warranty Claim"
+                        >
+                          Log Claim
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );
@@ -243,7 +266,7 @@ const Warranties = () => {
                   {claimWarranty.productName} • <span className="font-mono text-cyan-400">{claimWarranty.imei}</span>
                 </p>
               </div>
-              <button onClick={() => setClaimWarranty(null)} className="text-slate-400 hover:text-white">
+              <button onClick={closeClaimModal} className="text-slate-400 hover:text-white">
                 <X size={20} />
               </button>
             </div>
@@ -287,8 +310,9 @@ const Warranties = () => {
               <div className="pt-3 flex justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setClaimWarranty(null)}
-                  className="px-4 py-2 bg-slate-800 text-slate-300 font-bold rounded-xl"
+                  onClick={closeClaimModal}
+                  disabled={savingClaim}
+                  className="px-4 py-2 bg-slate-800 text-slate-300 font-bold rounded-xl disabled:opacity-60"
                 >
                   Cancel
                 </button>

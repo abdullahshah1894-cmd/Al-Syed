@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { useNavigate, Navigate } from "react-router-dom";
+import { useState } from "react";
+import { useNavigate, useLocation, Navigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { Smartphone, Lock, User, AlertCircle } from "lucide-react";
 
@@ -10,8 +10,12 @@ const Login = () => {
   const [submitting, setSubmitting] = useState(false);
   const { login, token } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  // Back to the page that sent us here (ProtectedRoute remembers it), else the dashboard
+  const fromPath = location.state?.from?.pathname;
+  const target = fromPath && fromPath !== "/login" ? `${fromPath}${location.state.from.search || ""}` : "/dashboard";
 
-  if (token) return <Navigate to="/dashboard" replace />;
+  if (token) return <Navigate to={target} replace />;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -20,10 +24,9 @@ const Login = () => {
     setSubmitting(true);
     try {
       await login(username.trim(), password);
-      navigate("/dashboard");
+      navigate(target, { replace: true });
     } catch (err) {
-      setError(err.message || "Login failed");
-    } finally {
+      setError(err?.message || "Login failed");
       setSubmitting(false);
     }
   };

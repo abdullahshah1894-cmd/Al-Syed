@@ -6,7 +6,6 @@ import {
   Boxes,
   Plus,
   Search,
-  Filter,
   AlertTriangle,
   Barcode,
   Smartphone,
@@ -14,7 +13,6 @@ import {
   Trash2,
   X,
   PlusCircle,
-  SmartphoneNfc,
 } from "lucide-react";
 
 // Categories whose units are tracked by IMEI (Smartphones must have at least one)
@@ -46,6 +44,7 @@ const Inventory = () => {
   }
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [showAddModal, setShowAddModal] = useState(false);
+  const [savingAdd, setSavingAdd] = useState(false);
 
   // Form State for Add Product
   const [name, setName] = useState("");
@@ -86,19 +85,17 @@ const Inventory = () => {
   const usesImeis = IMEI_CATEGORIES.includes(category);
 
   const filteredProducts = products.filter((p) => {
-    const qLower = searchTerm.toLowerCase();
+    if (p.isDeleted) return false;
+    const q = searchTerm.trim();
+    const qLower = q.toLowerCase();
     const matchesSearch =
+      !q ||
       (p.name || "").toLowerCase().includes(qLower) ||
       (p.brand || "").toLowerCase().includes(qLower) ||
       (p.model || "").toLowerCase().includes(qLower) ||
-      (p.barcode && p.barcode.includes(searchTerm)) ||
-      (p.imeis &&
-        p.imeis.some(
-          (i) =>
-            (i.imei && i.imei.includes(searchTerm)) ||
-            (i.imei1 && i.imei1.includes(searchTerm)) ||
-            (i.imei2 && i.imei2.includes(searchTerm))
-        ));
+      String(p.barcode || "").includes(q) ||
+      (Array.isArray(p.imeis) &&
+        p.imeis.some((i) => [i?.imei, i?.imei1, i?.imei2].some((k) => k && String(k).includes(q))));
     const matchesCategory = selectedCategory === "All" || p.category === selectedCategory;
     return matchesSearch && matchesCategory;
   });
@@ -319,7 +316,11 @@ const Inventory = () => {
 
   const handleAddSubmit = async (e) => {
     e.preventDefault();
-    if (!name || !brand || !purchasePrice || !supplierName) return;
+    if (!isAdmin || savingAdd) return;
+    if (!name.trim() || !brand.trim() || purchasePrice === "" || !supplierName.trim()) {
+      alert("Please fill in Product Name, Brand, Purchase Price and Supplier Name.");
+      return;
+    }
 
     let imeisArr = [];
 
@@ -356,6 +357,7 @@ const Inventory = () => {
             imeiLines.forEach((im, i) => { if (im.length > 0 && im.length < 15) next.add(i); });
             return next;
           });
+          alert("Please make sure all entered IMEI numbers are exactly 15 digits (or leave blank).");
           return;
         }
 
@@ -376,20 +378,24 @@ const Inventory = () => {
       }
     }
 
+    setSavingAdd(true);
     const saved = await addProduct({
-      name,
-      brand,
-      model,
+      name: name.trim(),
+      brand: brand.trim(),
+      model: model.trim(),
       category,
-      purchasePrice: Number(purchasePrice),
-      salePrice: Number(salePrice),
-      quantity: imeisArr.length > 0 ? imeisArr.length : Number(quantity),
-      minStockAlert: Number(minStockAlert),
-      warrantyDuration: Number(warrantyDuration),
+      purchasePrice: Math.max(0, Number(purchasePrice) || 0),
+      salePrice: Math.max(0, Number(salePrice) || 0),
+      // Smartphones are counted only by IMEI; other items by a whole, non-negative quantity
+      quantity:
+        imeisArr.length > 0 || category === "Smartphones" ? imeisArr.length : Math.max(0, Math.floor(Number(quantity) || 0)),
+      minStockAlert: Math.max(0, Math.floor(Number(minStockAlert) || 0)),
+      warrantyDuration: warrantyType === "No Warranty" ? 0 : Math.max(0, Math.floor(Number(warrantyDuration) || 0)),
       warrantyType,
       imeis: imeisArr,
-      supplier: { name: supplierName },
+      supplier: { name: supplierName.trim() },
     });
+    setSavingAdd(false);
     // Keep the form filled if the database did not save it
     if (!saved) return;
 
@@ -431,21 +437,29 @@ const Inventory = () => {
 
   const handleEditSubmit = async (e) => {
     e.preventDefault();
-    if (!editProduct || savingEdit || !editForm.name.trim() || !editForm.brand.trim()) return;
+    if (!isAdmin || !editProduct || savingEdit) return;
+    if (!editForm.name.trim() || !editForm.brand.trim()) {
+      alert("Product Name and Brand are required.");
+      return;
+    }
+    const supplierName = editForm.supplierName.trim();
+    const supplierPhone = editForm.supplierPhone.trim();
     const fields = {
       name: editForm.name.trim(),
       brand: editForm.brand.trim(),
       model: editForm.model.trim(),
       category: editForm.category,
-      salePrice: Number(editForm.salePrice),
-      minStockAlert: Number(editForm.minStockAlert),
-      warrantyDuration: Number(editForm.warrantyDuration),
+      purchasePrice: Math.max(0, Number(editForm.purchasePrice) || 0),
+      salePrice: Math.max(0, Number(editForm.salePrice) || 0),
+      minStockAlert: Math.max(0, Math.floor(Number(editForm.minStockAlert) || 0)),
+      warrantyDuration:
+        editForm.warrantyType === "No Warranty" ? 0 : Math.max(0, Math.floor(Number(editForm.warrantyDuration) || 0)),
       warrantyType: editForm.warrantyType,
-      supplierName: editForm.supplierName.trim(),
-      supplierPhone: editForm.supplierPhone.trim(),
+      // Sent as `supplier` too, so the screen shows the new supplier even when the server echoes nothing back
+      supplier: { name: supplierName, phone: supplierPhone },
+      supplierName,
+      supplierPhone,
     };
-    // Cashiers cannot see the cost, so they do not change it
-    if (isAdmin) fields.purchasePrice = Number(editForm.purchasePrice);
 
     setSavingEdit(true);
     const ok = await updateProduct(editProduct.id, fields);
@@ -463,7 +477,7 @@ const Inventory = () => {
 
   const handleAddStockSubmit = async (e) => {
     e.preventDefault();
-    if (!stockProduct || savingStock) return;
+    if (!isAdmin || !stockProduct || savingStock) return;
 
     let payload;
     if (isImeiProduct(stockProduct)) {
@@ -492,6 +506,16 @@ const Inventory = () => {
         alert(`These IMEIs are duplicates, please remove them:\n${dups.join("\n")}`);
         return;
       }
+      // A phone counted only by quantity (no IMEIs yet): once IMEIs are added, stock is the IMEI count
+      const plainQty = (stockProduct.imeis || []).length === 0 ? Number(stockProduct.quantity || 0) : 0;
+      if (
+        plainQty > 0 &&
+        !window.confirm(
+          `${stockProduct.name} has ${plainQty} unit(s) in stock without IMEIs. After adding IMEIs, stock will be counted ` +
+            `from IMEIs only (${units.length} unit(s)). Include the IMEIs of the existing units too if they are still in the shop.\n\nContinue?`
+        )
+      )
+        return;
       payload = { imeis: units };
     } else {
       const qty = Math.floor(Number(stockQty));
@@ -508,9 +532,10 @@ const Inventory = () => {
     if (saved) setStockProduct(null);
   };
 
-  const handleDelete = (prod) => {
+  const handleDelete = async (prod) => {
+    if (!isAdmin) return;
     if (!window.confirm(`Delete ${prod.name}? ${getProductStock(prod)} unit(s) in stock`)) return;
-    deleteProduct(prod.id);
+    await deleteProduct(prod.id);
   };
 
   return (
@@ -523,17 +548,22 @@ const Inventory = () => {
             <h1 className="text-xl font-bold text-slate-100">Product & Inventory Management</h1>
           </div>
           <p className="text-xs text-slate-400">
-            Add/edit products, manage Dual/Single IMEIs, PTA status, pricing, and stock alert limits
+            {isAdmin
+              ? "Add/edit products, manage Dual/Single IMEIs, PTA status, pricing, and stock alert limits"
+              : "View products, stock levels, IMEIs and sale prices"}
           </p>
         </div>
 
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="px-5 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-2xl text-sm flex items-center gap-2 shadow-lg shadow-indigo-600/30 transition-all active:scale-95"
-        >
-          <Plus size={18} />
-          <span>Add New Product</span>
-        </button>
+        {/* Only the owner creates / edits / deletes products */}
+        {isAdmin && (
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="px-5 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-2xl text-sm flex items-center gap-2 shadow-lg shadow-indigo-600/30 transition-all active:scale-95"
+          >
+            <Plus size={18} />
+            <span>Add New Product</span>
+          </button>
+        )}
       </div>
 
       {/* Search & Category Filter bar */}
@@ -579,15 +609,24 @@ const Inventory = () => {
                 <th className="p-3.5 font-semibold">Purchase Price</th>
                 <th className="p-3.5 font-semibold">Sale Price</th>
                 <th className="p-3.5 font-semibold">Profit Margin</th>
-                <th className="p-3.5 font-semibold text-right">Actions</th>
+                {isAdmin && <th className="p-3.5 font-semibold text-right">Actions</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
+              {filteredProducts.length === 0 && (
+                <tr>
+                  <td colSpan={isAdmin ? 7 : 6} className="p-8 text-center text-slate-500">
+                    {products.length === 0 ? "No products yet." : "No product matches your search / category."}
+                  </td>
+                </tr>
+              )}
               {filteredProducts.map((prod) => {
-                const availableImeis = prod.imeis && prod.imeis.length > 0 ? prod.imeis.filter((i) => i.status === "in_stock") : [];
-                const stock = prod.imeis && prod.imeis.length > 0 ? availableImeis.length : Number(prod.quantity || 0);
-                const isLowStock = stock <= prod.minStockAlert;
-                const profitMargin = prod.salePrice - prod.purchasePrice;
+                const availableImeis = Array.isArray(prod.imeis) ? prod.imeis.filter((i) => i && i.status === "in_stock") : [];
+                const stock = getProductStock(prod);
+                const isLowStock = stock <= Number(prod.minStockAlert || 0);
+                const purchasePriceNum = Number(prod.purchasePrice || 0);
+                const salePriceNum = Number(prod.salePrice || 0);
+                const profitMargin = salePriceNum - purchasePriceNum;
 
                 return (
                   <tr key={prod.id} className="hover:bg-slate-800/40 transition-colors">
@@ -626,7 +665,7 @@ const Inventory = () => {
                           <div className="text-slate-500 font-semibold">{availableImeis.length} Available Phone Unit(s):</div>
                           <div className="max-h-20 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
                             {availableImeis.map((iObj, idx) => (
-                              <div key={idx} className="font-mono text-[10px] bg-slate-950/70 p-1 rounded border border-slate-800 flex items-center justify-between gap-1">
+                              <div key={`${iObj.imei || iObj.imei1 || ""}-${idx}`} className="font-mono text-[10px] bg-slate-950/70 p-1 rounded border border-slate-800 flex items-center justify-between gap-1">
                                 <span className="text-cyan-300">
                                   {iObj.imei1 ? `SIM 1: ${iObj.imei1}` : `IMEI: ${iObj.imei}`}
                                   {iObj.imei2 ? ` | SIM 2: ${iObj.imei2}` : ""}
@@ -644,17 +683,18 @@ const Inventory = () => {
                     </td>
 
                     <td className="p-3.5 font-semibold text-slate-300">
-                      {isAdmin ? `${shopSettings.currencySymbol} ${prod.purchasePrice.toLocaleString()}` : "••••••"}
+                      {isAdmin ? `${shopSettings.currencySymbol} ${purchasePriceNum.toLocaleString()}` : "••••••"}
                     </td>
 
                     <td className="p-3.5 font-bold text-indigo-400">
-                      {shopSettings.currencySymbol} {prod.salePrice.toLocaleString()}
+                      {shopSettings.currencySymbol} {salePriceNum.toLocaleString()}
                     </td>
 
                     <td className="p-3.5 font-bold text-emerald-400">
                       {isAdmin ? `${shopSettings.currencySymbol} ${profitMargin.toLocaleString()}` : "••••••"}
                     </td>
 
+                    {isAdmin && (
                     <td className="p-3.5 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button
@@ -680,6 +720,7 @@ const Inventory = () => {
                         </button>
                       </div>
                     </td>
+                    )}
                   </tr>
                 );
               })}
@@ -689,7 +730,7 @@ const Inventory = () => {
       </div>
 
       {/* Add Product Modal */}
-      {showAddModal && (
+      {isAdmin && showAddModal && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-xl rounded-3xl p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -1093,9 +1134,10 @@ or newline/comma separated...`
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-500 shadow"
+                  disabled={savingAdd}
+                  className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-500 disabled:opacity-50 shadow"
                 >
-                  Save Product
+                  {savingAdd ? "Saving..." : "Save Product"}
                 </button>
               </div>
             </form>
@@ -1104,7 +1146,7 @@ or newline/comma separated...`
       )}
 
       {/* Edit Product Modal */}
-      {editProduct && (
+      {isAdmin && editProduct && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-xl rounded-3xl p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -1278,7 +1320,7 @@ or newline/comma separated...`
       )}
 
       {/* Add Stock Modal */}
-      {stockProduct && (
+      {isAdmin && stockProduct && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">

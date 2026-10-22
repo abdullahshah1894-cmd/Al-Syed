@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { useApp, SELLERS } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
 import { Receipt, Search, Printer, Eye, X, Smartphone, Pencil, Trash2, RotateCcw, AlertCircle } from "lucide-react";
-import { shareImageToWhatsApp } from "../utils/shareImage";
+import { useShareImage } from "../components/useShareImage";
 import { printElement } from "../services/printReceipt";
 import { itemImeis, isSettlement } from "../utils/sales";
 
@@ -17,6 +17,8 @@ const hasReturns = (bill) => (bill.returns || []).length > 0 || (bill.items || [
 
 // "2026-10-22T00:00:00Z" / "2026-10-22" -> "2026-10-22" (date input value)
 const dateOnly = (d) => (d ? String(d).slice(0, 10) : "");
+// Due dates are plain dates; read them as local midnight (new Date("2026-10-22") is UTC midnight)
+const showDate = (d) => (dateOnly(d) ? new Date(`${dateOnly(d)}T00:00:00`).toLocaleDateString() : "");
 const money = (n) => Number(n || 0).toLocaleString();
 
 // Form values for the edit modal, taken from the bill
@@ -63,8 +65,7 @@ const Bills = () => {
   // The open bill is looked up by id, so it shows the saved changes after an edit and closes after a delete
   const [selectedBillId, setSelectedBillId] = useState(null);
   const selectedBillModal = selectedBillId ? (allSales || sales).find((s) => s.id === selectedBillId) || null : null;
-  const [isCapturingImage, setIsCapturingImage] = useState(false);
-  const [shareMessage, setShareMessage] = useState("");
+  const [openShare, shareDialog] = useShareImage();
 
   const [editForm, setEditForm] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -83,7 +84,6 @@ const Bills = () => {
 
   const openBill = (bill) => {
     setSelectedBillId(bill.id);
-    setShareMessage("");
   };
 
   const getBillWAText = (bill) => {
@@ -123,33 +123,25 @@ const Bills = () => {
     return text;
   };
 
-  // WhatsApp: send the bill as a picture (text goes along as the message)
-  const handleWhatsAppShare = async () => {
-    if (!selectedBillModal || isCapturingImage) return;
-    setIsCapturingImage(true);
-    setShareMessage("");
-    try {
-      const { message } = await shareImageToWhatsApp({
-        element: document.getElementById("bill-slip-content"),
-        phone: selectedBillModal.customerPhone,
-        text: getBillWAText(selectedBillModal),
-        fileName: `Invoice_${selectedBillModal.billNumber || "INV"}.png`,
-      });
-      setShareMessage(message);
-    } catch (err) {
-      setShareMessage(`Could not create the invoice image: ${err.message || err}`);
-    } finally {
-      setIsCapturingImage(false);
-    }
+  // Share the bill as a picture: preview, then WhatsApp / any app / copy / download
+  const handleWhatsAppShare = () => {
+    if (!selectedBillModal) return;
+    openShare({
+      element: document.getElementById("bill-slip-content"),
+      fileName: `Invoice_${selectedBillModal.billNumber || "INV"}.png`,
+      phone: selectedBillModal.customerPhone,
+      text: getBillWAText(selectedBillModal),
+      title: "Share Invoice",
+    });
   };
 
   // ── Edit ───────────────────────────────────────────────────────────────────
-  const openEdit = (bill) => setEditForm(editFormFor(bill));
+  const openEdit = (bill) => isAdmin && setEditForm(editFormFor(bill));
   const setField = (field, value) => setEditForm((f) => ({ ...f, [field]: value }));
   const setRate = (idx, value) => setEditForm((f) => ({ ...f, rates: f.rates.map((r, i) => (i === idx ? value : r)) }));
 
   const handleSaveEdit = async () => {
-    if (!editForm || !editingBill || isSaving) return;
+    if (!isAdmin || !editForm || !editingBill || isSaving) return;
     const bill = editingBill;
     const settlement = isSettlement(bill);
     const amountsLocked = hasReturns(bill);
@@ -215,7 +207,7 @@ const Bills = () => {
 
   // ── Delete ─────────────────────────────────────────────────────────────────
   const handleDelete = async (bill) => {
-    if (!bill || deletingId) return;
+    if (!isAdmin || !bill || deletingId) return;
     const who = bill.customerName || "Walk-in Customer";
     let message;
     if (isSettlement(bill)) {
@@ -543,7 +535,7 @@ const Bills = () => {
                 {selectedBillModal.dueDate && (
                   <div className="flex justify-between text-slate-600">
                     <span>Due Date:</span>
-                    <span>{new Date(selectedBillModal.dueDate).toLocaleDateString()}</span>
+                    <span>{showDate(selectedBillModal.dueDate)}</span>
                   </div>
                 )}
               </div>
@@ -592,12 +584,6 @@ const Bills = () => {
             </div>
           </div>
 
-          {shareMessage && (
-            <div className="mt-3 px-2 py-1.5 text-[10.5px] font-sans font-semibold text-emerald-800 bg-emerald-50 border border-emerald-100 rounded-lg print:hidden">
-              {shareMessage}
-            </div>
-          )}
-
           {/* Actions */}
           <div className="flex gap-2 pt-2 print:hidden">
               <button
@@ -609,14 +595,9 @@ const Bills = () => {
               </button>
               <button
                 onClick={handleWhatsAppShare}
-                disabled={isCapturingImage}
-                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow disabled:opacity-60"
+                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow"
               >
-                {isCapturingImage ? (
-                  <><svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> Preparing...</>
-                ) : (
-                  <><Smartphone size={14} /> WhatsApp</>
-                )}
+                <Smartphone size={14} /> Share
               </button>
               <button
                 onClick={() => setSelectedBillId(null)}
@@ -649,7 +630,7 @@ const Bills = () => {
       )}
 
     {/* Edit Bill Modal */}
-    {editForm && editingBill && (() => {
+    {isAdmin && editForm && editingBill && (() => {
       const bill = editingBill;
       const settlement = isSettlement(bill);
       const amountsLocked = hasReturns(bill);
@@ -835,6 +816,8 @@ const Bills = () => {
         </div>
       );
     })()}
+
+    {shareDialog}
     </>
   );
 };

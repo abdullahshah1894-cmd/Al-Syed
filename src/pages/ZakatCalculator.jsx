@@ -1,14 +1,28 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { useApp, getProductStock } from "../context/AppContext";
-import { Calculator, DollarSign, ShieldCheck, Heart, Info } from "lucide-react";
+import { Calculator, Info } from "lucide-react";
+
+// Typed amounts: empty / invalid / negative counts as 0
+const amount = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
 
 const ZakatCalculator = () => {
-  const { products, customers, shopSettings } = useApp();
+  // Zakat is for the whole shop, so use every customer and supplier (not the header seller filter)
+  const { products, allCustomers, suppliers, shopSettings } = useApp();
+  const curr = shopSettings.currencySymbol || "Rs.";
+  const money = (n) => `${curr} ${Math.round(amount(n)).toLocaleString()}`;
 
-  // Auto-calculated inventory & receivable values
-  const defaultInventoryValue = products.reduce((sum, p) => sum + Number(p.purchasePrice || 0) * getProductStock(p), 0);
+  // Auto-calculated inventory, receivable and payable values
+  const defaultInventoryValue = (products || [])
+    .filter((p) => !p.isDeleted)
+    .reduce((sum, p) => sum + Number(p.purchasePrice || 0) * getProductStock(p), 0);
 
-  const defaultReceivablesValue = customers.reduce((sum, c) => sum + Number(c.totalPending || 0), 0);
+  const defaultReceivablesValue = (allCustomers || []).reduce((sum, c) => sum + Math.max(0, Number(c.totalPending || 0)), 0);
+
+  // What the shop still owes its suppliers
+  const defaultPayables = (suppliers || []).reduce((sum, s) => sum + Math.max(0, Number(s.balance || 0)), 0);
 
   // Editable Assets & Liabilities Inputs
   const [cashInHand, setCashInHand] = useState(0);
@@ -19,10 +33,12 @@ const ZakatCalculator = () => {
   const [receivablesEdit, setReceivables] = useState(null);
   const inventoryValue = inventoryEdit ?? defaultInventoryValue;
   const receivables = receivablesEdit ?? defaultReceivablesValue;
-  const [liabilitiesDeductions, setLiabilitiesDeductions] = useState(0);
+  const [liabilitiesEdit, setLiabilitiesDeductions] = useState(null);
+  const liabilitiesDeductions = liabilitiesEdit ?? defaultPayables;
 
-  const totalZakatableAssets = Number(cashInHand) + Number(bankBalance) + Number(goldSilverValue) + Number(inventoryValue) + Number(receivables);
-  const netZakatableAssets = Math.max(0, totalZakatableAssets - Number(liabilitiesDeductions));
+  const totalZakatableAssets =
+    amount(cashInHand) + amount(bankBalance) + amount(goldSilverValue) + amount(inventoryValue) + amount(receivables);
+  const netZakatableAssets = Math.max(0, totalZakatableAssets - amount(liabilitiesDeductions));
   const estimatedZakat = Math.round(netZakatableAssets * 0.025);
 
   return (
@@ -49,13 +65,14 @@ const ZakatCalculator = () => {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Left Column: Asset Inputs */}
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 space-y-4">
-          <h2 className="font-bold text-slate-100 text-base border-b border-slate-800 pb-2">Zakatable Assets (Rs.)</h2>
+          <h2 className="font-bold text-slate-100 text-base border-b border-slate-800 pb-2">Zakatable Assets ({curr})</h2>
 
           <div className="space-y-3 text-xs">
             <div>
               <label className="font-semibold text-slate-400">Cash in Hand / Till</label>
               <input
                 type="number"
+                min="0"
                 value={cashInHand}
                 onChange={(e) => setCashInHand(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 font-semibold mt-1 focus:outline-none focus:border-purple-500"
@@ -66,6 +83,7 @@ const ZakatCalculator = () => {
               <label className="font-semibold text-slate-400">Bank Accounts Balance</label>
               <input
                 type="number"
+                min="0"
                 value={bankBalance}
                 onChange={(e) => setBankBalance(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 font-semibold mt-1 focus:outline-none focus:border-purple-500"
@@ -76,6 +94,7 @@ const ZakatCalculator = () => {
               <label className="font-semibold text-slate-400">Shop Inventory Wholesale Value (Auto-Derived)</label>
               <input
                 type="number"
+                min="0"
                 value={inventoryValue}
                 onChange={(e) => setInventoryValue(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-indigo-300 font-semibold mt-1 focus:outline-none focus:border-purple-500"
@@ -86,6 +105,7 @@ const ZakatCalculator = () => {
               <label className="font-semibold text-slate-400">Udhaar Receivables from Customers (Auto-Derived)</label>
               <input
                 type="number"
+                min="0"
                 value={receivables}
                 onChange={(e) => setReceivables(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-rose-300 font-semibold mt-1 focus:outline-none focus:border-purple-500"
@@ -96,6 +116,7 @@ const ZakatCalculator = () => {
               <label className="font-semibold text-slate-400">Gold / Silver / Other Investments</label>
               <input
                 type="number"
+                min="0"
                 value={goldSilverValue}
                 onChange={(e) => setGoldSilverValue(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 font-semibold mt-1 focus:outline-none focus:border-purple-500"
@@ -103,9 +124,10 @@ const ZakatCalculator = () => {
             </div>
 
             <div className="pt-2 border-t border-slate-800">
-              <label className="font-semibold text-rose-300">Debts & Liabilities Deductions (Payables / Supplier Bills)</label>
+              <label className="font-semibold text-rose-300">Debts & Liabilities Deductions (Payables / Supplier Bills — Auto-Derived)</label>
               <input
                 type="number"
+                min="0"
                 value={liabilitiesDeductions}
                 onChange={(e) => setLiabilitiesDeductions(e.target.value)}
                 className="w-full bg-slate-950 border border-rose-900/50 rounded-xl p-2.5 text-rose-300 font-semibold mt-1 focus:outline-none"
@@ -122,15 +144,15 @@ const ZakatCalculator = () => {
             <div className="space-y-2.5 text-xs text-slate-300">
               <div className="flex justify-between">
                 <span>Gross Zakatable Assets:</span>
-                <span className="font-bold text-slate-100">Rs. {totalZakatableAssets.toLocaleString()}</span>
+                <span className="font-bold text-slate-100">{money(totalZakatableAssets)}</span>
               </div>
               <div className="flex justify-between text-rose-300">
                 <span>Deductible Liabilities:</span>
-                <span className="font-bold">- Rs. {Number(liabilitiesDeductions).toLocaleString()}</span>
+                <span className="font-bold">- {money(liabilitiesDeductions)}</span>
               </div>
               <div className="flex justify-between text-sm pt-2 border-t border-purple-800/40">
                 <span className="font-bold text-slate-100">Net Zakatable Wealth:</span>
-                <span className="font-extrabold text-purple-300">Rs. {netZakatableAssets.toLocaleString()}</span>
+                <span className="font-extrabold text-purple-300">{money(netZakatableAssets)}</span>
               </div>
             </div>
 
@@ -138,7 +160,7 @@ const ZakatCalculator = () => {
             <div className="p-6 bg-slate-950 rounded-2xl border border-purple-500/30 text-center space-y-1 shadow-xl">
               <span className="text-xs font-bold uppercase text-purple-400">Total Zakat Due (2.5%)</span>
               <div className="text-3xl font-black text-purple-300">
-                Rs. {estimatedZakat.toLocaleString()}
+                {money(estimatedZakat)}
               </div>
               <p className="text-[10px] text-slate-400">Payable annually on net wealth exceeding Nisab</p>
             </div>

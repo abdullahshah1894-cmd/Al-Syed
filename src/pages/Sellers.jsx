@@ -4,7 +4,7 @@ import { useAuth } from "../context/AuthContext";
 import {
   User, DollarSign, Clock, Users, Receipt, Search, TrendingUp, ShoppingBag, HandCoins, Undo2, CalendarDays,
 } from "lucide-react";
-import { isSettlement, realSales, totalProfit, udhaarAdded } from "../utils/sales";
+import { isSettlement, realSales, saleBelongsTo, totalProfit, udhaarAdded } from "../utils/sales";
 import { localDate, isBetween } from "../utils/dates";
 
 const sameName = (a, b) => (a || "").trim().toLowerCase() === (b || "").trim().toLowerCase();
@@ -21,9 +21,8 @@ const inRange = (day, range) => !!day && (!range.from || day >= range.from) && (
 const RANGES = ["Today", "This Week", "This Month", "All Time", "Custom"];
 
 // Local-date bounds (YYYY-MM-DD, inclusive) of a range preset
-const rangeOf = (preset, customFrom, customTo) => {
+const rangeOf = (preset, customFrom, customTo, today = localDate()) => {
   const now = new Date();
-  const today = localDate(now);
   if (preset === "Today") return { from: today, to: today };
   if (preset === "This Week") {
     const start = new Date(now);
@@ -41,6 +40,8 @@ const sellerStats = (allSales, seller, range) => {
   const records = mine.filter((s) => isBetween(s.createdAt, range.from, range.to));
   const bills = realSales(records).filter((s) => s.paymentStatus !== "returned");
   const settlements = records.filter(isSettlement);
+  // Money paid above a bill goes against the customer's old Udhaar (same rule as the server)
+  const overPaid = realSales(records).filter((s) => num(s.paidAmount) > num(s.grandTotal));
   const returns = mine.flatMap((s) =>
     (s.returns || []).filter((r) => inRange(returnDay(r), range)).map((r) => ({ ...r, sale: s }))
   );
@@ -65,8 +66,9 @@ const sellerStats = (allSales, seller, range) => {
     profit: totalProfit(bills),
     items: sumBy(bills, netItems),
     udhaarGiven: sumBy(bills, udhaarAdded),
-    udhaarCollected: sumBy(settlements, (s) => s.paidAmount),
-    collections: settlements.length,
+    udhaarCollected:
+      sumBy(settlements, (s) => s.paidAmount) + sumBy(overPaid, (s) => num(s.paidAmount) - num(s.grandTotal)),
+    collections: settlements.length + overPaid.length,
     returnsCount: returns.length,
     returnsAmount: sumBy(returns, (r) => r.amount),
     customers: customerKeys.size,
@@ -88,7 +90,9 @@ const Sellers = () => {
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
 
-  const range = useMemo(() => rangeOf(preset, customFrom, customTo), [preset, customFrom, customTo]);
+  // "today" is part of the key so Today / This Week / This Month move on after midnight
+  const today = localDate();
+  const range = useMemo(() => rangeOf(preset, customFrom, customTo, today), [preset, customFrom, customTo, today]);
   const rangeLabel =
     preset === "Custom"
       ? `${range.from || "start"} → ${range.to || "today"}`
@@ -109,14 +113,22 @@ const Sellers = () => {
     [allSales, range]
   );
 
-  // Customers assigned to this seller, biggest balance first (current balances)
-  const sellerCustomers = useMemo(
-    () =>
-      (allCustomers || [])
-        .filter((c) => sameName(c.sellerName, selectedSeller))
-        .sort((a, b) => num(b.totalPending) - num(a.totalPending)),
-    [allCustomers, selectedSeller]
-  );
+  // Customers of this seller, biggest balance first (current balances). A customer without an
+  // assigned seller belongs to the seller of their latest bill / receipt (same rule as Udhaar page).
+  const sellerCustomers = useMemo(() => {
+    const ownerOf = (c) => {
+      if ((c.sellerName || "").trim()) return c.sellerName;
+      let latest = null;
+      (allSales || []).forEach((s) => {
+        if (!sellerOf(s) || !saleBelongsTo(s, c)) return;
+        if (!latest || new Date(s.createdAt) > new Date(latest.createdAt)) latest = s;
+      });
+      return latest ? sellerOf(latest) : "";
+    };
+    return (allCustomers || [])
+      .filter((c) => sameName(ownerOf(c), selectedSeller))
+      .sort((a, b) => num(b.totalPending) - num(a.totalPending));
+  }, [allCustomers, allSales, selectedSeller]);
   const sellerCustomersPending = sumBy(sellerCustomers, (c) => c.totalPending);
 
   const cleanSearch = searchTerm.replace(/[-\s]/g, "").toLowerCase();
@@ -258,7 +270,8 @@ const Sellers = () => {
             <Users size={16} className="text-indigo-400" /> Customers of {selectedSeller}
           </h2>
           <p className="text-[11px] text-slate-500 mb-4">
-            {sellerCustomers.length} customer(s) • current Udhaar {fmt(sellerCustomersPending)}
+            {sellerCustomers.length} customer(s) • Udhaar owed today {fmt(sellerCustomersPending)} (current
+            balances, not limited to {rangeLabel})
           </p>
           <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-2">
             {sellerCustomers.length === 0 ? (

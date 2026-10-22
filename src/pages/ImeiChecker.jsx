@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useMemo } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useApp } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
@@ -6,22 +6,20 @@ import { itemImeis } from "../utils/sales";
 import { formatWAPhone } from "../utils/shareImage";
 import {
   Search,
-  ShieldCheck,
   CheckCircle2,
   XCircle,
   AlertCircle,
   Smartphone,
-  User,
   FileText,
-  Calendar,
-  QrCode,
   Truck,
-  Building2,
   Phone,
   MessageCircle,
   RotateCcw,
   ExternalLink,
 } from "lucide-react";
+
+// Keep only the digits of a typed / scanned / pasted IMEI (spaces and dashes are dropped)
+const cleanImei = (v) => String(v || "").replace(/\D/g, "").slice(0, 15);
 
 // Helper: Luhn Algorithm Validation for 15-digit IMEI
 const validateLuhnIMEI = (imeiStr) => {
@@ -44,38 +42,48 @@ const ImeiChecker = () => {
   const { isAdmin } = useAuth();
   const navigate = useNavigate();
   const curr = shopSettings.currencySymbol || "Rs.";
-  const [searchParams] = useSearchParams();
-  const [imeiInput, setImeiInput] = useState(searchParams.get("imei") || "");
-  const [searchResult, setSearchResult] = useState(null);
-  const [hasSearched, setHasSearched] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  const performLookup = useCallback((targetImei) => {
-    if (!targetImei.trim()) return;
-    setHasSearched(true);
+  // The IMEI being looked up comes from ?imei= (header search) or the form, and follows the URL
+  const urlImei = cleanImei(searchParams.get("imei"));
+  const [imeiInput, setImeiInput] = useState(urlImei);
+  const [query, setQuery] = useState(urlImei);
+  const [lastUrlImei, setLastUrlImei] = useState(urlImei);
+  if (urlImei !== lastUrlImei) {
+    setLastUrlImei(urlImei);
+    if (urlImei) {
+      setImeiInput(urlImei);
+      setQuery(urlImei);
+    }
+  }
 
-    const isLuhnValid = validateLuhnIMEI(targetImei.trim());
+  // The result is worked out from the live data, so it is right once products / sales load or change
+  const searchResult = useMemo(() => {
+    const target = String(query || "").trim();
+    if (!target) return null;
 
-    // Search through all products and their IMEIs (supports single & dual SIM IMEIs)
+    const isLuhnValid = validateLuhnIMEI(target);
+
+    // Search through all products and their IMEIs (supports single & dual SIM IMEIs).
+    // The same IMEI can be on two products (sold from one, bought back into another): prefer the unit in stock.
     let matchedProduct = null;
     let matchedImeiObj = null;
 
-    for (const prod of products) {
-      if (prod.imeis && prod.imeis.length > 0) {
-        const found = prod.imeis.find(
-          (i) => i.imei === targetImei.trim() || i.imei1 === targetImei.trim() || i.imei2 === targetImei.trim()
-        );
-        if (found) {
-          matchedProduct = prod;
-          matchedImeiObj = found;
-          break;
-        }
+    for (const prod of products || []) {
+      if (prod.isDeleted || !Array.isArray(prod.imeis)) continue;
+      const found = prod.imeis.find(
+        (i) => i && [i.imei, i.imei1, i.imei2].some((k) => k && String(k) === target)
+      );
+      if (found && (!matchedImeiObj || (found.status === "in_stock" && matchedImeiObj.status !== "in_stock"))) {
+        matchedProduct = prod;
+        matchedImeiObj = found;
       }
     }
 
     // Every IMEI of the matched unit (a dual-SIM phone may be billed / warrantied under either one)
     const keys = matchedImeiObj
-      ? [matchedImeiObj.imei, matchedImeiObj.imei1, matchedImeiObj.imei2].filter(Boolean)
-      : [targetImei.trim()];
+      ? [matchedImeiObj.imei, matchedImeiObj.imei1, matchedImeiObj.imei2].filter(Boolean).map(String)
+      : [target];
 
     // Search all sales (not only the selected seller's) to find bill details if sold:
     // the unit's own sale link first, then any bill item carrying one of its IMEIs
@@ -107,11 +115,14 @@ const ImeiChecker = () => {
       returnedDate = entry?.date || entry?.at || matchedImeiObj?.returnedAt || null;
     }
 
-    // Search warranty records
-    const matchedWarranty = (warranties || []).find((w) => keys.includes(w.imei)) || null;
+    // Search warranty records: a phone sold again after a return has several, so take the newest live one
+    const unitWarranties = (warranties || [])
+      .filter((w) => w.imei && keys.includes(String(w.imei)))
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    const matchedWarranty = unitWarranties.find((w) => w.status !== "Void") || unitWarranties[0] || null;
 
-    setSearchResult({
-      imei: targetImei.trim(),
+    return {
+      imei: target,
       isLuhnValid,
       matchedProduct,
       matchedImeiObj,
@@ -120,17 +131,9 @@ const ImeiChecker = () => {
       isReturned: returnedOnBill || unitReturned,
       returnedDate,
       matchedWarranty,
-    });
-  }, [products, allSales, warranties]);
-
-  // Rerun the ?imei= lookup once products / sales / warranties have loaded
-  useEffect(() => {
-    const urlImei = searchParams.get("imei");
-    if (urlImei) {
-      setImeiInput(urlImei);
-      performLookup(urlImei);
-    }
-  }, [searchParams, performLookup]);
+    };
+  }, [query, products, allSales, warranties]);
+  const hasSearched = !!searchResult;
 
   const warrantyBadge = (status) =>
     status === "Active"
@@ -141,7 +144,8 @@ const ImeiChecker = () => {
 
   const fmtDate = (d) => {
     if (!d) return "—";
-    const dt = new Date(d);
+    // A plain YYYY-MM-DD is a local calendar day (new Date() would read it as UTC midnight)
+    const dt = /^\d{4}-\d{2}-\d{2}$/.test(String(d)) ? new Date(`${d}T00:00:00`) : new Date(d);
     return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString();
   };
 
@@ -251,7 +255,8 @@ const ImeiChecker = () => {
         {unit?.purchaseDate && (
           <p className="text-[11px] text-emerald-300/80 pl-6">Purchased on {fmtDate(unit.purchaseDate)}</p>
         )}
-        {supplier && (
+        {/* Supplier accounts are owner-only */}
+        {isAdmin && supplier && (
           <div className="pl-6 pt-1">
             <button
               type="button"
@@ -287,7 +292,16 @@ const ImeiChecker = () => {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    performLookup(imeiInput);
+    const target = cleanImei(imeiInput);
+    if (!target) return;
+    setImeiInput(target);
+    setQuery(target);
+    // Keep ?imei= in step with what is shown, so a later header search for the same IMEI still works
+    if (urlImei && urlImei !== target) {
+      const next = new URLSearchParams(searchParams);
+      next.set("imei", target);
+      setSearchParams(next, { replace: true });
+    }
   };
 
   return (
@@ -312,10 +326,10 @@ const ImeiChecker = () => {
             <Smartphone size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
-              maxLength={15}
+              inputMode="numeric"
               placeholder="Enter or scan 15-digit IMEI (e.g. 358921098471201)..."
               value={imeiInput}
-              onChange={(e) => setImeiInput(e.target.value.replace(/\D/g, ""))}
+              onChange={(e) => setImeiInput(cleanImei(e.target.value))}
               className="w-full pl-10 pr-4 py-3 bg-slate-950 border border-slate-800 rounded-2xl text-sm font-mono text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
             />
           </div>
@@ -353,7 +367,7 @@ const ImeiChecker = () => {
               </div>
             </div>
             <span className="text-xs font-mono font-bold px-3 py-1 bg-slate-900 rounded-lg border border-slate-800">
-              15 Digits
+              {searchResult.imei.length} Digits
             </span>
           </div>
 
@@ -394,7 +408,7 @@ const ImeiChecker = () => {
                   <div className="bg-slate-950 p-3 rounded-xl border border-slate-800">
                     <span className="text-slate-500 block text-[10px] uppercase font-bold">Sale Price</span>
                     <span className="font-extrabold text-slate-100 text-sm">
-                      {shopSettings.currencySymbol} {searchResult.matchedProduct.salePrice.toLocaleString()}
+                      {shopSettings.currencySymbol} {Number(searchResult.matchedProduct.salePrice || 0).toLocaleString()}
                     </span>
                   </div>
 
@@ -483,7 +497,8 @@ const ImeiChecker = () => {
               <AlertCircle size={40} className="mx-auto text-amber-500" />
               <h3 className="font-bold text-slate-200 text-base">IMEI Not Found in Shop Database</h3>
               <p className="text-xs text-slate-400 max-w-md mx-auto">
-                No inventory or sales record exists for IMEI <span className="font-mono text-amber-400">{searchResult.imei}</span>. You can add it under Products/Inventory.
+                No inventory or sales record exists for IMEI <span className="font-mono text-amber-400">{searchResult.imei}</span>.
+                {isAdmin ? " You can add it under Products/Inventory." : " Ask the owner to add it to inventory."}
               </p>
             </div>
           )}

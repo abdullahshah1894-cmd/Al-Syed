@@ -1,13 +1,15 @@
-import React from "react";
-import { Navigate, Outlet } from "react-router-dom";
+import { Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { ShieldAlert } from "lucide-react";
 
 const ProtectedRoute = ({ allowedRoles }) => {
   const { user, token } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   if (!token || !user) {
-    return <Navigate to="/login" replace />;
+    // Remember the page so the login screen can come back to it
+    return <Navigate to="/login" replace state={{ from: location }} />;
   }
 
   if (allowedRoles && !allowedRoles.includes(user.role)) {
@@ -18,13 +20,14 @@ const ProtectedRoute = ({ allowedRoles }) => {
         </div>
         <h1 className="text-2xl font-bold text-slate-100 mb-2">Access Restricted</h1>
         <p className="text-slate-400 max-w-md mb-6">
-          Your assigned role (<span className="capitalize font-semibold text-amber-400">{user.role}</span>) does not have administrative permission to view this section (Analytics, Zakat, or System Settings).
+          Your assigned role (<span className="capitalize font-semibold text-amber-400">{user.role}</span>) does not have
+          permission to view this section. Only the owner (admin) can open it.
         </p>
         <button
-          onClick={() => window.history.back()}
+          onClick={() => navigate("/dashboard", { replace: true })}
           className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 font-medium rounded-lg text-white transition-all shadow-lg shadow-indigo-600/30"
         >
-          Go Back
+          Go to Dashboard
         </button>
       </div>
     );

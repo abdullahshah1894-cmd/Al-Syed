@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useApp, getProductStock } from "../context/AppContext";
+import { useAuth } from "../context/AuthContext";
 import { localDate } from "../utils/dates";
 import {
   Truck,
@@ -172,6 +173,7 @@ const Suppliers = () => {
     updateSupplierTransaction,
     deleteSupplierTransaction,
   } = useApp();
+  const { isAdmin } = useAuth();
   const curr = shopSettings.currencySymbol || "Rs.";
   const money = (v) => `${curr} ${num(v).toLocaleString()}`;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -561,6 +563,18 @@ const Suppliers = () => {
 
   const balanceCls = (b) => (b > 0 ? "text-rose-400" : b < 0 ? "text-emerald-400" : "text-slate-300");
   const balanceLabel = (b) => (b < 0 ? `${money(-b)} advance` : money(b));
+
+  // Supplier accounts are the owner's only (the route is admin-only too; the server refuses cashiers)
+  if (!isAdmin) {
+    return (
+      <div className="p-6">
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-10 text-center text-slate-400">
+          <Truck size={40} className="mx-auto mb-3 opacity-30" />
+          <p className="text-sm font-semibold text-slate-200">Suppliers are managed by the owner only.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6">

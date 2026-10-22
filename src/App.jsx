@@ -1,9 +1,10 @@
 import React from "react";
-import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import { AppProvider } from "./context/AppContext";
 
 import ProtectedRoute from "./components/ProtectedRoute";
+import ErrorBoundary from "./components/ErrorBoundary";
 import Sidebar from "./components/Sidebar";
 import Header from "./components/Header";
 
@@ -27,12 +28,16 @@ import Suppliers from "./pages/Suppliers";
 
 // Main App Layout Wrapper
 const MainLayout = ({ children }) => {
+  // A crash inside one page shows an error card there; the menu keeps working and moving to another page clears it
+  const { pathname } = useLocation();
   return (
     <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden print:h-auto print:bg-white print:overflow-visible print:block">
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0 overflow-y-auto print:overflow-visible print:bg-white print:block">
         <Header />
-        <main className="flex-1 overflow-y-auto print:overflow-visible print:bg-white print:block">{children}</main>
+        <main className="flex-1 overflow-y-auto print:overflow-visible print:bg-white print:block">
+          <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
+        </main>
       </div>
     </div>
   );

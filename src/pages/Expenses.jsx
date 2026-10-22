@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
+import { useAuth } from "../context/AuthContext";
 import { localDate } from "../utils/dates";
 import {
   Wallet, Plus, Trash2, Edit3, X, Search,
@@ -80,6 +81,8 @@ const BreakdownCard = ({ title, icon: Icon, rows, bar, curr }) => (
 
 const Expenses = () => {
   const { allExpenses, activeSeller, addExpense, updateExpense, deleteExpense, shopSettings } = useApp();
+  // Anyone can add an expense; only the owner (admin) can edit or delete one
+  const { isAdmin } = useAuth();
   const curr = shopSettings.currencySymbol || "Rs.";
   const expenses = useMemo(() => allExpenses || [], [allExpenses]);
 
@@ -107,6 +110,7 @@ const Expenses = () => {
     expenseDate: today(),
   });
   const [formError, setFormError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const resetForm = () => {
     setForm({ title: "", amount: "", category: "Other", description: "", sellerName: "", paymentMethod: "Cash", expenseDate: today() });
@@ -116,11 +120,13 @@ const Expenses = () => {
 
   const handleOpenAdd = () => { resetForm(); setShowForm(true); };
   const handleOpenEdit = (exp) => {
+    if (!isAdmin) return;
+    setFormError("");
     setEditingExpense(exp);
     setForm({
       title: exp.title,
       amount: String(exp.amount),
-      category: exp.category,
+      category: exp.category || "Other",
       description: exp.description || "",
       sellerName: exp.sellerName || "",
       paymentMethod: exp.paymentMethod || "Cash",
@@ -131,6 +137,8 @@ const Expenses = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (saving) return;
+    if (editingExpense && !isAdmin) return;
     if (!form.title.trim()) { setFormError("Expense title is required."); return; }
     if (!form.amount || Number(form.amount) <= 0) { setFormError("Amount must be greater than zero."); return; }
 
@@ -144,9 +152,11 @@ const Expenses = () => {
       expenseDate: form.expenseDate || today(),
     };
 
+    setSaving(true);
     const ok = editingExpense
       ? await updateExpense(editingExpense.id, data)
       : await addExpense(data);
+    setSaving(false);
     // Keep the form filled if the database did not save it
     if (!ok) return;
 
@@ -155,6 +165,7 @@ const Expenses = () => {
   };
 
   const handleDelete = (id, title) => {
+    if (!isAdmin) return;
     if (window.confirm(`Delete expense "${title}"?`)) {
       deleteExpense(id);
     }
@@ -391,10 +402,12 @@ const Expenses = () => {
                 <div className="text-right shrink-0">
                   <div className="font-extrabold text-amber-400 text-sm">{curr} {num(exp.amount).toLocaleString()}</div>
                 </div>
-                <div className="flex gap-1 shrink-0">
-                  <button onClick={() => handleOpenEdit(exp)} className="p-1.5 text-slate-500 hover:text-indigo-400 hover:bg-slate-800 rounded-lg transition-colors"><Edit3 size={14} /></button>
-                  <button onClick={() => handleDelete(exp.id, exp.title)} className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded-lg transition-colors"><Trash2 size={14} /></button>
-                </div>
+                {isAdmin && (
+                  <div className="flex gap-1 shrink-0">
+                    <button onClick={() => handleOpenEdit(exp)} title="Edit expense" className="p-1.5 text-slate-500 hover:text-indigo-400 hover:bg-slate-800 rounded-lg transition-colors"><Edit3 size={14} /></button>
+                    <button onClick={() => handleDelete(exp.id, exp.title)} title="Delete expense" className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded-lg transition-colors"><Trash2 size={14} /></button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -434,7 +447,7 @@ const Expenses = () => {
                   <label className="text-xs font-semibold text-slate-300">Category</label>
                   <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100 mt-1 focus:outline-none focus:border-amber-500">
-                    {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                    {[...new Set([...CATEGORIES, form.category].filter(Boolean))].map((c) => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
 
@@ -443,7 +456,7 @@ const Expenses = () => {
                   <select value={form.sellerName} onChange={(e) => setForm({ ...form, sellerName: e.target.value })}
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100 mt-1 focus:outline-none focus:border-amber-500">
                     <option value="">No specific seller</option>
-                    {SELLERS.map((s) => <option key={s} value={s}>{s}</option>)}
+                    {[...new Set([...SELLERS, form.sellerName].filter(Boolean))].map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </div>
 
@@ -451,7 +464,7 @@ const Expenses = () => {
                   <label className="text-xs font-semibold text-slate-300">Payment Method</label>
                   <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100 mt-1 focus:outline-none focus:border-amber-500">
-                    {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+                    {[...new Set([...PAYMENT_METHODS, form.paymentMethod].filter(Boolean))].map((m) => <option key={m} value={m}>{m}</option>)}
                   </select>
                 </div>
 
@@ -474,10 +487,10 @@ const Expenses = () => {
                   className="flex-1 py-2.5 bg-slate-800 text-slate-300 text-sm font-bold rounded-xl hover:bg-slate-700">
                   Cancel
                 </button>
-                <button type="submit"
-                  className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 text-white text-sm font-bold rounded-xl shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2">
+                <button type="submit" disabled={saving}
+                  className="flex-1 py-2.5 disabled:opacity-60 bg-amber-500 hover:bg-amber-400 text-white text-sm font-bold rounded-xl shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2">
                   <CheckCircle2 size={16} />
-                  {editingExpense ? "Update Expense" : "Save Expense"}
+                  {saving ? "Saving…" : editingExpense ? "Update Expense" : "Save Expense"}
                 </button>
               </div>
             </form>

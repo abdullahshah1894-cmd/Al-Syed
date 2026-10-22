@@ -1,16 +1,15 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
-import { useAuth } from "../context/AuthContext";
 import {
   ShoppingCart, Search, Plus, Minus, Trash2, UserPlus, Printer,
-  CheckCircle2, CreditCard, Banknote, Clock, Smartphone, ScanLine,
-  X, AlertCircle, User, ChevronDown, Image as ImageIcon,
+  CheckCircle2, Smartphone, X, AlertCircle, User, ChevronDown,
 } from "lucide-react";
 
 import { printElement } from "../services/printReceipt";
-import { shareImageToWhatsApp } from "../utils/shareImage";
+import { useShareImage } from "../components/useShareImage";
 
 // Kept for older importers; the helper now lives in utils/shareImage
+// eslint-disable-next-line react-refresh/only-export-components
 export { formatWAPhone } from "../utils/shareImage";
 
 // ─────────────────────────────────────────────────────────────────
@@ -19,13 +18,15 @@ export { formatWAPhone } from "../utils/shareImage";
 const POS = () => {
   // All customers, not the header-filtered list: choosing a seller only sorts their customers first
   const { products, allCustomers: customers, recordSale, shopSettings, addCustomer, activeSeller, setActiveSeller } = useApp();
-  const { user } = useAuth();
 
   const [cart, setCart] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
-  const selectedSeller = activeSeller === "All Sellers" ? SELLERS[0] : activeSeller;
+  // The header filter can say "All Sellers" / "All", which is not a seller: the bill then goes to the first seller
+  const selectedSeller = activeSeller && !/^all\b/i.test(activeSeller) ? activeSeller : SELLERS[0];
   const setSelectedSeller = setActiveSeller;
-  const [selectedCustomer, setSelectedCustomer] = useState(null);
+  const [pickedCustomer, setSelectedCustomer] = useState(null);
+  // Always the latest copy of the chosen customer, so the previous Udhaar shown and printed is current
+  const selectedCustomer = pickedCustomer ? customers.find((c) => c.id === pickedCustomer.id) || pickedCustomer : null;
   const [customerSearch, setCustomerSearch] = useState("");
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   const [discount, setDiscount] = useState(0);
@@ -35,6 +36,7 @@ const POS = () => {
   const [dueDate, setDueDate] = useState("");
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false); // blocks a second click before the button re-renders as disabled
   const [notes, setNotes] = useState("");
 
   // Customer creation modal
@@ -42,16 +44,16 @@ const POS = () => {
   const [newCustName, setNewCustName] = useState("");
   const [newCustPhone, setNewCustPhone] = useState("");
   const [newCustAddress, setNewCustAddress] = useState("");
+  const [isSavingCustomer, setIsSavingCustomer] = useState(false);
 
   // Add to cart modal
   const [productToAdd, setProductToAdd] = useState(null);
-  const [multiAddQty, setMultiAddQty] = useState(1);
+  const [multiAddQty, setMultiAddQty] = useState("1"); // kept as typed, so the box can be cleared and retyped
   const [multiAddImeis, setMultiAddImeis] = useState([]);
 
   // Receipt modal
   const [completedSaleInvoice, setCompletedSaleInvoice] = useState(null);
-  const [isCapturingImage, setIsCapturingImage] = useState(false);
-  const [shareMessage, setShareMessage] = useState(""); // result of the last WhatsApp share
+  const [openShare, shareDialog] = useShareImage();
 
   const customerDropdownRef = useRef(null);
 
@@ -174,12 +176,13 @@ const POS = () => {
       if (multiAddImeis.length === 0) { alert("Please select at least one IMEI."); return; }
       multiAddImeis.forEach((imei) => addToCart(productToAdd, { imei }));
     } else {
-      if (multiAddQty <= 0 || multiAddQty > productToAdd.quantity) {
+      const qty = parseInt(multiAddQty, 10) || 0;
+      if (qty <= 0 || qty > productToAdd.quantity) {
         alert(`Invalid quantity. Available: ${productToAdd.quantity}`);
         return;
       }
       const existing = cart.find((item) => item.product === productToAdd.id && !item.imei);
-      if ((existing ? existing.quantity : 0) + multiAddQty > productToAdd.quantity) {
+      if ((existing ? existing.quantity : 0) + qty > productToAdd.quantity) {
         alert(`Cannot exceed stock (${productToAdd.quantity})!`);
         return;
       }
@@ -187,7 +190,7 @@ const POS = () => {
         const index = prev.findIndex((item) => item.product === productToAdd.id && !item.imei);
         if (index > -1) {
           const updated = [...prev];
-          const newQty = updated[index].quantity + multiAddQty;
+          const newQty = updated[index].quantity + qty;
           updated[index] = { ...updated[index], quantity: newQty, subtotal: newQty * updated[index].unitSalePrice };
           return updated;
         }
@@ -200,15 +203,15 @@ const POS = () => {
           model: productToAdd.model,
           category: productToAdd.category,
           imei: null,
-          quantity: multiAddQty,
+          quantity: qty,
           unitPurchasePrice: productToAdd.purchasePrice,
           unitSalePrice: productToAdd.salePrice,
-          subtotal: productToAdd.salePrice * multiAddQty,
+          subtotal: productToAdd.salePrice * qty,
         }];
       });
     }
     setProductToAdd(null);
-    setMultiAddQty(1);
+    setMultiAddQty("1");
     setMultiAddImeis([]);
   };
 
@@ -235,13 +238,13 @@ const POS = () => {
 
   const openAddToCart = (product) => {
     setMultiAddImeis([]);
-    setMultiAddQty(1);
+    setMultiAddQty("1");
     setProductToAdd(product);
   };
   const closeAddToCart = () => {
     setProductToAdd(null);
     setMultiAddImeis([]);
-    setMultiAddQty(1);
+    setMultiAddQty("1");
   };
 
   const removeFromCart = (cartId) => setCart((prev) => prev.filter((i) => i.cartId !== cartId));
@@ -294,7 +297,7 @@ const POS = () => {
   };
 
   const finalizeCheckout = async () => {
-    if (cart.length === 0 || isSubmitting) return;
+    if (cart.length === 0 || isSubmitting || submittingRef.current) return;
     if (paymentMethod === "Credit (Udhaar)" && !selectedCustomer) {
       alert("Please select a customer for Udhaar (Credit) sales.");
       return;
@@ -324,17 +327,18 @@ const POS = () => {
       notes,
     };
 
+    submittingRef.current = true;
     setIsSubmitting(true);
     let recorded;
     try {
       recorded = await recordSale(saleData);
     } finally {
+      submittingRef.current = false;
       setIsSubmitting(false);
     }
     // Not saved: keep the cart and the checkout open so nothing is lost
     if (!recorded) return;
     setCompletedSaleInvoice({ ...recorded, sellerName: selectedSeller, previousBalance, balanceAfterSale });
-    setShareMessage("");
 
     setCart([]);
     setSelectedCustomer(null);
@@ -351,16 +355,23 @@ const POS = () => {
   // ── Handle Quick Add Customer ─────────────────────────────────
   const handleCreateCustomer = async (e) => {
     e.preventDefault();
-    if (!newCustName || !newCustPhone) return;
-    const created = await addCustomer({
-      name: newCustName,
-      phone: newCustPhone,
-      address: newCustAddress,
-      sellerName: selectedSeller,
-    });
+    if (!newCustName.trim() || !newCustPhone.trim() || isSavingCustomer) return;
+    setIsSavingCustomer(true);
+    let created;
+    try {
+      created = await addCustomer({
+        name: newCustName.trim(),
+        phone: newCustPhone.trim(),
+        address: newCustAddress,
+        sellerName: selectedSeller,
+      });
+    } finally {
+      setIsSavingCustomer(false);
+    }
+    // Not saved: the form stays open with what was typed
     if (!created) return;
     setSelectedCustomer(created);
-    setCustomerSearch(newCustName);
+    setCustomerSearch(created.name);
     setNewCustName("");
     setNewCustPhone("");
     setNewCustAddress("");
@@ -394,7 +405,7 @@ const POS = () => {
       const qty = item.quantity || item.qty || 1;
       const price = item.unitPrice || item.unitSalePrice || item.price || 0;
       const sub = item.subtotal || qty * price;
-      text += `${index + 1}. *${item.productName || item.name}* (x${qty}) - ${currency} ${sub.toLocaleString()}\n`;
+      text += `${index + 1}. *${item.productName || item.name}* (x${qty}) - ${currency} ${Number(sub || 0).toLocaleString()}\n`;
       const imeis = (item.imeisArray && item.imeisArray.length > 0 ? item.imeisArray : [item.imei]).filter(Boolean);
       if (imeis.length > 0) {
         text += `   IMEI: ${imeis.join(", ")}\n`;
@@ -424,24 +435,16 @@ const POS = () => {
     return text;
   };
 
-  // ── WhatsApp: send the receipt as a picture ──────────────────
-  const handleWhatsAppShare = async () => {
-    if (!completedSaleInvoice || isCapturingImage) return;
-    setIsCapturingImage(true);
-    setShareMessage("");
-    try {
-      const { message } = await shareImageToWhatsApp({
-        element: document.getElementById("receipt-content"),
-        phone: completedSaleInvoice.customerPhone,
-        text: getSaleWAText(completedSaleInvoice),
-        fileName: `Invoice_${completedSaleInvoice.billNumber || "INV"}.png`,
-      });
-      setShareMessage(message);
-    } catch (err) {
-      setShareMessage(`Could not create the invoice image: ${err.message || err}`);
-    } finally {
-      setIsCapturingImage(false);
-    }
+  // ── Share the receipt as a picture: preview, then WhatsApp / any app / copy / download ──
+  const handleWhatsAppShare = () => {
+    if (!completedSaleInvoice) return;
+    openShare({
+      element: document.getElementById("receipt-content"),
+      fileName: `Invoice_${completedSaleInvoice.billNumber || "INV"}.png`,
+      phone: completedSaleInvoice.customerPhone,
+      text: getSaleWAText(completedSaleInvoice),
+      title: "Share Invoice",
+    });
   };
 
   // ── UI ─────────────────────────────────────────────────────────
@@ -778,7 +781,7 @@ const POS = () => {
               </div>
               <div className="pt-2 flex justify-end gap-2">
                 <button type="button" onClick={() => setShowAddCustomerModal(false)} className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl">Cancel</button>
-                <button type="submit" className="px-5 py-2.5 bg-indigo-600 text-white text-xs font-bold rounded-xl hover:bg-indigo-500">Save & Select</button>
+                <button type="submit" disabled={isSavingCustomer} className="px-5 py-2.5 bg-indigo-600 text-white text-xs font-bold rounded-xl hover:bg-indigo-500 disabled:opacity-60">{isSavingCustomer ? "Saving…" : "Save & Select"}</button>
               </div>
             </form>
           </div>
@@ -976,12 +979,6 @@ const POS = () => {
             </div>
             </div>
 
-            {shareMessage && (
-              <div className="px-4 py-2 text-[11px] font-semibold text-emerald-800 bg-emerald-50 border-t border-emerald-100 print:hidden">
-                {shareMessage}
-              </div>
-            )}
-
             {/* Actions */}
             <div className="flex gap-2 p-4 border-t border-slate-100 bg-slate-50 print:hidden">
               <button onClick={handlePrint} className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow">
@@ -989,14 +986,9 @@ const POS = () => {
               </button>
               <button
                 onClick={handleWhatsAppShare}
-                disabled={isCapturingImage}
-                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow disabled:opacity-60"
+                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow"
               >
-                {isCapturingImage ? (
-                  <><svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> Preparing...</>
-                ) : (
-                  <><Smartphone size={14} /> WhatsApp</>
-                )}
+                <Smartphone size={14} /> Share
               </button>
               <button onClick={() => setCompletedSaleInvoice(null)} className="py-2.5 px-3 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs rounded-xl flex items-center justify-center gap-1">
                 <CheckCircle2 size={14} /> Done
@@ -1021,7 +1013,8 @@ const POS = () => {
               <div className="space-y-3">
                 <label className="text-xs font-semibold text-slate-400 uppercase">Select IMEIs</label>
                 <div className="max-h-48 overflow-y-auto space-y-2 custom-scrollbar pr-2">
-                  {productToAdd.imeis.filter((i) => i.status === "in_stock").map((imeiObj) => (
+                  {/* Units already in the cart are left out, so picking them cannot fail */}
+                  {productToAdd.imeis.filter((i) => i.status === "in_stock" && !cart.some((c) => c.imei === i.imei)).map((imeiObj) => (
                     <label key={imeiObj.imei} className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${multiAddImeis.includes(imeiObj.imei) ? "bg-indigo-600/20 border-indigo-500" : "bg-slate-950 border-slate-800 hover:border-slate-700"}`}>
                       <input type="checkbox" checked={multiAddImeis.includes(imeiObj.imei)}
                         onChange={(e) => {
@@ -1046,17 +1039,20 @@ const POS = () => {
               <div className="space-y-2">
                 <label className="text-xs font-semibold text-slate-400 uppercase">Quantity (Max: {productToAdd.quantity})</label>
                 <input type="number" min="1" max={productToAdd.quantity} value={multiAddQty}
-                  onChange={(e) => setMultiAddQty(parseInt(e.target.value) || 1)}
+                  onChange={(e) => setMultiAddQty(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleConfirmMultiAdd()}
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500" />
               </div>
             )}
 
             <button onClick={handleConfirmMultiAdd} className="w-full mt-5 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl transition-all">
-              Add {productToAdd.imeis && productToAdd.imeis.length > 0 ? multiAddImeis.length : multiAddQty} to Cart
+              Add {productToAdd.imeis && productToAdd.imeis.length > 0 ? multiAddImeis.length : parseInt(multiAddQty, 10) || 0} to Cart
             </button>
           </div>
         </div>
       )}
+
+      {shareDialog}
     </>
   );
 };

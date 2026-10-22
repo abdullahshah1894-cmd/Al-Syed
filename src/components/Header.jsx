@@ -6,29 +6,45 @@ import {
   Search,
   Bell,
   ShoppingCart,
-  PlusCircle,
   AlertTriangle,
   ChevronDown,
 } from "lucide-react";
 
 const Header = () => {
   const { products, customers, suppliers, activeSeller, setActiveSeller } = useApp();
-  const { user } = useAuth();
+  const { isAdmin } = useAuth();
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState("");
   const [showNotifications, setShowNotifications] = useState(false);
 
-  const lowStockItems = products.filter((p) => getProductStock(p) <= p.minStockAlert);
+  const lowStockItems = (products || []).filter(
+    (p) => p && !p.isDeleted && getProductStock(p) <= Number(p.minStockAlert || 0)
+  );
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
     const query = searchTerm.trim();
     if (!query) return;
 
-    // Check if input looks like a 15 digit IMEI
-    if (/^\d{15}$/.test(query)) {
-      navigate(`/imei-checker?imei=${query}`);
+    // Check if input looks like a 15 digit IMEI (scanners / copies may add spaces or dashes)
+    const digits = query.replace(/[\s-]/g, "");
+    if (/^\d{15}$/.test(digits)) {
+      navigate(`/imei-checker?imei=${digits}`);
       return;
+    }
+
+    // A product barcode or part of an IMEI in stock goes straight to Inventory
+    // (otherwise a number could match part of a customer's phone first)
+    if (/^\d{5,}$/.test(digits)) {
+      const isProductCode = (products || []).some(
+        (p) =>
+          String(p.barcode || "") === digits ||
+          (p.imeis || []).some((i) => [i?.imei, i?.imei1, i?.imei2].some((k) => k && String(k).includes(digits)))
+      );
+      if (isProductCode) {
+        navigate(`/inventory?search=${encodeURIComponent(digits)}`);
+        return;
+      }
     }
 
     // Bill / payment receipt numbers go to the Bills page
@@ -50,8 +66,8 @@ const Header = () => {
       return;
     }
 
-    // Supplier name / company / phone opens the Suppliers page filtered to it
-    const isSupplier = (suppliers || []).some(
+    // Supplier name / company / phone opens the Suppliers page filtered to it (owner only)
+    const isSupplier = isAdmin && (suppliers || []).some(
       (s) =>
         (s.name || "").toLowerCase().includes(query.toLowerCase()) ||
         (s.company || "").toLowerCase().includes(query.toLowerCase()) ||
@@ -149,7 +165,7 @@ const Header = () => {
                         key={item.id}
                         onClick={() => {
                           setShowNotifications(false);
-                          navigate("/inventory");
+                          navigate(`/inventory?search=${encodeURIComponent(item.name || "")}`);
                         }}
                         className="p-3 hover:bg-slate-700/50 cursor-pointer flex items-center justify-between transition-colors"
                       >

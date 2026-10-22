@@ -1,7 +1,8 @@
-import React, { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useApp, SELLERS } from "../context/AppContext";
-import { formatWAPhone, shareImageToWhatsApp } from "../utils/shareImage";
+import { useAuth } from "../context/AuthContext";
+import { useShareImage } from "../components/useShareImage";
 import { printElement } from "../services/printReceipt";
 import { isSettlement, itemImeis, saleBelongsTo, udhaarAdded as saleUdhaar } from "../utils/sales";
 import {
@@ -16,17 +17,37 @@ import {
   Smartphone,
   FileText,
   ShoppingBag,
-  ArrowUpRight,
-  Filter,
   Users,
-  Tag,
-  ChevronDown,
-  ChevronUp,
   RotateCcw,
   Pencil,
   Trash2,
   Undo2,
+  Share2,
 } from "lucide-react";
+
+// "Statement_Ali Khan/2" -> "Statement_Ali_Khan_2.png" (safe on every phone / computer)
+const pngName = (base) => `${String(base || "Receipt").replace(/[^\w.-]+/g, "_")}.png`;
+
+// Everything searchable about one bill line (name and every IMEI form)
+const itemSearchText = (item) =>
+  [
+    item?.productName,
+    item?.name,
+    ...itemImeis(item),
+    ...(Array.isArray(item?.imeis) ? item.imeis.map((im) => (typeof im === "string" ? im : im?.imei)) : []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+// Short "Item x1 (IMEI: ...)" list of what came back in one return
+const returnItemsText = (items) =>
+  (items || [])
+    .map((ri) => {
+      const ims = (ri.imeis || []).filter(Boolean);
+      return `${ri.productName || "Item"} x${Number(ri.qty || ims.length || 1)}${ims.length ? ` (IMEI: ${ims.join(", ")})` : ""}`;
+    })
+    .join(", ");
 
 // Helper to format date with day of the week
 const formatDateWithDay = (dateStr) => {
@@ -90,10 +111,14 @@ const PendingPayments = () => {
     deleteCustomer,
     returnSaleItems,
   } = useApp();
+  // Account edit / delete and returns are for the owner only (the server answers 403 to cashiers)
+  const { isAdmin } = useAuth();
+  // Receipt / statement image preview with WhatsApp / Share to… / Copy / Download
+  const [openShare, shareDialog] = useShareImage();
 
   const customers = useMemo(() => allCustomers || ctxCustomers || [], [allCustomers, ctxCustomers]);
   const sales = useMemo(() => allSales || ctxSales || [], [allSales, ctxSales]);
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
 
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedSeller, setSelectedSeller] = useState("All"); // "All" | "Aziz" | "Mubashir"
@@ -104,10 +129,15 @@ const PendingPayments = () => {
   const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
   const [historyCust, setHistoryCust] = useState(null);
   const [paymentReceipt, setPaymentReceipt] = useState(null);
-  const [statementCustomer, setStatementCustomer] = useState(null);
-  const [isCapturingImage, setIsCapturingImage] = useState(false);
+  // Only the id is kept: the statement always shows the customer's latest balance
+  const [statementCustId, setStatementCustId] = useState(null);
+  const statementCustomer = statementCustId ? customers.find((c) => c.id === statementCustId) || null : null;
+  // The customer in the payment modal, read fresh so the outstanding amount is current
+  const payCust = selectedCustForPayment
+    ? customers.find((c) => c.id === selectedCustForPayment.id) || selectedCustForPayment
+    : null;
 
-  // Short status message at the bottom of the screen (returns, WhatsApp sharing)
+  // Short status message at the bottom of the screen (returns, account changes)
   const [notice, setNotice] = useState(null); // { type: "success" | "error" | "info", text }
   const showNotice = (text, type = "success") => setNotice({ text, type, at: Date.now() });
   useEffect(() => {
@@ -128,8 +158,12 @@ const PendingPayments = () => {
   const [returnNote, setReturnNote] = useState("");
   const [isSubmittingReturn, setIsSubmittingReturn] = useState(false);
 
-  // Sync with URL query parameters if present (e.g., from Header global search)
-  useEffect(() => {
+  // Sync with URL query parameters if present (e.g., from Header global search).
+  // Done while rendering (once per new URL) instead of in an effect, so there is no extra render pass.
+  const paramKey = searchParams.toString();
+  const [syncedParamKey, setSyncedParamKey] = useState(null);
+  if (syncedParamKey !== paramKey) {
+    setSyncedParamKey(paramKey);
     const sParam = searchParams.get("search");
     if (sParam) {
       setSearchTerm(sParam);
@@ -137,10 +171,10 @@ const PendingPayments = () => {
     }
     const sellerParam = searchParams.get("seller");
     if (sellerParam) {
-      setSelectedSeller(sellerParam);
+      setSelectedSeller(SELLERS.find((s) => s.toLowerCase() === sellerParam.trim().toLowerCase()) || sellerParam);
       setViewFilter("all");
     }
-  }, [searchParams]);
+  }
 
   // History modal filters
   const [historyFilter, setHistoryFilter] = useState("all"); // "all" | "sales" | "payments"
@@ -181,8 +215,9 @@ const PendingPayments = () => {
     // Customer Name
     if ((c.name || "").toLowerCase().includes(q)) return true;
 
-    // Phone (matches partial digits)
-    if ((c.phone || "").replace(/\s|-/g, "").includes(q.replace(/\s|-/g, ""))) return true;
+    // Phone (matches partial digits; "-" alone must not match every customer)
+    const qPhone = q.replace(/\s|-/g, "");
+    if (qPhone && (c.phone || "").replace(/\s|-/g, "").includes(qPhone)) return true;
 
     // CNIC
     if ((c.cnic || "").includes(q)) return true;
@@ -199,11 +234,7 @@ const PendingPayments = () => {
 
       if ((s.billNumber || "").toLowerCase().includes(q)) return true;
       if ((s.notes || "").toLowerCase().includes(q)) return true;
-      return (s.items || []).some(
-        (it) =>
-          (it.productName || it.name || "").toLowerCase().includes(q) ||
-          (it.imei || "").toLowerCase().includes(q)
-      );
+      return (s.items || []).some((it) => itemSearchText(it).includes(q));
     });
 
     return hasMatchingSale;
@@ -261,21 +292,71 @@ const PendingPayments = () => {
     if (!cust) return [];
 
     const custSales = sales.filter((s) => saleBelongsTo(s, cust));
+    const timeOf = (d) => {
+      const t = new Date(d).getTime();
+      return isNaN(t) ? 0 : t;
+    };
 
-    // Sort chronologically (oldest to newest) to accurately compute running Udhaar balance
-    const sorted = [...custSales].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    // Ledger events in time order: every bill / payment receipt when it was made, and every
+    // return when it happened (a return lowers the balance on its own day, not on the bill's day)
+    const events = [];
+    custSales.forEach((record) => {
+      const at = timeOf(record.createdAt);
+      events.push({ record, at });
+      if (isSettlement(record)) return;
+      (record.returns || []).forEach((ret, idx) => {
+        events.push({ record, ret, idx, at: Math.max(at, timeOf(ret.at || ret.date)) });
+      });
+    });
+    // Stable sort: a bill stays before its own returns when the times are equal
+    events.sort((a, b) => a.at - b.at);
 
-    // Same rule as the server: a sale adds its due amount, money paid above the bill
-    // goes against the old balance, a settlement lowers it; never below 0
+    // Same rules as the server: a sale adds its due amount, money paid above the bill goes against
+    // the old balance, a settlement lowers it (never below 0), a return lowers it by what it took off
     let runningBalance = 0;
-    return sorted.map((record) => {
+    return events.map(({ record, ret, idx }) => {
+      if (ret) {
+        const dueReduced = Number(ret.dueReduced || 0);
+        runningBalance = Math.max(0, runningBalance - dueReduced);
+        const when = ret.at || ret.date || record.createdAt;
+        return {
+          id: `${record.id}-return-${ret.id || idx}`,
+          saleId: record.id,
+          isReturnEntry: true,
+          isPayment: false,
+          isCredit: false,
+          isCash: false,
+          isReturned: false,
+          billNumber: record.billNumber,
+          createdAt: when,
+          items: ret.items || [],
+          notes: ret.note || "",
+          paymentMethod: "Return",
+          sellerName: ret.by || "",
+          returns: [],
+          returnAmount: Number(ret.amount || 0),
+          dueReduced,
+          cashBack: Number(ret.cashBack || 0),
+          grandTotal: 0,
+          paidAmount: 0,
+          paymentReceived: 0,
+          udhaarAdded: 0,
+          oldBalancePaid: 0,
+          returnedTotal: 0,
+          runningBalance,
+          dateInfo: formatDateWithDay(when),
+        };
+      }
+
       const isPayment = isSettlement(record);
-      const udhaarAdded = saleUdhaar(record);
+      // Returns lowered the bill's due amount on the server; add back what they took off the
+      // account, so the bill shows the Udhaar it added when it was made (the return rows take it off)
+      const returnedDue = (record.returns || []).reduce((sum, r) => sum + Number(r.dueReduced || 0), 0);
+      const udhaarAdded = isPayment ? 0 : saleUdhaar(record) + returnedDue;
       const isCredit = !isPayment && udhaarAdded > 0;
       const isCash = !isPayment && !isCredit;
 
-      // Returns already lowered grandTotal / paidAmount / dueAmount on the server, so the
-      // running balance below stays right; a fully returned bill (grandTotal 0) adds nothing
+      // grandTotal / paidAmount are the bill as it is now (after returns)
       const isReturned = !isPayment && record.paymentStatus === "returned";
       const returnedTotal = (record.returns || []).reduce((sum, r) => sum + Number(r.amount || 0), 0);
 
@@ -299,6 +380,8 @@ const PendingPayments = () => {
 
       return {
         ...record,
+        grandTotal,
+        paidAmount,
         isPayment,
         isCredit,
         isCash,
@@ -311,6 +394,13 @@ const PendingPayments = () => {
         dateInfo,
       };
     });
+  };
+
+  // Where the ledger ends vs. the balance saved on the account (the saved balance is what counts)
+  const ledgerGap = (cust, txs) => {
+    const ledgerEnd = txs.length ? txs[txs.length - 1].runningBalance : 0;
+    const diff = Number(cust?.totalPending || 0) - ledgerEnd;
+    return Math.abs(diff) >= 1 ? { ledgerEnd, diff } : null;
   };
 
   // Handler when selecting a seller button
@@ -404,7 +494,7 @@ const PendingPayments = () => {
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
     text += `*CUSTOMER UDHAAR STATEMENT*\n`;
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
-    text += `*Customer:* ${cust.name}\n`;
+    text += `*Customer:* ${cust.name || "Customer"}\n`;
     if (cust.phone) text += `*Phone:* ${cust.phone}\n`;
     text += `*Date:* ${dateStr}\n`;
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -417,7 +507,9 @@ const PendingPayments = () => {
     const recent = custTx.slice(-5);
     recent.forEach((tx) => {
       const d = tx.dateInfo ? `${tx.dateInfo.day}, ${tx.dateInfo.date}` : "";
-      if (tx.isPayment) {
+      if (tx.isReturnEntry) {
+        text += `• ${d} | Return on Bill #${tx.billNumber}: -${currency} ${tx.returnAmount.toLocaleString()} (Bal: ${currency} ${tx.runningBalance.toLocaleString()})\n`;
+      } else if (tx.isPayment) {
         text += `• ${d} | Payment: +${currency} ${tx.paymentReceived?.toLocaleString()} (Bal: ${currency} ${tx.runningBalance?.toLocaleString()})\n`;
       } else {
         const returnedTag = tx.isReturned
@@ -438,64 +530,34 @@ const PendingPayments = () => {
     return text;
   };
 
-  // Send a receipt / statement to WhatsApp as a PNG image (share sheet on phones,
-  // clipboard + download + open chat on a computer) and tell the user what happened
-  const openWhatsAppShare = async ({ element, phone, text, defaultFileName, label = "Image" }) => {
-    if (isCapturingImage) return;
-    setIsCapturingImage(true);
-    try {
-      const result = await shareImageToWhatsApp({ element, phone, text, fileName: defaultFileName || "Receipt.png" });
-      let message = String(result.message || "").replace(/^Invoice image/, label);
-      if ((result.method === "clipboard" || result.method === "download") && !formatWAPhone(phone)) {
-        message += " No valid customer phone number, so choose the chat in WhatsApp yourself.";
-      }
-      showNotice(message, result.method === "cancelled" ? "info" : "success");
-    } catch (err) {
-      // Image could not be made: still open the chat with the text so nothing is lost
-      console.warn("WhatsApp image share failed:", err);
-      const wa = formatWAPhone(phone);
-      const url = wa
-        ? `https://wa.me/${wa}?text=${encodeURIComponent(text)}`
-        : `https://web.whatsapp.com/send?text=${encodeURIComponent(text)}`;
-      window.open(url, "_blank", "noopener");
-      showNotice(`Could not create the image (${err?.message || "unknown error"}). WhatsApp opened with the text only.`, "error");
-    } finally {
-      setIsCapturingImage(false);
-    }
-  };
-
-  // WhatsApp share for Payment Receipt
+  // Share the payment receipt as an image (preview, then WhatsApp / any app / copy / download)
   const handleWhatsAppShare = () => {
     if (!paymentReceipt) return;
-    const receiptElement = document.getElementById("receipt-content");
-    const waText = getPaymentReceiptWAText(paymentReceipt);
-
-    openWhatsAppShare({
-      element: receiptElement,
-      phone: paymentReceipt.customerPhone,
-      text: waText,
-      defaultFileName: `Receipt_${paymentReceipt.billNumber || "PAY"}.png`,
-      label: "Receipt image",
+    const cust = customers.find((c) => c.id === paymentReceipt.customerId || c.id === paymentReceipt.customer);
+    openShare({
+      element: document.getElementById("receipt-content"),
+      fileName: pngName(`Receipt_${paymentReceipt.billNumber || "PAY"}`),
+      phone: paymentReceipt.customerPhone || cust?.phone || "",
+      text: getPaymentReceiptWAText(paymentReceipt),
+      title: "Share Receipt",
     });
   };
 
-  // WhatsApp share for Customer Statement
+  // Share the customer statement as an image
   const handleWhatsAppStatementShare = () => {
     if (!statementCustomer) return;
-    const statementEl = document.getElementById("statement-print-area");
-    const waText = getStatementWAText(statementCustomer);
-
-    openWhatsAppShare({
-      element: statementEl,
-      phone: statementCustomer.phone,
-      text: waText,
-      defaultFileName: `Statement_${statementCustomer.name || "Customer"}.png`,
-      label: "Statement image",
+    openShare({
+      element: document.getElementById("statement-print-area"),
+      fileName: pngName(`Statement_${statementCustomer.name || "Customer"}`),
+      phone: statementCustomer.phone || "",
+      text: getStatementWAText(statementCustomer),
+      title: "Share Statement",
     });
   };
 
   // ── Account edit / delete ────────────────────────────────────────────────
   const openEditCustomer = (cust) => {
+    if (!isAdmin) return;
     setEditCust(cust);
     setEditForm({
       name: cust.name || "",
@@ -513,7 +575,7 @@ const PendingPayments = () => {
 
   const handleSaveCustomer = async (e) => {
     e.preventDefault();
-    if (isSavingCustomer || !editCust || !editForm.name.trim()) return;
+    if (!isAdmin || isSavingCustomer || !editCust || !editForm.name.trim()) return;
     setIsSavingCustomer(true);
     try {
       // Details only; balances are never sent (only sales, payments and returns change them)
@@ -534,15 +596,20 @@ const PendingPayments = () => {
     }
   };
 
+  const [deletingCustId, setDeletingCustId] = useState(null);
   const handleDeleteCustomer = async (cust) => {
+    if (!isAdmin || deletingCustId) return;
     const owes = Number(cust.totalPending || 0);
     const warning =
       owes > 0
         ? `This customer still owes ${shopSettings.currencySymbol || "Rs."} ${owes.toLocaleString()}.\n\n`
         : "";
-    if (!window.confirm(`${warning}Delete the account of "${cust.name}"? Their bills stay in the records.`)) return;
+    if (!window.confirm(`${warning}Delete the account of "${cust.name || "this customer"}"? Their bills stay in the records.`)) return;
 
+    setDeletingCustId(cust.id);
+    // deleteCustomer alerts the user itself and returns false when the server refuses
     const ok = await deleteCustomer(cust.id);
+    setDeletingCustId(null);
     if (!ok) return;
     // Close anything still open for this customer
     if (historyCust?.id === cust.id) {
@@ -550,7 +617,7 @@ const PendingPayments = () => {
       setHistorySearch("");
       setHistoryFilter("all");
     }
-    if (statementCustomer?.id === cust.id) setStatementCustomer(null);
+    if (statementCustId === cust.id) setStatementCustId(null);
     if (selectedCustForPayment?.id === cust.id) setSelectedCustForPayment(null);
     if (editCust?.id === cust.id) setEditCust(null);
     if (returnTarget) setReturnTarget(null);
@@ -579,6 +646,7 @@ const PendingPayments = () => {
   const returnDuePart = returnSale ? Math.min(Math.max(0, Number(returnSale.dueAmount || 0)), returnEstimate) : 0;
 
   const openReturnModal = (sale, index) => {
+    if (!isAdmin) return;
     setReturnTarget({ saleId: sale.id, index });
     setReturnQty("1");
     setReturnImeis([]);
@@ -594,7 +662,7 @@ const PendingPayments = () => {
     setReturnImeis((prev) => (prev.includes(imei) ? prev.filter((x) => x !== imei) : [...prev, imei]));
 
   const handleConfirmReturn = async () => {
-    if (isSubmittingReturn || !returnSale || !returnInfo || !returnValid) return;
+    if (!isAdmin || isSubmittingReturn || !returnSale || !returnInfo || !returnValid) return;
     const line = returnInfo.isPhone
       ? { index: returnTarget.index, qty: returnImeis.length, imeis: returnImeis }
       : { index: returnTarget.index, qty: returnCount };
@@ -626,36 +694,34 @@ const PendingPayments = () => {
 
   // Process transactions for active history customer
   const activeTransactions = activeHistoryCust ? getCustomerTransactions(activeHistoryCust) : [];
+  const activeGap = activeHistoryCust ? ledgerGap(activeHistoryCust, activeTransactions) : null;
+  const statementTransactions = statementCustomer ? getCustomerTransactions(statementCustomer) : [];
+  const statementGap = statementCustomer ? ledgerGap(statementCustomer, statementTransactions) : null;
+  const billCount = activeTransactions.filter((t) => !t.isPayment && !t.isReturnEntry).length;
+  const paymentCount = activeTransactions.filter((t) => t.isPayment).length;
 
-  const filteredHistoryTransactions = useMemo(() => {
+  // Recomputed every render (the ledger is rebuilt from the latest sales each time)
+  const filteredHistoryTransactions = (() => {
     if (!activeTransactions.length) return [];
-    let list = activeTransactions.filter((t) => {
+    const q = historySearch.trim().toLowerCase();
+    const list = activeTransactions.filter((t) => {
       if (historyFilter === "payments" && !t.isPayment) return false;
       if (historyFilter === "sales" && t.isPayment) return false;
 
-      if (historySearch.trim()) {
-        const q = historySearch.toLowerCase();
+      if (q) {
         const billMatch = (t.billNumber || "").toLowerCase().includes(q);
         const dayMatch = (t.dateInfo.day || "").toLowerCase().includes(q);
         const dateMatch = (t.dateInfo.date || "").toLowerCase().includes(q);
         const notesMatch = (t.notes || "").toLowerCase().includes(q);
         const methodMatch = (t.paymentMethod || "").toLowerCase().includes(q);
-        const itemMatch = (t.items || []).some(
-          (item) =>
-            (item.productName || item.name || "").toLowerCase().includes(q) ||
-            (item.imei || "").toLowerCase().includes(q) ||
-            (item.imeisArray || []).some((im) => im.toLowerCase().includes(q))
-        );
+        const itemMatch = (t.items || []).some((item) => itemSearchText(item).includes(q));
         return billMatch || dayMatch || dateMatch || notesMatch || methodMatch || itemMatch;
       }
       return true;
     });
 
-    if (historySort === "newest") {
-      return [...list].reverse();
-    }
-    return list;
-  }, [activeTransactions, historyFilter, historySearch, historySort]);
+    return historySort === "newest" ? [...list].reverse() : list;
+  })();
 
   return (
     <>
@@ -901,10 +967,22 @@ const PendingPayments = () => {
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="truncate max-w-[180px] text-slate-300 font-medium">
-                      {lastTx.isPayment ? `Paid: Rs. ${lastTx.paymentReceived.toLocaleString()}` : `Sale: ${lastTx.billNumber}`}
+                      {lastTx.isReturnEntry
+                        ? `Return: ${lastTx.billNumber}`
+                        : lastTx.isPayment
+                        ? `Paid: Rs. ${lastTx.paymentReceived.toLocaleString()}`
+                        : `Sale: ${lastTx.billNumber}`}
                     </span>
-                    <span className={`font-bold ${lastTx.isPayment ? "text-emerald-400" : "text-rose-400"}`}>
-                      {lastTx.isPayment ? `+Rs. ${lastTx.paymentReceived.toLocaleString()}` : `Total: Rs. ${lastTx.grandTotal.toLocaleString()}`}
+                    <span
+                      className={`font-bold ${
+                        lastTx.isReturnEntry ? "text-amber-300" : lastTx.isPayment ? "text-emerald-400" : "text-rose-400"
+                      }`}
+                    >
+                      {lastTx.isReturnEntry
+                        ? `-Rs. ${lastTx.returnAmount.toLocaleString()}`
+                        : lastTx.isPayment
+                        ? `+Rs. ${lastTx.paymentReceived.toLocaleString()}`
+                        : `Total: Rs. ${lastTx.grandTotal.toLocaleString()}`}
                     </span>
                   </div>
                 </div>
@@ -947,28 +1025,33 @@ const PendingPayments = () => {
                   </button>
                 )}
 
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openEditCustomer(cust);
-                  }}
-                  className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-2xl text-xs flex items-center justify-center transition-all border border-slate-700/50"
-                  title="Edit account"
-                >
-                  <Pencil size={14} />
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteCustomer(cust);
-                  }}
-                  className="px-3 py-2.5 bg-slate-800 hover:bg-rose-600/30 text-slate-400 hover:text-rose-300 rounded-2xl text-xs flex items-center justify-center transition-all border border-slate-700/50 hover:border-rose-500/40"
-                  title="Delete account"
-                >
-                  <Trash2 size={14} />
-                </button>
+                {isAdmin && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openEditCustomer(cust);
+                      }}
+                      className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-2xl text-xs flex items-center justify-center transition-all border border-slate-700/50"
+                      title="Edit account"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteCustomer(cust);
+                      }}
+                      disabled={!!deletingCustId}
+                      className="px-3 py-2.5 bg-slate-800 hover:bg-rose-600/30 text-slate-400 hover:text-rose-300 rounded-2xl text-xs flex items-center justify-center transition-all border border-slate-700/50 hover:border-rose-500/40 disabled:opacity-50"
+                      title="Delete account"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           );
@@ -1002,7 +1085,7 @@ const PendingPayments = () => {
       )}
 
       {/* Payment Settlement Modal (above the history modal, which can open it) */}
-      {selectedCustForPayment && (
+      {payCust && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -1018,12 +1101,12 @@ const PendingPayments = () => {
             <form onSubmit={handleSettlePayment} className="space-y-3">
               <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-1 text-xs">
                 <p className="text-slate-400">
-                  Customer: <strong className="text-slate-200">{selectedCustForPayment.name}</strong>
+                  Customer: <strong className="text-slate-200">{payCust.name || "Customer"}</strong>
                 </p>
                 <p className="text-slate-400">
                   Current Outstanding:{" "}
                   <strong className="text-rose-400">
-                    Rs. {selectedCustForPayment.totalPending.toLocaleString()}
+                    Rs. {Number(payCust.totalPending || 0).toLocaleString()}
                   </strong>
                 </p>
               </div>
@@ -1034,7 +1117,7 @@ const PendingPayments = () => {
                   type="number"
                   required
                   min="1"
-                  max={selectedCustForPayment.totalPending}
+                  max={Number(payCust.totalPending || 0)}
                   value={paymentAmountInput}
                   onChange={(e) => setPaymentAmountInput(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 font-bold focus:outline-none focus:border-indigo-500 mt-1"
@@ -1080,8 +1163,8 @@ const PendingPayments = () => {
         </div>
       )}
 
-      {/* Edit Customer Account Modal (above the history modal) */}
-      {editCust && (
+      {/* Edit Customer Account Modal (above the history modal) — owner only */}
+      {isAdmin && editCust && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -1176,8 +1259,8 @@ const PendingPayments = () => {
         </div>
       )}
 
-      {/* Return Item Modal (above the history modal) */}
-      {returnTarget && (
+      {/* Return Item Modal (above the history modal) — owner only */}
+      {isAdmin && returnTarget && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto custom-scrollbar">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -1374,7 +1457,7 @@ const PendingPayments = () => {
               {/* Action buttons inside header */}
               <div className="flex items-center gap-2 flex-wrap justify-end self-end sm:self-auto">
                 <button
-                  onClick={() => setStatementCustomer(activeHistoryCust)}
+                  onClick={() => setStatementCustId(activeHistoryCust.id)}
                   className="px-3 py-2 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-sm"
                 >
                   <Printer size={14} />
@@ -1391,20 +1474,25 @@ const PendingPayments = () => {
                   </button>
                 )}
 
-                <button
-                  onClick={() => openEditCustomer(activeHistoryCust)}
-                  className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/50 rounded-xl transition-all"
-                  title="Edit account"
-                >
-                  <Pencil size={14} />
-                </button>
-                <button
-                  onClick={() => handleDeleteCustomer(activeHistoryCust)}
-                  className="p-2 bg-slate-800 hover:bg-rose-600/30 text-slate-400 hover:text-rose-300 border border-slate-700/50 hover:border-rose-500/40 rounded-xl transition-all"
-                  title="Delete account"
-                >
-                  <Trash2 size={14} />
-                </button>
+                {isAdmin && (
+                  <>
+                    <button
+                      onClick={() => openEditCustomer(activeHistoryCust)}
+                      className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/50 rounded-xl transition-all"
+                      title="Edit account"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                    <button
+                      onClick={() => handleDeleteCustomer(activeHistoryCust)}
+                      disabled={!!deletingCustId}
+                      className="p-2 bg-slate-800 hover:bg-rose-600/30 text-slate-400 hover:text-rose-300 border border-slate-700/50 hover:border-rose-500/40 rounded-xl transition-all disabled:opacity-50"
+                      title="Delete account"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </>
+                )}
 
                 <button
                   onClick={() => {
@@ -1429,7 +1517,7 @@ const PendingPayments = () => {
                   {shopSettings.currencySymbol} {Number(activeHistoryCust.totalPurchases || 0).toLocaleString()}
                 </p>
                 <span className="text-[10px] text-slate-500">
-                  {activeTransactions.filter((t) => !t.isPayment).length} total sale bills
+                  {billCount} total sale bills
                 </span>
               </div>
 
@@ -1441,7 +1529,7 @@ const PendingPayments = () => {
                   {shopSettings.currencySymbol} {Number(activeHistoryCust.totalPaid || 0).toLocaleString()}
                 </p>
                 <span className="text-[10px] text-slate-500">
-                  {activeTransactions.filter((t) => t.isPayment).length} payment receipts
+                  {paymentCount} payment receipts
                 </span>
               </div>
 
@@ -1480,7 +1568,7 @@ const PendingPayments = () => {
                       : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  Payments ({activeTransactions.filter((t) => t.isPayment).length})
+                  Payments ({paymentCount})
                 </button>
                 <button
                   onClick={() => setHistoryFilter("sales")}
@@ -1490,7 +1578,7 @@ const PendingPayments = () => {
                       : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  Sales ({activeTransactions.filter((t) => !t.isPayment).length})
+                  Sales & Returns ({activeTransactions.length - paymentCount})
                 </button>
               </div>
 
@@ -1519,7 +1607,55 @@ const PendingPayments = () => {
 
             {/* Detailed Transaction List */}
             <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-3">
-              {filteredHistoryTransactions.map((tx) => (
+              {filteredHistoryTransactions.map((tx) =>
+                tx.isReturnEntry ? (
+                  /* Return: lowers the balance on the day it happened */
+                  <div
+                    key={tx.id}
+                    className="p-4 border rounded-2xl transition-all bg-amber-950/10 border-amber-900/40 hover:border-amber-700/50"
+                  >
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-2.5 py-1 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-lg text-xs font-black uppercase tracking-wider">
+                          {tx.dateInfo.day}
+                        </span>
+                        <span className="text-xs font-bold text-slate-200">{tx.dateInfo.date}</span>
+                        <span className="text-[11px] text-slate-400">at {tx.dateInfo.time}</span>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center gap-1 bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                          <Undo2 size={11} /> Items Returned
+                        </span>
+                        <span className="text-[11px] font-mono font-bold text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                          {tx.billNumber}
+                        </span>
+                      </div>
+                      <div className="text-left sm:text-right w-full sm:w-auto">
+                        <div className="text-lg font-black text-amber-300">
+                          -{shopSettings.currencySymbol} {tx.returnAmount.toLocaleString()}
+                        </div>
+                        <div className="text-[11px] text-slate-400">
+                          {tx.dueReduced > 0 && (
+                            <span className="text-rose-300 font-semibold mr-1.5">
+                              (Udhaar reduced: -Rs. {tx.dueReduced.toLocaleString()})
+                            </span>
+                          )}
+                          {tx.cashBack > 0 && (
+                            <span className="text-emerald-300 font-semibold mr-1.5">
+                              (Cash back: Rs. {tx.cashBack.toLocaleString()})
+                            </span>
+                          )}
+                          <span>
+                            Udhaar Balance: <strong className="text-slate-200">Rs. {tx.runningBalance.toLocaleString()}</strong>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-[11px] text-slate-300">
+                      {returnItemsText(tx.items) || "Items returned"}
+                      {tx.sellerName && <span className="text-slate-500"> • by {tx.sellerName}</span>}
+                    </div>
+                    {tx.notes && <p className="text-[10px] text-slate-400 italic mt-0.5">Note: {tx.notes}</p>}
+                  </div>
+                ) : (
                 <div
                   key={tx.id}
                   className={`p-4 border rounded-2xl transition-all ${
@@ -1733,7 +1869,7 @@ const PendingPayments = () => {
                                         {itemQty} x Rs. {itemPrice.toLocaleString()}
                                       </span>
                                     </div>
-                                    {ret.remaining > 0 && (
+                                    {isAdmin && ret.remaining > 0 && (
                                       <button
                                         type="button"
                                         onClick={() => openReturnModal(tx, idx)}
@@ -1807,16 +1943,7 @@ const PendingPayments = () => {
                                     Rs. {Number(r.amount || 0).toLocaleString()}
                                   </span>
                                 </div>
-                                <div className="text-slate-400">
-                                  {(r.items || [])
-                                    .map((ri) => {
-                                      const ims = (ri.imeis || []).filter(Boolean);
-                                      return `${ri.productName || "Item"} x${Number(ri.qty || ims.length || 1)}${
-                                        ims.length ? ` (IMEI: ${ims.join(", ")})` : ""
-                                      }`;
-                                    })
-                                    .join(", ") || "Items returned"}
-                                </div>
+                                <div className="text-slate-400">{returnItemsText(r.items) || "Items returned"}</div>
                                 <div className="flex gap-3 flex-wrap text-[10px]">
                                   <span>
                                     Udhaar reduced{" "}
@@ -1837,7 +1964,8 @@ const PendingPayments = () => {
                     </div>
                   )}
                 </div>
-              ))}
+                )
+              )}
 
               {filteredHistoryTransactions.length === 0 && (
                 <div className="text-center py-12 text-slate-500 text-xs bg-slate-950/30 rounded-2xl border border-slate-800/60">
@@ -1848,8 +1976,17 @@ const PendingPayments = () => {
 
             {/* Modal Footer */}
             <div className="pt-4 border-t border-slate-800 flex flex-col sm:flex-row justify-between items-center mt-4 gap-3">
-              <div className="text-xs text-slate-400">
-                Total recorded transactions: <strong className="text-slate-200">{activeTransactions.length}</strong>
+              <div className="text-xs text-slate-400 space-y-0.5">
+                <div>
+                  Total recorded transactions: <strong className="text-slate-200">{activeTransactions.length}</strong>
+                </div>
+                {activeGap && (
+                  <div className="text-[11px] text-amber-300/90 max-w-md">
+                    The entries above add up to Rs. {activeGap.ledgerEnd.toLocaleString()}; the saved account balance
+                    (Rs. {Number(activeHistoryCust.totalPending || 0).toLocaleString()}) also includes older records or
+                    bill edits and is the amount owed.
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-xs font-bold text-slate-400">Outstanding Udhaar Balance:</span>
@@ -1868,7 +2005,7 @@ const PendingPayments = () => {
         <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50 overflow-y-auto print:static print:bg-transparent print:p-0 print:block">
           <div className="bg-white text-slate-900 w-full max-w-2xl rounded-2xl p-6 shadow-2xl relative print:shadow-none print:w-full print:max-w-none print:rounded-none print:p-0">
             <button
-              onClick={() => setStatementCustomer(null)}
+              onClick={() => setStatementCustId(null)}
               className="absolute top-3 right-3 text-slate-400 hover:text-slate-800 print:hidden p-1 rounded-full hover:bg-slate-100"
             >
               <X size={18} />
@@ -1915,7 +2052,7 @@ const PendingPayments = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {getCustomerTransactions(statementCustomer).map((tx) => (
+                    {statementTransactions.map((tx) => (
                       <tr key={tx.id} className="border-b border-slate-200 text-[11px]">
                         <td className="py-1.5 whitespace-nowrap">
                           <span className="font-bold block">{tx.dateInfo.day}</span>
@@ -1923,7 +2060,16 @@ const PendingPayments = () => {
                         </td>
                         <td className="py-1.5 font-mono font-bold text-[10px]">{tx.billNumber}</td>
                         <td className="py-1.5">
-                          {tx.isPayment ? (
+                          {tx.isReturnEntry ? (
+                            <div>
+                              <span className="font-semibold">
+                                Return: {returnItemsText(tx.items) || "items returned"} (Rs. {tx.returnAmount.toLocaleString()})
+                              </span>
+                              {tx.cashBack > 0 && (
+                                <span className="text-[9px] block">Cash back Rs. {tx.cashBack.toLocaleString()}</span>
+                              )}
+                            </div>
+                          ) : tx.isPayment ? (
                             <span className="font-semibold text-emerald-700">{tx.notes || "Udhaar Payment"}</span>
                           ) : (
                             <div>
@@ -1932,7 +2078,7 @@ const PendingPayments = () => {
                                   .map((i) => {
                                     const r = lineReturnInfo(i);
                                     const tag = r.fullyReturned ? ", returned" : r.returnedCount > 0 ? `, ${r.returnedCount} returned` : "";
-                                    return `${i.productName || i.name} (x${i.quantity || 1}${tag})`;
+                                    return `${i.productName || i.name || "Item"} (x${r.qty}${tag})`;
                                   })
                                   .join(", ") || "Sale"}
                               </span>
@@ -1942,9 +2088,9 @@ const PendingPayments = () => {
                                   {tx.returnedTotal > 0 && `: Rs. ${tx.returnedTotal.toLocaleString()}`}
                                 </span>
                               )}
-                              {tx.items?.some((i) => i.imei || i.imeisArray?.length) && (
+                              {(tx.items || []).some((i) => itemImeis(i).length > 0) && (
                                 <span className="text-[9px] text-slate-500 block font-mono">
-                                  IMEI: {tx.items.map((i) => i.imei || i.imeisArray?.join(", ")).filter(Boolean).join(", ")}
+                                  IMEI: {tx.items.flatMap((i) => itemImeis(i)).join(", ")}
                                 </span>
                               )}
                             </div>
@@ -1954,7 +2100,11 @@ const PendingPayments = () => {
                           {tx.isCredit ? `Rs. ${tx.udhaarAdded.toLocaleString()}` : "—"}
                         </td>
                         <td className="py-1.5 text-right font-semibold text-emerald-700">
-                          {tx.isPayment
+                          {tx.isReturnEntry
+                            ? tx.dueReduced > 0
+                              ? `Rs. ${tx.dueReduced.toLocaleString()}`
+                              : "—"
+                            : tx.isPayment
                             ? `Rs. ${tx.paymentReceived.toLocaleString()}`
                             : tx.oldBalancePaid > 0
                             ? `Rs. ${tx.oldBalancePaid.toLocaleString()}`
@@ -1983,6 +2133,12 @@ const PendingPayments = () => {
                   <span>CURRENT OUTSTANDING UDHAAR:</span>
                   <span className="text-red-600">Rs. {Number(statementCustomer.totalPending || 0).toLocaleString()}</span>
                 </div>
+                {statementGap && (
+                  <p className="text-[10px] text-slate-600">
+                    The entries above add up to Rs. {statementGap.ledgerEnd.toLocaleString()}; the outstanding amount
+                    also includes older records or bill edits.
+                  </p>
+                )}
               </div>
 
               <div className="border-t border-dashed border-black mt-4 pt-3 flex justify-between text-[10px] text-slate-500">
@@ -2001,24 +2157,13 @@ const PendingPayments = () => {
               </button>
               <button
                 onClick={handleWhatsAppStatementShare}
-                disabled={isCapturingImage}
-                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow disabled:opacity-60"
+                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow"
+                title="Preview the statement image, then send it to WhatsApp or any app"
               >
-                {isCapturingImage ? (
-                  <>
-                    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                    </svg>{" "}
-                    Preparing...
-                  </>
-                ) : (
-                  <>
-                    <Smartphone size={15} /> WhatsApp Statement
-                  </>
-                )}
+                <Share2 size={15} /> Share / WhatsApp
               </button>
               <button
-                onClick={() => setStatementCustomer(null)}
+                onClick={() => setStatementCustId(null)}
                 className="py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl"
               >
                 Close
@@ -2118,21 +2263,10 @@ const PendingPayments = () => {
               </button>
               <button
                 onClick={handleWhatsAppShare}
-                disabled={isCapturingImage}
-                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow disabled:opacity-60"
+                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow"
+                title="Preview the receipt image, then send it to WhatsApp or any app"
               >
-                {isCapturingImage ? (
-                  <>
-                    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                    </svg>{" "}
-                    Preparing...
-                  </>
-                ) : (
-                  <>
-                    <Smartphone size={15} /> WhatsApp
-                  </>
-                )}
+                <Share2 size={15} /> Share
               </button>
               <button
                 onClick={() => setPaymentReceipt(null)}
@@ -2145,7 +2279,10 @@ const PendingPayments = () => {
         </div>
       )}
 
-      {/* Status message (returns, account changes, WhatsApp sharing) */}
+      {/* Receipt / statement image preview & share (z-[80], above every other modal) */}
+      {shareDialog}
+
+      {/* Status message (returns, account changes) */}
       {notice && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[70] w-[calc(100%-2rem)] max-w-md print:hidden">
           <div

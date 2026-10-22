@@ -1,7 +1,9 @@
-import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
+import { useAuth } from "../context/AuthContext";
 import { api } from "../services/api";
-import { shareImageToWhatsApp } from "../utils/shareImage";
+import { useShareImage } from "../components/useShareImage";
+import { printElement } from "../services/printReceipt";
 import { localDate } from "../utils/dates";
 import { itemImeis } from "../utils/sales";
 import {
@@ -33,7 +35,9 @@ const todayISO = () => localDate();
 
 const fmtDate = (iso) => {
   if (!iso) return "";
-  const d = new Date(iso + "T00:00:00");
+  // Plain date as local midnight; slice also copes with a full timestamp
+  const d = new Date(String(iso).slice(0, 10) + "T00:00:00");
+  if (isNaN(d)) return String(iso);
   return d
     .toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
     .replace(/ /g, "-");
@@ -95,6 +99,8 @@ const fromDbEntry = (r) => {
 const Ledger = () => {
   // allCustomers (not the header-filtered list) so a customer added here is always found
   const { products, shopSettings, allCustomers, recordSale, addCustomer } = useApp();
+  // Editing the opening balance and deleting payment rows is for the owner only
+  const { isAdmin } = useAuth();
 
   // ── State ─────────────────────────────────────────────────────────────────
   const [entries, setEntries] = useState([]);
@@ -110,12 +116,20 @@ const Ledger = () => {
   const [scanStatus, setScanStatus] = useState(null); // { type: "success"|"error", message }
   const scanRef = useRef(null);
   const receiptRef = useRef(null);
-  const [isCapturingImage, setIsCapturingImage] = useState(false);
-  const [shareMessage, setShareMessage] = useState(""); // result of the last WhatsApp share
+  const [openShare, shareDialog] = useShareImage();
+  // Scans are handled one after another (a fast scanner can send the next code while the last one is looked up)
+  const scanQueueRef = useRef(Promise.resolve());
+  const focusScan = () => scanRef.current?.focus();
 
   // Invoice tracking — each scan session groups items under an auto-created invoice
   const [invoiceCounter, setInvoiceCounter] = useState(1);
   const [currentInvoiceId, setCurrentInvoiceId] = useState(null);
+  // Same id, readable at once by queued scans (state only changes on the next render)
+  const currentInvoiceRef = useRef(null);
+  const setInvoice = (id) => {
+    currentInvoiceRef.current = id;
+    setCurrentInvoiceId(id);
+  };
 
   // Manual add modal
   const [showManual, setShowManual] = useState(false);
@@ -132,6 +146,7 @@ const Ledger = () => {
   const [dueDate, setDueDate] = useState("");
   const [completedSaleInvoice, setCompletedSaleInvoice] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false); // set at once, so a double click cannot record the sale twice
 
   // Custom Customer Search Dropdown State
   const [customerSearch, setCustomerSearch] = useState("");
@@ -142,19 +157,28 @@ const Ledger = () => {
   const [showQuickAddCustomer, setShowQuickAddCustomer] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState("");
   const [newCustomerPhone, setNewCustomerPhone] = useState("");
+  const [isSavingCustomer, setIsSavingCustomer] = useState(false);
 
   const handleQuickAddCustomer = async () => {
-    if (!newCustomerName) {
+    if (isSavingCustomer) return;
+    if (!newCustomerName.trim()) {
       alert("Customer name is required.");
       return;
     }
-    const newCust = await addCustomer({
-      name: newCustomerName,
-      phone: newCustomerPhone,
-      address: "",
-      cnic: "",
-      sellerName: selectedSeller
-    });
+    setIsSavingCustomer(true);
+    let newCust;
+    try {
+      newCust = await addCustomer({
+        name: newCustomerName.trim(),
+        phone: newCustomerPhone.trim(),
+        address: "",
+        cnic: "",
+        sellerName: selectedSeller
+      });
+    } finally {
+      setIsSavingCustomer(false);
+    }
+    // Not saved: the form stays open with what was typed
     if (!newCust) return;
     setSelectedCustomer(newCust.id);
     setShowQuickAddCustomer(false);
@@ -258,10 +282,17 @@ const Ledger = () => {
     return () => clearInterval(t);
   }, [saveState, syncLedger]);
 
-  // Warn before closing / refreshing while changes are still unsaved
+  // Leaving the page inside the app: save what the 300 ms wait above would otherwise drop
+  useEffect(() => () => {
+    syncLedger();
+  }, [syncLedger]);
+
+  // Warn before closing / refreshing while changes are still unsaved (also during the 300 ms wait)
   useEffect(() => {
     const handler = (e) => {
-      if (saveState === "saved") return;
+      const unsaved =
+        saveState !== "saved" || entriesRef.current.some((x) => syncedRef.current.get(x.id) !== JSON.stringify(x));
+      if (!unsaved) return;
       e.preventDefault();
       e.returnValue = "";
     };
@@ -304,7 +335,8 @@ const Ledger = () => {
         // Re-open the last invoice that was not checked out yet
         const invoices = merged.filter((e) => e.type === "invoice");
         const openInvoice = [...invoices].reverse().find((e) => !e.saleId);
-        setCurrentInvoiceId(openInvoice ? openInvoice.id : null);
+        currentInvoiceRef.current = openInvoice ? openInvoice.id : null;
+        setCurrentInvoiceId(currentInvoiceRef.current);
         setInvoiceCounter(invoices.length + 1);
         setLoadError(null);
       } catch (err) {
@@ -326,8 +358,9 @@ const Ledger = () => {
     // Local search first (instant)
     for (const prod of products) {
       if (prod.imeis && prod.imeis.length > 0) {
+        // Either SIM's IMEI identifies the phone
         const matchedImei = prod.imeis.find(
-          (im) => im.imei === q && im.status === "in_stock"
+          (im) => (im.imei === q || im.imei1 === q || im.imei2 === q) && im.status === "in_stock"
         );
         if (matchedImei) return { product: prod, imei: matchedImei, matchType: "imei" };
       }
@@ -353,8 +386,16 @@ const Ledger = () => {
         };
         return { product: normalized, imei: result.matchedImei, matchType: "backend" };
       }
-    } catch (_) { }
+    } catch {
+      // not found on the server either
+    }
     return null;
+  };
+
+  // Changes the rows and entriesRef together, so the next queued scan sees this change before React re-renders
+  const changeEntries = (fn) => {
+    entriesRef.current = fn(entriesRef.current);
+    setEntries(fn);
   };
 
   // ── Create a new invoice header row and make it the current invoice ───────
@@ -374,22 +415,34 @@ const Ledger = () => {
       debit: 0,
       credit: null,
     };
-    setEntries((prev) => [...prev, invoiceEntry]);
-    setCurrentInvoiceId(invId);
+    changeEntries((prev) => [...prev, invoiceEntry]);
+    setInvoice(invId);
     setInvoiceCounter((c) => c + 1);
     return invId;
   };
 
   // ── Handle IMEI / barcode scan ────────────────────────────────────────────
-  const handleScan = async (e) => {
+  const handleScan = (e) => {
     if (e.key !== "Enter") return;
-    const rawQuery = scanInput.trim();
+    e.preventDefault();
+    // The box itself, not state: a fast scanner's last digits may not have re-rendered yet
+    const rawQuery = e.currentTarget.value.trim();
     if (!rawQuery) return;
 
     // Immediately clear input so fast barcode scanners don't get blocked
     setScanInput("");
     setScanStatus({ type: "success", message: "⟳ Processing scan(s)..." });
 
+    // One scan at a time: two scans at once could each start an invoice or add the same unit twice
+    scanQueueRef.current = scanQueueRef.current
+      .then(() => processScan(rawQuery))
+      .catch((err) => {
+        console.error("[Ledger] Scan failed:", err);
+        setScanStatus({ type: "error", message: `Scan failed: ${err.message || err}` });
+      });
+  };
+
+  const processScan = async (rawQuery) => {
     // Split by commas, spaces, or newlines to allow bulk pasting
     const queries = rawQuery.split(/[\s,;]+/).filter((q) => q.trim().length > 0);
 
@@ -398,11 +451,17 @@ const Ledger = () => {
     let localQtyTracker = {};
     let localImeiTracker = new Set();
 
-    // One invoice for the whole scan / paste. currentInvoiceId state does not change inside
-    // this loop, so the id is kept here; it is created on the first item found.
-    let invId = currentInvoiceId;
+    // One invoice for the whole scan / paste; it is created on the first item found.
+    // A checked-out invoice never gets new items.
+    let invId = currentInvoiceRef.current;
+    if (invId && !entriesRef.current.some((e) => e.id === invId && e.type === "invoice" && !e.saleId)) invId = null;
 
     for (const query of queries) {
+      // A sale is being saved for the current invoice: adding to it now would leave the item off the bill
+      if (submittingRef.current) {
+        setScanStatus({ type: "error", message: `Not added "${query}": wait until the checkout is saved.` });
+        break;
+      }
       const result = await lookupProduct(query);
 
       if (!result) {
@@ -410,7 +469,8 @@ const Ledger = () => {
         continue;
       }
 
-      const { product, matchType } = result;
+      const entries = entriesRef.current;
+      const { product } = result;
       let { imei } = result;
 
       // Barcode scan of a phone model: take the next in-stock unit, so every phone on the bill has its IMEI
@@ -472,7 +532,7 @@ const Ledger = () => {
       const itemInvId = invId;
 
       // Add or update item in local state
-      setEntries((prev) => {
+      changeEntries((prev) => {
         const existingIdx = prev.findIndex(
           (e) => e.parentInvoiceId === itemInvId && e.productId === product.id
         );
@@ -546,7 +606,7 @@ const Ledger = () => {
       });
     }
 
-    if (scanRef.current) scanRef.current.focus();
+    focusScan();
   };
 
   // ── Recompute invoice header totals from its child items ──────────────────
@@ -573,6 +633,12 @@ const Ledger = () => {
 
   // ── Delete an entry ───────────────────────────────────────────────────────
   const handleDelete = (id) => {
+    const target = entries.find((e) => e.id === id);
+    if (!target || isLockedEntry(entries, target)) return;
+    // Payment rows are the shop's records, not the open bill: only the owner removes them
+    if (target.type === "payment" && !isAdmin) return;
+    if (target.type === "invoice" && currentInvoiceRef.current === id) setInvoice(null);
+
     setEntries((prev) => {
       const entry = prev.find((e) => e.id === id);
       if (!entry) return prev;
@@ -581,7 +647,6 @@ const Ledger = () => {
 
       // If deleting an invoice, remove all its children too
       if (entry.type === "invoice") {
-        if (currentInvoiceId === id) setCurrentInvoiceId(null);
         return prev.filter((e) => e.id !== id && e.parentInvoiceId !== id);
       }
 
@@ -654,7 +719,7 @@ const Ledger = () => {
 
   const finalizeCheckout = async () => {
     // Ignore a second click while the first sale is still saving
-    if (isSubmitting) return;
+    if (isSubmitting || submittingRef.current) return;
 
     const invoiceHeader = entries.find(e => e.id === currentInvoiceId);
     const invoiceItems = entries.filter(e => e.type === "item" && e.parentInvoiceId === currentInvoiceId);
@@ -723,21 +788,22 @@ const Ledger = () => {
     };
 
     // This records the sale (reducing stock in backend) and updates local states
+    submittingRef.current = true;
     setIsSubmitting(true);
     let recorded;
     try {
       recorded = await recordSale(saleData);
     } finally {
+      submittingRef.current = false;
       setIsSubmitting(false);
     }
     // Not saved: keep the invoice open so it can be checked out again
     if (!recorded) return;
 
     // Link the ledger invoice to its saved sale so it is not re-opened after a refresh
-    setEntries((prev) => prev.map((e) => (e.id === invoiceHeader.id ? { ...e, saleId: recorded.id } : e)));
+    changeEntries((prev) => prev.map((e) => (e.id === invoiceHeader.id ? { ...e, saleId: recorded.id } : e)));
 
     setCompletedSaleInvoice(recorded);
-    setShareMessage("");
     setShowCheckoutModal(false);
 
     // Reset the checkout form for the next bill (back to Pending Bill / Udhaar)
@@ -746,9 +812,11 @@ const Ledger = () => {
     setPaidAmountInput("");
     setDueDate("");
     setCustomerSearch("");
+    setShowCustomerDropdown(false);
+    setShowQuickAddCustomer(false);
 
     // No current invoice now; the next scan starts a new one (no empty invoice left behind)
-    setCurrentInvoiceId(null);
+    setInvoice(null);
     setScanInput("");
   };
 
@@ -781,7 +849,9 @@ const Ledger = () => {
       text += `• ${bold}${item.description || item.productName || item.name || "Item"}${bold}\n`;
       const itemRate = item.rate || item.unitSalePrice || (item.quantity ? item.subtotal / item.quantity : 0);
       const itemSubtotal = item.subtotal || (item.quantity * itemRate);
-      text += `  Qty: ${item.quantity || item.qty || 1} x Rs ${itemRate.toLocaleString()} = Rs ${itemSubtotal.toLocaleString()}\n`;
+      text += `  Qty: ${item.quantity || item.qty || 1} x Rs ${fmt(itemRate)} = Rs ${fmt(itemSubtotal)}\n`;
+      const imeis = itemImeis(item);
+      if (imeis.length > 0) text += `  IMEI: ${imeis.join(", ")}\n`;
     });
     text += `------------------------------\n`;
     text += `Subtotal: Rs ${(inv.subtotalAmount || inv.grandTotal || 0).toLocaleString()}\n`;
@@ -804,29 +874,25 @@ const Ledger = () => {
     return text;
   };
 
-  // WhatsApp: send the receipt as a picture (text goes along as the message)
-  const handleWhatsAppShareModal = async () => {
-    if (!completedSaleInvoice || isCapturingImage) return;
+  // Share the receipt as a picture: preview, then WhatsApp / any app / copy / download
+  const handleWhatsAppShareModal = () => {
+    if (!completedSaleInvoice) return;
     const udhaar = receiptUdhaar(completedSaleInvoice);
-    setIsCapturingImage(true);
-    setShareMessage("");
-    try {
-      const { message } = await shareImageToWhatsApp({
-        element: receiptRef.current || document.getElementById("invoice-print-area"),
-        phone: completedSaleInvoice.customerPhone,
-        text: generateTextReceipt(completedSaleInvoice, udhaar.previous, true, udhaar.total),
-        fileName: `Invoice_${completedSaleInvoice.billNumber || "INV"}.png`,
-      });
-      setShareMessage(message);
-    } catch (err) {
-      setShareMessage(`Could not create the invoice image: ${err.message || err}`);
-    } finally {
-      setIsCapturingImage(false);
-    }
+    openShare({
+      element: receiptRef.current || document.getElementById("invoice-print-area"),
+      fileName: `Invoice_${completedSaleInvoice.billNumber || "INV"}.png`,
+      phone: completedSaleInvoice.customerPhone,
+      text: generateTextReceipt(completedSaleInvoice, udhaar.previous, true, udhaar.total),
+      title: "Share Invoice",
+    });
   };
 
-  const handlePrintReceipt = () => {
-    window.print();
+  // Same clean 80 mm print window as the POS receipt
+  const handlePrintReceipt = () => printElement("invoice-print-area", "Sales Receipt");
+
+  const closeReceipt = () => {
+    setCompletedSaleInvoice(null);
+    focusScan();
   };
 
 
@@ -867,7 +933,8 @@ const Ledger = () => {
   const handleQtyChange = (targetRow, newQtyStr) => {
     // Phone rows count their IMEIs: scan or delete units instead of typing a quantity
     if (itemImeis(targetRow).length > 0) return;
-    const newQty = Math.max(1, Number(newQtyStr) || 1);
+    // The box may be empty while a new number is typed; it becomes 1 again when it loses focus
+    const newQty = String(newQtyStr) === "" ? "" : Math.max(1, Math.floor(Number(newQtyStr)) || 1);
     setEntries((prev) => {
       if (isLockedEntry(prev, targetRow)) return prev;
       const updated = prev.map((e) => {
@@ -907,17 +974,24 @@ const Ledger = () => {
 
     setManualForm(EMPTY_MANUAL);
     setShowManual(false);
+    focusScan();
   };
 
   // ── Save opening balance ──────────────────────────────────────────────────
+  const [savingOB, setSavingOB] = useState(false);
   const saveOB = async () => {
+    if (!isAdmin || savingOB) return;
     const amount = Number(obInput) || 0;
+    setSavingOB(true);
     try {
       await api.setOpeningBalance(dateFrom, amount);
       setOpeningBalance(amount);
       setEditingOB(false);
+      focusScan();
     } catch (err) {
       alert(`Opening balance was NOT saved.\n\n${err.message}`);
+    } finally {
+      setSavingOB(false);
     }
   };
 
@@ -967,7 +1041,8 @@ const Ledger = () => {
   const completedUdhaar = receiptUdhaar(completedSaleInvoice);
 
   // ── Print ─────────────────────────────────────────────────────────────────
-  const handlePrint = () => window.print();
+  // The statement is a wide table: the 80 mm receipt page cut it off, so it prints on A4
+  const handlePrint = () => printElement("ledger-print-area", "Billing Ledger", { paper: "a4" });
 
   // ── Cell styles ───────────────────────────────────────────────────────────
   const cell = "border border-slate-700 px-1.5 py-[3px] text-[11px]";
@@ -1091,13 +1166,13 @@ const Ledger = () => {
             <div className="space-y-1">
               <div className="flex items-center gap-2">
                 <span className="font-bold w-8 text-slate-700">From</span>
-                <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+                <input type="date" value={dateFrom} onChange={(e) => e.target.value && setDateFrom(e.target.value)}
                   className="border border-slate-400 rounded px-1 py-0.5 text-[11px] text-slate-800 bg-slate-50 focus:outline-none focus:border-indigo-500" />
                 <span className="text-slate-500">{fmtDate(dateFrom)}</span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="font-bold w-8 text-slate-700">To</span>
-                <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+                <input type="date" value={dateTo} onChange={(e) => e.target.value && setDateTo(e.target.value)}
                   className="border border-slate-400 rounded px-1 py-0.5 text-[11px] text-slate-800 bg-slate-50 focus:outline-none focus:border-indigo-500" />
                 <span className="text-slate-500">{fmtDate(dateTo)}</span>
               </div>
@@ -1197,6 +1272,9 @@ const Ledger = () => {
                             min="1"
                             value={row.qty !== undefined && row.qty !== null ? row.qty : 1}
                             onChange={(e) => handleQtyChange(row, e.target.value)}
+                            onFocus={(e) => !locked && e.target.select()}
+                            onBlur={() => !locked && row.qty === "" && handleQtyChange(row, "1")}
+                            onKeyDown={(e) => e.key === "Enter" && focusScan()}
                             readOnly={locked}
                             className={`w-12 font-bold text-center text-slate-900 rounded px-1 py-0.5 focus:outline-none transition-colors print:bg-transparent print:border-none print:w-auto ${locked ? "bg-transparent border border-transparent cursor-default" : "bg-slate-100 border border-slate-300 focus:bg-white focus:border-indigo-500"}`}
                             title={locked ? "Checked out — cannot be edited" : "Edit Quantity"}
@@ -1215,6 +1293,7 @@ const Ledger = () => {
                             value={row.rate !== undefined && row.rate !== null ? row.rate : ""}
                             onChange={(e) => handleRateChange(row, e.target.value)}
                             onFocus={(e) => !locked && e.target.select()}
+                            onKeyDown={(e) => e.key === "Enter" && focusScan()}
                             readOnly={locked}
                             className={`w-24 font-extrabold text-center text-slate-900 rounded-lg px-1.5 py-1 focus:outline-none transition-all print:bg-transparent print:border-none print:w-auto ${locked ? "bg-transparent border-2 border-transparent cursor-default" : needsRate ? "bg-rose-50 border-2 border-rose-500 ring-2 ring-rose-500/30 focus:bg-yellow-200 focus:border-indigo-600 shadow-sm" : "bg-amber-50 border-2 border-amber-400 focus:bg-yellow-200 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 shadow-sm"}`}
                             placeholder="Rate"
@@ -1240,7 +1319,7 @@ const Ledger = () => {
                         {fmt(row.runningBalance)}
                       </td>
                       <td className={`${cell} text-center print:hidden`}>
-                        {!locked && (
+                        {!locked && (isAdmin || !isPayment) && (
                           <button onClick={() => row.groupIds.forEach(id => handleDelete(id))}
                             className="text-rose-400 hover:text-rose-600 transition-colors p-0.5" title="Delete">
                             <Trash2 size={10} />
@@ -1291,10 +1370,12 @@ const Ledger = () => {
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
           <div className="flex items-center justify-between mb-1">
             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Opening Balance</p>
-            <button onClick={() => { setObInput(String(openingBalance)); setEditingOB(true); }}
-              className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 bg-slate-800 hover:bg-slate-700 px-2 py-0.5 rounded transition-colors">
-              Edit
-            </button>
+            {isAdmin && (
+              <button onClick={() => { setObInput(String(openingBalance)); setEditingOB(true); }}
+                className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 bg-slate-800 hover:bg-slate-700 px-2 py-0.5 rounded transition-colors">
+                Edit
+              </button>
+            )}
           </div>
           <p className="text-lg font-extrabold text-slate-300">Rs {fmt(openingBalance, 2)}</p>
         </div>
@@ -1313,17 +1394,17 @@ const Ledger = () => {
       </div>
 
       {/* ━━ Edit Opening Balance Modal ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
-      {editingOB && (
+      {editingOB && isAdmin && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl space-y-4">
             <h3 className="font-bold text-slate-100 text-sm">Edit Opening Balance</h3>
             <input type="number" value={obInput} onChange={(e) => setObInput(e.target.value)}
               className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-slate-100 text-lg font-mono focus:outline-none focus:border-indigo-500" placeholder="0" />
             <div className="flex justify-end gap-2">
-              <button onClick={() => setEditingOB(false)}
+              <button onClick={() => { setEditingOB(false); focusScan(); }}
                 className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl">Cancel</button>
-              <button onClick={saveOB}
-                className="px-5 py-2 bg-indigo-600 text-white text-xs font-bold rounded-xl hover:bg-indigo-500 shadow">Save</button>
+              <button onClick={saveOB} disabled={savingOB}
+                className="px-5 py-2 bg-indigo-600 text-white text-xs font-bold rounded-xl hover:bg-indigo-500 shadow disabled:opacity-60">{savingOB ? "Saving…" : "Save"}</button>
             </div>
           </div>
         </div>
@@ -1338,7 +1419,7 @@ const Ledger = () => {
                 <FileText size={17} className="text-indigo-400" />
                 <h3 className="font-bold text-slate-100 text-sm">Manual Ledger Entry</h3>
               </div>
-              <button onClick={() => setShowManual(false)} className="text-slate-400 hover:text-white"><X size={17} /></button>
+              <button onClick={() => { setShowManual(false); focusScan(); }} className="text-slate-400 hover:text-white"><X size={17} /></button>
             </div>
 
             <div className="space-y-3 text-xs">
@@ -1416,7 +1497,7 @@ const Ledger = () => {
             </div>
 
             <div className="flex justify-end gap-2 pt-1 border-t border-slate-800">
-              <button onClick={() => setShowManual(false)}
+              <button onClick={() => { setShowManual(false); focusScan(); }}
                 className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-700">Cancel</button>
               <button onClick={handleManualAdd} disabled={!manualForm.description}
                 className="px-5 py-2 bg-indigo-600 text-white text-xs font-bold rounded-xl hover:bg-indigo-500 disabled:opacity-40 shadow">
@@ -1434,7 +1515,7 @@ const Ledger = () => {
           <div className="bg-white rounded-3xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
               <h2 className="text-xl font-bold text-slate-800">Finalize Ledger Invoice</h2>
-              <button onClick={() => setShowCheckoutModal(false)} className="text-slate-400 hover:text-slate-700 bg-white p-2 rounded-full shadow-sm">
+              <button onClick={() => { setShowCheckoutModal(false); focusScan(); }} className="text-slate-400 hover:text-slate-700 bg-white p-2 rounded-full shadow-sm">
                 <X size={20} />
               </button>
             </div>
@@ -1518,11 +1599,12 @@ const Ledger = () => {
                       onChange={(e) => setNewCustomerPhone(e.target.value)}
                       className="w-full bg-white border border-slate-300 rounded-xl p-2.5 text-sm text-slate-900 focus:outline-none focus:border-indigo-500"
                     />
-                    <button 
+                    <button
                       onClick={handleQuickAddCustomer}
-                      className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm rounded-xl"
+                      disabled={isSavingCustomer}
+                      className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm rounded-xl disabled:opacity-60"
                     >
-                      Save & Select
+                      {isSavingCustomer ? "Saving…" : "Save & Select"}
                     </button>
                   </div>
                 ) : (
@@ -1663,7 +1745,10 @@ const Ledger = () => {
                     {new Date(completedSaleInvoice.createdAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}
                   </div>
                   {completedSaleInvoice.customerName && completedSaleInvoice.customerName !== "Walk-in Customer" && (
-                    <div className="font-semibold mt-1">Cust: {completedSaleInvoice.customerName}</div>
+                    <div className="font-semibold mt-1">
+                      Cust: {completedSaleInvoice.customerName}
+                      {completedSaleInvoice.customerPhone && <div className="font-normal text-xs">{completedSaleInvoice.customerPhone}</div>}
+                    </div>
                   )}
                   {completedSaleInvoice.cashierName && (
                     <div>Seller: {completedSaleInvoice.cashierName}</div>
@@ -1691,6 +1776,9 @@ const Ledger = () => {
                         <div className="pr-2">
                           <div className="font-semibold">{item.description || item.productName || item.name}</div>
                           <div className="text-xs">{item.quantity || item.qty || 1} × Rs. {Number(rate).toLocaleString()}</div>
+                          {itemImeis(item).length > 0 && (
+                            <div className="font-mono text-[10px]">IMEI: {itemImeis(item).join(", ")}</div>
+                          )}
                         </div>
                         <span className="font-semibold whitespace-nowrap">Rs. {Number(sub).toLocaleString()}</span>
                       </div>
@@ -1734,31 +1822,23 @@ const Ledger = () => {
               <div className="text-center text-[10px] mt-1 mb-2">Developed By Syed</div>
             </div>
 
-            {shareMessage && (
-              <div className="px-4 py-2 text-[11px] font-semibold text-emerald-800 bg-emerald-50 border-t border-emerald-100 print:hidden">
-                {shareMessage}
-              </div>
-            )}
-
             {/* Actions */}
             <div className="flex gap-2 p-4 border-t border-slate-100 bg-slate-50 print:hidden">
               <button onClick={handlePrintReceipt} className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow">
                 <Printer size={14} /> Print
               </button>
-              <button onClick={handleWhatsAppShareModal} disabled={isCapturingImage} className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow disabled:opacity-60">
-                {isCapturingImage ? (
-                  <><svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> Preparing...</>
-                ) : (
-                  <><Smartphone size={14} /> WhatsApp</>
-                )}
+              <button onClick={handleWhatsAppShareModal} className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow">
+                <Smartphone size={14} /> Share
               </button>
-              <button onClick={() => setCompletedSaleInvoice(null)} className="py-2.5 px-3 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs rounded-xl flex items-center justify-center gap-1">
+              <button onClick={closeReceipt} className="py-2.5 px-3 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs rounded-xl flex items-center justify-center gap-1">
                 <CheckCircle2 size={14} /> Done
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {shareDialog}
     </>
   );
 };

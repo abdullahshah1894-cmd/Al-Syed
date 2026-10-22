@@ -43,10 +43,9 @@ const expenseDay = (e) => e.expenseDate || (e.createdAt ? localDate(e.createdAt)
 const returnDay = (r) => (r?.date ? String(r.date).slice(0, 10) : r?.at ? localDate(r.at) : null);
 const inRange = (day, range) => !!day && (!range.from || day >= range.from) && (!range.to || day <= range.to);
 
-// Local-date bounds (YYYY-MM-DD, inclusive) of a timeframe; never later than today
-const periodRange = (timeframe) => {
-  const now = new Date();
-  const today = localDate(now);
+// Local-date bounds (YYYY-MM-DD, inclusive) of a timeframe; never later than today (YYYY-MM-DD)
+const periodRange = (timeframe, today) => {
+  const now = new Date(`${today}T12:00:00`);
   if (timeframe === "Today") return { from: today, to: today };
   if (timeframe === "Weekly") {
     const start = new Date(now);
@@ -93,13 +92,18 @@ const computeStats = (allSales, allExpenses, seller, range) => {
 };
 
 const SalesReports = () => {
-  const { allSales, allExpenses, products, shopSettings } = useApp();
+  const { allSales, allExpenses, products, shopSettings, activeSeller } = useApp();
   const [timeframe, setTimeframe] = useState("Weekly");
-  const [seller, setSeller] = useState("All");
-  const curr = shopSettings.currencySymbol;
+  // The seller follows the header seller picker until one is chosen here
+  const headerSeller = SELLERS.find((s) => sameName(s, activeSeller)) || "All";
+  const [sellerChoice, setSeller] = useState(null);
+  const seller = sellerChoice ?? headerSeller;
+  const curr = shopSettings.currencySymbol || "Rs.";
   const fmt = (n) => `${curr} ${Math.round(num(n)).toLocaleString()}`;
 
-  const range = useMemo(() => periodRange(timeframe), [timeframe]);
+  // Recomputed when the date changes too (the page can stay open past midnight)
+  const todayStr = localDate();
+  const range = useMemo(() => periodRange(timeframe, todayStr), [timeframe, todayStr]);
 
   const stats = useMemo(() => computeStats(allSales, allExpenses, seller, range), [allSales, allExpenses, seller, range]);
   const filteredSales = stats.sales;
@@ -162,10 +166,10 @@ const SalesReports = () => {
   const graphData = useMemo(() => {
     let buckets;
     let bucketOf;
-    const now = new Date();
+    const now = new Date(`${range.to}T12:00:00`);
     if (timeframe === "Today") {
       // 2-hour slots covering 8 AM - 10 PM, widened to include any earlier / later sale
-      const hours = filteredSales.map((s) => new Date(saleTime(s)).getHours());
+      const hours = filteredSales.map((s) => new Date(saleTime(s)).getHours()).filter(Number.isFinite);
       const first = Math.min(8, ...hours.map((h) => h - (h % 2)));
       const last = Math.max(22, ...hours.map((h) => h - (h % 2)));
       const slots = [];
@@ -177,8 +181,8 @@ const SalesReports = () => {
       const keys = [];
       buckets = [];
       for (let i = 6; i >= 0; i--) {
-        const d = new Date();
-        d.setDate(d.getDate() - i);
+        const d = new Date(now);
+        d.setDate(now.getDate() - i);
         keys.push(localDate(d));
         buckets.push({ label: i === 0 ? "Today" : d.toLocaleDateString("en-US", { weekday: "short" }) });
       }
@@ -208,7 +212,7 @@ const SalesReports = () => {
       data[idx].bills += 1;
     });
     return data.map((d) => ({ ...d, revenue: Math.round(d.revenue), profit: Math.round(d.profit) }));
-  }, [timeframe, filteredSales]);
+  }, [timeframe, filteredSales, range]);
 
   const maxGraphRevenue = Math.max(1, ...graphData.map((g) => g.revenue), ...graphData.map((g) => g.profit));
   const scopeLabel = `${seller === "All" ? "All sellers" : seller} • ${TIMEFRAME_LABEL[timeframe]}`;
@@ -386,7 +390,7 @@ const SalesReports = () => {
           </div>
           <div className="text-2xl font-extrabold text-rose-400 tracking-tight">{fmt(stats.udhaarGiven)}</div>
           <div className="mt-2 text-xs text-slate-400 font-medium">
-            Still unpaid on {stats.sales.filter((s) => udhaarAdded(s) > 0).length} bill(s)
+            Credit on {stats.sales.filter((s) => udhaarAdded(s) > 0).length} bill(s) in this period
           </div>
         </div>
 

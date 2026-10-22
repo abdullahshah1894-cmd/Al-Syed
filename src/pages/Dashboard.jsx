@@ -33,8 +33,9 @@ const saleDay = (s) => (s?.createdAt ? localDate(s.createdAt) : null);
 const expenseDay = (e) => e.expenseDate || (e.createdAt ? localDate(e.createdAt) : null);
 // Return records carry the shop date ("date"); fall back to the timestamp
 const returnDay = (r) => (r?.date ? String(r.date).slice(0, 10) : r?.at ? localDate(r.at) : null);
-const daysAgo = (n) => {
-  const d = new Date();
+// The local date n days before a YYYY-MM-DD day (noon avoids daylight-saving edges)
+const daysBefore = (day, n) => {
+  const d = new Date(`${day}T12:00:00`);
   d.setDate(d.getDate() - n);
   return localDate(d);
 };
@@ -99,14 +100,15 @@ const Dashboard = () => {
   const todayStr = localDate();
 
   const today = useMemo(() => dayStats(records, spentList, todayStr), [records, spentList, todayStr]);
-  const yesterday = useMemo(() => dayStats(records, spentList, daysAgo(1)), [records, spentList]);
+  // Recomputed when the date changes too (the page can stay open past midnight)
+  const yesterday = useMemo(() => dayStats(records, spentList, daysBefore(todayStr, 1)), [records, spentList, todayStr]);
   const revenueChange = changeVs(today.revenue, yesterday.revenue);
 
   // Last 7 local days, oldest first
   const trend = useMemo(() => {
     const days = [];
     for (let i = 6; i >= 0; i--) {
-      const day = daysAgo(i);
+      const day = daysBefore(todayStr, i);
       const bills = liveBills(records.filter((s) => saleDay(s) === day));
       days.push({
         day,
@@ -117,7 +119,7 @@ const Dashboard = () => {
       });
     }
     return days;
-  }, [records]);
+  }, [records, todayStr]);
   const trendMax = Math.max(1, ...trend.map((d) => d.revenue));
   const trendTotal = sumBy(trend, (d) => d.revenue);
 
@@ -326,7 +328,7 @@ const Dashboard = () => {
         <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Shop Position</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
           {/* Inventory Value */}
-          <div onClick={() => navigate("/valuation")} className={`${card} cursor-pointer hover:border-cyan-500/50 hover:shadow-cyan-500/10`}>
+          <div onClick={() => navigate(isAdmin ? "/valuation" : "/inventory")} className={`${card} cursor-pointer hover:border-cyan-500/50 hover:shadow-cyan-500/10`}>
             <div className="flex items-center justify-between text-slate-400 mb-2">
               <span className="text-xs font-semibold uppercase tracking-wider">Stock Value</span>
               <div className="p-2 rounded-xl bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
@@ -570,7 +572,9 @@ const Dashboard = () => {
                       <div className="text-base font-bold text-slate-100">{fmt(sale.grandTotal)}</div>
                       <div className="text-[10px] text-slate-500 mt-0.5">
                         {itemCount(sale)} item(s) •{" "}
-                        {new Date(sale.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                        {sale.createdAt
+                          ? new Date(sale.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+                          : ""}
                       </div>
                     </div>
                   </div>
