@@ -104,7 +104,9 @@ A comprehensive, full-stack Point of Sale (POS), Inventory, Customer Khata / Led
    node scripts/setupMobileIssues.js
    node apply_migration.js            # expenses table, seller columns
    node scripts/migratePersistence.js # ledger, settings, customers.updated_at
+   node scripts/migrateHardening.js   # login revocation, one opening balance per day
    node scripts/migrateSales.js       # create_sale / add_stock (one transaction per sale)
+   node scripts/migrateReturnsSuppliers.js # returns, bill edit / delete, suppliers
    ```
    All migrations are safe to run again. If `db.<project>.supabase.co` does not resolve on your network
    (IPv6 only), use the Session pooler connection string from Supabase → Connect as `DATABASE_URL`.

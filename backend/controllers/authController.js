@@ -1,6 +1,6 @@
 const bcrypt = require("bcryptjs");
 const supabase = require("../config/supabase");
-const { signToken } = require("../middleware/auth");
+const { signToken, forgetUser } = require("../middleware/auth");
 
 const isHash = (value) => typeof value === "string" && value.startsWith("$2");
 
@@ -29,7 +29,7 @@ exports.login = async (req, res) => {
     }
 
     const safeUser = { id: user.id, name: user.name, username: user.username, role: user.role };
-    res.json({ user: safeUser, token: signToken(safeUser) });
+    res.json({ user: safeUser, token: signToken({ ...safeUser, token_version: user.token_version }) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -80,7 +80,11 @@ exports.changePassword = async (req, res) => {
     if (!newPassword || String(newPassword).length < 6) {
       return res.status(400).json({ error: "New password must be at least 6 characters." });
     }
-    const { data: user, error } = await supabase.from("users").select("id, password").eq("id", req.user.id).single();
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("id, name, username, role, password, token_version")
+      .eq("id", req.user.id)
+      .single();
     if (error) throw new Error(error.message);
 
     const ok = isHash(user.password)
@@ -88,11 +92,16 @@ exports.changePassword = async (req, res) => {
       : String(currentPassword || "") === user.password;
     if (!ok) return res.status(400).json({ error: "Current password is wrong." });
 
+    // A new token version ends every other login of this user (other tills, lost phones)
+    const tokenVersion = (user.token_version || 0) + 1;
     const { error: upError } = await supabase
       .from("users")
-      .update({ password: await bcrypt.hash(String(newPassword), 10) })
+      .update({ password: await bcrypt.hash(String(newPassword), 10), token_version: tokenVersion })
       .eq("id", user.id);
     if (upError) throw new Error(upError.message);
+    forgetUser(user.id);
+    // This device stays logged in with a fresh token
+    res.setHeader("X-New-Token", signToken({ ...user, token_version: tokenVersion }));
     res.json({ message: "Password changed" });
   } catch (err) {
     res.status(400).json({ error: err.message });

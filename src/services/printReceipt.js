@@ -1,25 +1,57 @@
+// innerHTML does not carry what was typed into inputs, so the copy shows their current values as text
+const snapshotHtml = (element) => {
+  const clone = element.cloneNode(true);
+  const originals = element.querySelectorAll("input, textarea, select");
+  clone.querySelectorAll("input, textarea, select").forEach((field, i) => {
+    const source = originals[i];
+    if (!source) return;
+    if (source.type === "checkbox" || source.type === "radio" || source.type === "date") {
+      field.remove();
+      return;
+    }
+    const text = document.createElement("span");
+    text.className = "print-field";
+    text.textContent = source.tagName === "SELECT" ? source.options[source.selectedIndex]?.text || "" : source.value;
+    field.replaceWith(text);
+  });
+  return clone.innerHTML;
+};
+
+const escapeHtml = (s) =>
+  String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
 /**
  * Prints only the specified HTML element by opening an isolated, clean print window.
  * This completely prevents any blank leading or trailing pages caused by SPA DOM trees.
  *
  * @param {string} elementId - The ID of the container to print
  * @param {string} [title='Receipt'] - Optional title for the print document
+ * @param {{ paper?: "receipt" | "a4" }} [options] - "a4" for wide pages such as the ledger statement
  */
-export const printElement = (elementId, title = "Receipt") => {
+export const printElement = (elementId, title = "Receipt", { paper = "receipt" } = {}) => {
   const element = document.getElementById(elementId);
   if (!element) {
     window.print();
     return;
   }
 
-  const printWindow = window.open("", "_blank", "width=400,height=600");
+  const wide = paper === "a4";
+  const printWindow = window.open("", "_blank", wide ? "width=900,height=700" : "width=400,height=600");
   if (!printWindow) {
     // If popup blocked, fallback to standard window.print
     window.print();
     return;
   }
 
-  const htmlContent = element.innerHTML;
+  const htmlContent = snapshotHtml(element);
+  const pageCss = wide
+    ? `
+          @page { size: A4; margin: 10mm; }
+          html, body { width: auto; max-width: none; }
+          .receipt-wrapper { width: 100%; padding: 0; }
+          table { table-layout: auto !important; }
+          th, td { padding: 2px 4px !important; }`
+    : "";
 
   printWindow.document.open();
   printWindow.document.write(`
@@ -27,7 +59,7 @@ export const printElement = (elementId, title = "Receipt") => {
     <html>
       <head>
         <meta charset="utf-8" />
-        <title>${title}</title>
+        <title>${escapeHtml(title)}</title>
         <style>
           @page {
             size: 80mm auto;
@@ -48,6 +80,7 @@ export const printElement = (elementId, title = "Receipt") => {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, monospace;
             font-size: 11px;
             line-height: 1.35;
+            overflow-wrap: anywhere;
           }
           .receipt-wrapper {
             width: 72mm;
@@ -190,11 +223,29 @@ export const printElement = (elementId, title = "Receipt") => {
           th, td {
             padding: 3px 0 !important;
           }
+          .space-y-0\\.5 > * + * { margin-top: 2px !important; }
           .space-y-1 > * + * { margin-top: 3px !important; }
+          .space-y-1\\.5 > * + * { margin-top: 4px !important; }
           .space-y-2 > * + * { margin-top: 6px !important; }
+          .space-y-4 > * + * { margin-top: 10px !important; }
+          .mt-0\\.5 { margin-top: 2px !important; }
+          .mt-1\\.5 { margin-top: 4px !important; }
+          .my-0\\.5 { margin-top: 2px !important; margin-bottom: 2px !important; }
+          .ml-1 { margin-left: 3px !important; }
+          .ml-1\\.5 { margin-left: 4px !important; }
+          .pr-2 { padding-right: 6px !important; }
+          .p-1 { padding: 3px !important; }
+          .gap-1 { gap: 3px !important; }
+          .inline-block { display: inline-block !important; }
+          .whitespace-nowrap { white-space: nowrap !important; }
+          .shrink-0 { flex-shrink: 0 !important; }
+          .line-through { text-decoration: line-through !important; }
+          .italic { font-style: italic !important; }
+          .print-field { font-weight: 700; }
           .print\\:hidden, button, aside, header, nav {
             display: none !important;
           }
+          ${pageCss}
         </style>
       </head>
       <body>
@@ -202,12 +253,13 @@ export const printElement = (elementId, title = "Receipt") => {
           ${htmlContent}
         </div>
         <script>
+          // Close only after the print dialog is done (a fixed timer closed it mid-print on some browsers)
+          window.onafterprint = function() { window.close(); };
           window.onload = function() {
             window.focus();
             window.print();
-            setTimeout(function() { window.close(); }, 500);
           };
-        <\/script>
+        </script>
       </body>
     </html>
   `);

@@ -6,7 +6,7 @@ const cors = require("cors");
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({ exposedHeaders: ["X-New-Token"] }));
 app.use(express.json({ limit: "20mb" }));
 
 app.use((req, res, next) => {
@@ -30,20 +30,36 @@ const { requireAuth, requireAdmin } = require("./middleware/auth");
 app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api", requireAuth);
 
+// Owner-only changes (admin): every edit, delete and return, the product catalogue, suppliers and
+// settings. Cashiers can sell, take Udhaar payments, add customers / expenses / repair tickets,
+// log warranty claims and use the Billing Ledger.
+const ADMIN_ONLY = [
+  ["post", "/api/products"],
+  ["put", "/api/products/:id"],
+  ["delete", "/api/products/:id"],
+  ["post", "/api/products/:id/stock"],
+  ["put", "/api/sales/:id"],
+  ["delete", "/api/sales/:id"],
+  ["post", "/api/sales/:id/returns"],
+  ["put", "/api/customers/:id"],
+  ["delete", "/api/customers/:id"],
+  ["put", "/api/expenses/:id"],
+  ["delete", "/api/expenses/:id"],
+  ["delete", "/api/issues/:id"],
+  ["post", "/api/ledger/opening"],
+  ["put", "/api/settings"],
+];
+ADMIN_ONLY.forEach(([method, route]) => app[method](route, requireAdmin));
+
 // API Routes — Supabase-backed
 app.use("/api/products", require("./routes/productRoutes"));
-// Editing or deleting a bill can reverse money: owner only. Returns stay open to cashiers.
-app.put("/api/sales/:id", requireAdmin);
-app.delete("/api/sales/:id", requireAdmin);
 app.use("/api/sales", require("./routes/saleRoutes"));
 app.use("/api/ledger", require("./routes/ledgerRoutes"));
 app.use("/api/customers", require("./routes/customerRoutes"));
 app.use("/api/warranties", require("./routes/warrantyRoutes"));
 app.use("/api/issues", require("./routes/issueRoutes"));
-app.use("/api/upload", require("./routes/uploadRoutes"));
 app.use("/api/expenses", require("./routes/expenseRoutes"));
 app.use("/api/suppliers", requireAdmin, require("./routes/supplierRoutes"));
-app.put("/api/settings", requireAdmin);
 app.use("/api/settings", require("./routes/settingsRoutes"));
 
 // Unknown API path: answer instead of hanging

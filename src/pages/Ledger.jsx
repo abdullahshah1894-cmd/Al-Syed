@@ -1,7 +1,9 @@
-import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
+import { useAuth } from "../context/AuthContext";
 import { api } from "../services/api";
-import { shareImageToWhatsApp } from "../utils/shareImage";
+import { useShareImage } from "../components/useShareImage";
+import { printElement } from "../services/printReceipt";
 import { localDate } from "../utils/dates";
 import { itemImeis } from "../utils/sales";
 import {
@@ -18,8 +20,12 @@ import {
   Smartphone,
   CreditCard,
   Banknote,
-  User
+  User,
+  Lock,
+  Pencil,
+  ChevronDown
 } from "lucide-react";
+import { Page, PageHeader, Card, Stat, Badge, Button, IconButton, Field, Input, Segmented, Modal, inputClass } from "../components/ui";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const fmt = (n, decimals = 0) =>
@@ -33,7 +39,9 @@ const todayISO = () => localDate();
 
 const fmtDate = (iso) => {
   if (!iso) return "";
-  const d = new Date(iso + "T00:00:00");
+  // Plain date as local midnight; slice also copes with a full timestamp
+  const d = new Date(String(iso).slice(0, 10) + "T00:00:00");
+  if (isNaN(d)) return String(iso);
   return d
     .toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
     .replace(/ /g, "-");
@@ -95,6 +103,8 @@ const fromDbEntry = (r) => {
 const Ledger = () => {
   // allCustomers (not the header-filtered list) so a customer added here is always found
   const { products, shopSettings, allCustomers, recordSale, addCustomer } = useApp();
+  // Editing the opening balance and deleting payment rows is for the owner only
+  const { isAdmin } = useAuth();
 
   // ── State ─────────────────────────────────────────────────────────────────
   const [entries, setEntries] = useState([]);
@@ -110,12 +120,20 @@ const Ledger = () => {
   const [scanStatus, setScanStatus] = useState(null); // { type: "success"|"error", message }
   const scanRef = useRef(null);
   const receiptRef = useRef(null);
-  const [isCapturingImage, setIsCapturingImage] = useState(false);
-  const [shareMessage, setShareMessage] = useState(""); // result of the last WhatsApp share
+  const [openShare, shareDialog] = useShareImage();
+  // Scans are handled one after another (a fast scanner can send the next code while the last one is looked up)
+  const scanQueueRef = useRef(Promise.resolve());
+  const focusScan = () => scanRef.current?.focus();
 
   // Invoice tracking — each scan session groups items under an auto-created invoice
   const [invoiceCounter, setInvoiceCounter] = useState(1);
   const [currentInvoiceId, setCurrentInvoiceId] = useState(null);
+  // Same id, readable at once by queued scans (state only changes on the next render)
+  const currentInvoiceRef = useRef(null);
+  const setInvoice = (id) => {
+    currentInvoiceRef.current = id;
+    setCurrentInvoiceId(id);
+  };
 
   // Manual add modal
   const [showManual, setShowManual] = useState(false);
@@ -132,6 +150,7 @@ const Ledger = () => {
   const [dueDate, setDueDate] = useState("");
   const [completedSaleInvoice, setCompletedSaleInvoice] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false); // set at once, so a double click cannot record the sale twice
 
   // Custom Customer Search Dropdown State
   const [customerSearch, setCustomerSearch] = useState("");
@@ -142,19 +161,28 @@ const Ledger = () => {
   const [showQuickAddCustomer, setShowQuickAddCustomer] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState("");
   const [newCustomerPhone, setNewCustomerPhone] = useState("");
+  const [isSavingCustomer, setIsSavingCustomer] = useState(false);
 
   const handleQuickAddCustomer = async () => {
-    if (!newCustomerName) {
+    if (isSavingCustomer) return;
+    if (!newCustomerName.trim()) {
       alert("Customer name is required.");
       return;
     }
-    const newCust = await addCustomer({
-      name: newCustomerName,
-      phone: newCustomerPhone,
-      address: "",
-      cnic: "",
-      sellerName: selectedSeller
-    });
+    setIsSavingCustomer(true);
+    let newCust;
+    try {
+      newCust = await addCustomer({
+        name: newCustomerName.trim(),
+        phone: newCustomerPhone.trim(),
+        address: "",
+        cnic: "",
+        sellerName: selectedSeller
+      });
+    } finally {
+      setIsSavingCustomer(false);
+    }
+    // Not saved: the form stays open with what was typed
     if (!newCust) return;
     setSelectedCustomer(newCust.id);
     setShowQuickAddCustomer(false);
@@ -258,10 +286,17 @@ const Ledger = () => {
     return () => clearInterval(t);
   }, [saveState, syncLedger]);
 
-  // Warn before closing / refreshing while changes are still unsaved
+  // Leaving the page inside the app: save what the 300 ms wait above would otherwise drop
+  useEffect(() => () => {
+    syncLedger();
+  }, [syncLedger]);
+
+  // Warn before closing / refreshing while changes are still unsaved (also during the 300 ms wait)
   useEffect(() => {
     const handler = (e) => {
-      if (saveState === "saved") return;
+      const unsaved =
+        saveState !== "saved" || entriesRef.current.some((x) => syncedRef.current.get(x.id) !== JSON.stringify(x));
+      if (!unsaved) return;
       e.preventDefault();
       e.returnValue = "";
     };
@@ -304,7 +339,8 @@ const Ledger = () => {
         // Re-open the last invoice that was not checked out yet
         const invoices = merged.filter((e) => e.type === "invoice");
         const openInvoice = [...invoices].reverse().find((e) => !e.saleId);
-        setCurrentInvoiceId(openInvoice ? openInvoice.id : null);
+        currentInvoiceRef.current = openInvoice ? openInvoice.id : null;
+        setCurrentInvoiceId(currentInvoiceRef.current);
         setInvoiceCounter(invoices.length + 1);
         setLoadError(null);
       } catch (err) {
@@ -326,8 +362,9 @@ const Ledger = () => {
     // Local search first (instant)
     for (const prod of products) {
       if (prod.imeis && prod.imeis.length > 0) {
+        // Either SIM's IMEI identifies the phone
         const matchedImei = prod.imeis.find(
-          (im) => im.imei === q && im.status === "in_stock"
+          (im) => (im.imei === q || im.imei1 === q || im.imei2 === q) && im.status === "in_stock"
         );
         if (matchedImei) return { product: prod, imei: matchedImei, matchType: "imei" };
       }
@@ -353,8 +390,16 @@ const Ledger = () => {
         };
         return { product: normalized, imei: result.matchedImei, matchType: "backend" };
       }
-    } catch (_) { }
+    } catch {
+      // not found on the server either
+    }
     return null;
+  };
+
+  // Changes the rows and entriesRef together, so the next queued scan sees this change before React re-renders
+  const changeEntries = (fn) => {
+    entriesRef.current = fn(entriesRef.current);
+    setEntries(fn);
   };
 
   // ── Create a new invoice header row and make it the current invoice ───────
@@ -374,22 +419,34 @@ const Ledger = () => {
       debit: 0,
       credit: null,
     };
-    setEntries((prev) => [...prev, invoiceEntry]);
-    setCurrentInvoiceId(invId);
+    changeEntries((prev) => [...prev, invoiceEntry]);
+    setInvoice(invId);
     setInvoiceCounter((c) => c + 1);
     return invId;
   };
 
   // ── Handle IMEI / barcode scan ────────────────────────────────────────────
-  const handleScan = async (e) => {
+  const handleScan = (e) => {
     if (e.key !== "Enter") return;
-    const rawQuery = scanInput.trim();
+    e.preventDefault();
+    // The box itself, not state: a fast scanner's last digits may not have re-rendered yet
+    const rawQuery = e.currentTarget.value.trim();
     if (!rawQuery) return;
 
     // Immediately clear input so fast barcode scanners don't get blocked
     setScanInput("");
     setScanStatus({ type: "success", message: "⟳ Processing scan(s)..." });
 
+    // One scan at a time: two scans at once could each start an invoice or add the same unit twice
+    scanQueueRef.current = scanQueueRef.current
+      .then(() => processScan(rawQuery))
+      .catch((err) => {
+        console.error("[Ledger] Scan failed:", err);
+        setScanStatus({ type: "error", message: `Scan failed: ${err.message || err}` });
+      });
+  };
+
+  const processScan = async (rawQuery) => {
     // Split by commas, spaces, or newlines to allow bulk pasting
     const queries = rawQuery.split(/[\s,;]+/).filter((q) => q.trim().length > 0);
 
@@ -398,11 +455,17 @@ const Ledger = () => {
     let localQtyTracker = {};
     let localImeiTracker = new Set();
 
-    // One invoice for the whole scan / paste. currentInvoiceId state does not change inside
-    // this loop, so the id is kept here; it is created on the first item found.
-    let invId = currentInvoiceId;
+    // One invoice for the whole scan / paste; it is created on the first item found.
+    // A checked-out invoice never gets new items.
+    let invId = currentInvoiceRef.current;
+    if (invId && !entriesRef.current.some((e) => e.id === invId && e.type === "invoice" && !e.saleId)) invId = null;
 
     for (const query of queries) {
+      // A sale is being saved for the current invoice: adding to it now would leave the item off the bill
+      if (submittingRef.current) {
+        setScanStatus({ type: "error", message: `Not added "${query}": wait until the checkout is saved.` });
+        break;
+      }
       const result = await lookupProduct(query);
 
       if (!result) {
@@ -410,7 +473,8 @@ const Ledger = () => {
         continue;
       }
 
-      const { product, matchType } = result;
+      const entries = entriesRef.current;
+      const { product } = result;
       let { imei } = result;
 
       // Barcode scan of a phone model: take the next in-stock unit, so every phone on the bill has its IMEI
@@ -472,7 +536,7 @@ const Ledger = () => {
       const itemInvId = invId;
 
       // Add or update item in local state
-      setEntries((prev) => {
+      changeEntries((prev) => {
         const existingIdx = prev.findIndex(
           (e) => e.parentInvoiceId === itemInvId && e.productId === product.id
         );
@@ -546,7 +610,7 @@ const Ledger = () => {
       });
     }
 
-    if (scanRef.current) scanRef.current.focus();
+    focusScan();
   };
 
   // ── Recompute invoice header totals from its child items ──────────────────
@@ -573,6 +637,12 @@ const Ledger = () => {
 
   // ── Delete an entry ───────────────────────────────────────────────────────
   const handleDelete = (id) => {
+    const target = entries.find((e) => e.id === id);
+    if (!target || isLockedEntry(entries, target)) return;
+    // Payment rows are the shop's records, not the open bill: only the owner removes them
+    if (target.type === "payment" && !isAdmin) return;
+    if (target.type === "invoice" && currentInvoiceRef.current === id) setInvoice(null);
+
     setEntries((prev) => {
       const entry = prev.find((e) => e.id === id);
       if (!entry) return prev;
@@ -581,7 +651,6 @@ const Ledger = () => {
 
       // If deleting an invoice, remove all its children too
       if (entry.type === "invoice") {
-        if (currentInvoiceId === id) setCurrentInvoiceId(null);
         return prev.filter((e) => e.id !== id && e.parentInvoiceId !== id);
       }
 
@@ -654,7 +723,7 @@ const Ledger = () => {
 
   const finalizeCheckout = async () => {
     // Ignore a second click while the first sale is still saving
-    if (isSubmitting) return;
+    if (isSubmitting || submittingRef.current) return;
 
     const invoiceHeader = entries.find(e => e.id === currentInvoiceId);
     const invoiceItems = entries.filter(e => e.type === "item" && e.parentInvoiceId === currentInvoiceId);
@@ -723,21 +792,22 @@ const Ledger = () => {
     };
 
     // This records the sale (reducing stock in backend) and updates local states
+    submittingRef.current = true;
     setIsSubmitting(true);
     let recorded;
     try {
       recorded = await recordSale(saleData);
     } finally {
+      submittingRef.current = false;
       setIsSubmitting(false);
     }
     // Not saved: keep the invoice open so it can be checked out again
     if (!recorded) return;
 
     // Link the ledger invoice to its saved sale so it is not re-opened after a refresh
-    setEntries((prev) => prev.map((e) => (e.id === invoiceHeader.id ? { ...e, saleId: recorded.id } : e)));
+    changeEntries((prev) => prev.map((e) => (e.id === invoiceHeader.id ? { ...e, saleId: recorded.id } : e)));
 
     setCompletedSaleInvoice(recorded);
-    setShareMessage("");
     setShowCheckoutModal(false);
 
     // Reset the checkout form for the next bill (back to Pending Bill / Udhaar)
@@ -746,9 +816,11 @@ const Ledger = () => {
     setPaidAmountInput("");
     setDueDate("");
     setCustomerSearch("");
+    setShowCustomerDropdown(false);
+    setShowQuickAddCustomer(false);
 
     // No current invoice now; the next scan starts a new one (no empty invoice left behind)
-    setCurrentInvoiceId(null);
+    setInvoice(null);
     setScanInput("");
   };
 
@@ -781,7 +853,9 @@ const Ledger = () => {
       text += `• ${bold}${item.description || item.productName || item.name || "Item"}${bold}\n`;
       const itemRate = item.rate || item.unitSalePrice || (item.quantity ? item.subtotal / item.quantity : 0);
       const itemSubtotal = item.subtotal || (item.quantity * itemRate);
-      text += `  Qty: ${item.quantity || item.qty || 1} x Rs ${itemRate.toLocaleString()} = Rs ${itemSubtotal.toLocaleString()}\n`;
+      text += `  Qty: ${item.quantity || item.qty || 1} x Rs ${fmt(itemRate)} = Rs ${fmt(itemSubtotal)}\n`;
+      const imeis = itemImeis(item);
+      if (imeis.length > 0) text += `  IMEI: ${imeis.join(", ")}\n`;
     });
     text += `------------------------------\n`;
     text += `Subtotal: Rs ${(inv.subtotalAmount || inv.grandTotal || 0).toLocaleString()}\n`;
@@ -804,29 +878,25 @@ const Ledger = () => {
     return text;
   };
 
-  // WhatsApp: send the receipt as a picture (text goes along as the message)
-  const handleWhatsAppShareModal = async () => {
-    if (!completedSaleInvoice || isCapturingImage) return;
+  // Share the receipt as a picture: preview, then WhatsApp / any app / copy / download
+  const handleWhatsAppShareModal = () => {
+    if (!completedSaleInvoice) return;
     const udhaar = receiptUdhaar(completedSaleInvoice);
-    setIsCapturingImage(true);
-    setShareMessage("");
-    try {
-      const { message } = await shareImageToWhatsApp({
-        element: receiptRef.current || document.getElementById("invoice-print-area"),
-        phone: completedSaleInvoice.customerPhone,
-        text: generateTextReceipt(completedSaleInvoice, udhaar.previous, true, udhaar.total),
-        fileName: `Invoice_${completedSaleInvoice.billNumber || "INV"}.png`,
-      });
-      setShareMessage(message);
-    } catch (err) {
-      setShareMessage(`Could not create the invoice image: ${err.message || err}`);
-    } finally {
-      setIsCapturingImage(false);
-    }
+    openShare({
+      element: receiptRef.current || document.getElementById("invoice-print-area"),
+      fileName: `Invoice_${completedSaleInvoice.billNumber || "INV"}.png`,
+      phone: completedSaleInvoice.customerPhone,
+      text: generateTextReceipt(completedSaleInvoice, udhaar.previous, true, udhaar.total),
+      title: "Share Invoice",
+    });
   };
 
-  const handlePrintReceipt = () => {
-    window.print();
+  // Same clean 80 mm print window as the POS receipt
+  const handlePrintReceipt = () => printElement("invoice-print-area", "Sales Receipt");
+
+  const closeReceipt = () => {
+    setCompletedSaleInvoice(null);
+    focusScan();
   };
 
 
@@ -867,7 +937,8 @@ const Ledger = () => {
   const handleQtyChange = (targetRow, newQtyStr) => {
     // Phone rows count their IMEIs: scan or delete units instead of typing a quantity
     if (itemImeis(targetRow).length > 0) return;
-    const newQty = Math.max(1, Number(newQtyStr) || 1);
+    // The box may be empty while a new number is typed; it becomes 1 again when it loses focus
+    const newQty = String(newQtyStr) === "" ? "" : Math.max(1, Math.floor(Number(newQtyStr)) || 1);
     setEntries((prev) => {
       if (isLockedEntry(prev, targetRow)) return prev;
       const updated = prev.map((e) => {
@@ -907,17 +978,24 @@ const Ledger = () => {
 
     setManualForm(EMPTY_MANUAL);
     setShowManual(false);
+    focusScan();
   };
 
   // ── Save opening balance ──────────────────────────────────────────────────
+  const [savingOB, setSavingOB] = useState(false);
   const saveOB = async () => {
+    if (!isAdmin || savingOB) return;
     const amount = Number(obInput) || 0;
+    setSavingOB(true);
     try {
       await api.setOpeningBalance(dateFrom, amount);
       setOpeningBalance(amount);
       setEditingOB(false);
+      focusScan();
     } catch (err) {
       alert(`Opening balance was NOT saved.\n\n${err.message}`);
+    } finally {
+      setSavingOB(false);
     }
   };
 
@@ -967,167 +1045,194 @@ const Ledger = () => {
   const completedUdhaar = receiptUdhaar(completedSaleInvoice);
 
   // ── Print ─────────────────────────────────────────────────────────────────
-  const handlePrint = () => window.print();
+  // The statement is a wide table: the 80 mm receipt page cut it off, so it prints on A4
+  const handlePrint = () => printElement("ledger-print-area", "Billing Ledger", { paper: "a4" });
+
+  // Modal close handlers stay the same function between renders (Modal re-focuses itself when onClose changes)
+  const closeOB = useCallback(() => {
+    setEditingOB(false);
+    scanRef.current?.focus();
+  }, []);
+  const closeManual = useCallback(() => {
+    setShowManual(false);
+    scanRef.current?.focus();
+  }, []);
+  const closeCheckout = useCallback(() => {
+    setShowCheckoutModal(false);
+    scanRef.current?.focus();
+  }, []);
 
   // ── Cell styles ───────────────────────────────────────────────────────────
-  const cell = "border border-slate-700 px-1.5 py-[3px] text-[11px]";
-  const cellR = cell + " text-right";
+  // Thin ruled lines on screen; the `border` class prints as a solid grid on the A4 statement
+  const cell = "border border-line px-2 py-1.5 text-xs text-ink align-middle";
+  const cellR = cell + " text-right tabular-nums whitespace-nowrap";
   const cellC = cell + " text-center";
+
+  // Save status line
+  const saveTone = loadError || saveState === "error" ? "text-khata-600" : saveState === "saving" ? "text-saffron-700" : "text-paid-600";
+  const saveDot = loadError || saveState === "error" ? "bg-khata-500" : saveState === "saving" ? "bg-saffron-500" : "bg-paid-500";
+  const saveText = loadError
+    ? `Could not load saved ledger: ${loadError}`
+    : saveState === "error"
+    ? "Not saved yet — retrying every 10s. Don't close this page."
+    : saveState === "saving"
+    ? "Saving…"
+    : "All changes saved";
+
+  const METHOD_LABELS = { Cash: "Cash", Card: "Card", "Pending Bill": "Pending bill" };
 
   return (
     <>
-    <div className={`p-4 space-y-4 bg-slate-950 min-h-screen ${completedSaleInvoice ? "print:hidden" : ""}`}>
+    <div className={completedSaleInvoice ? "print:hidden" : ""}>
+    <Page>
+      <PageHeader
+        title="Billing ledger"
+        description="Scan an IMEI or barcode to add it to the current bill. Every row saves on its own."
+        actions={
+          <>
+            <Button variant="secondary" icon={FileText} onClick={handleNewInvoice}>New invoice</Button>
+            <Button variant="secondary" icon={Plus} onClick={() => setShowManual(true)}>Manual entry</Button>
+            <Button variant="ghost" icon={Printer} onClick={handlePrint}>Print</Button>
+          </>
+        }
+      />
 
-      {/* ━━ Top Action Bar ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
-      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 bg-slate-900 border border-slate-800 rounded-2xl p-4">
-        <div className="flex items-center gap-2">
-          <BookOpen size={22} className="text-indigo-400" />
-          <div>
-            <h1 className="text-base font-bold text-slate-100">Billing Ledger</h1>
-            <p className="text-[11px] text-slate-400">Scan IMEI / barcode to add products to the current bill</p>
-            <p className={`text-[11px] font-semibold ${loadError || saveState === "error" ? "text-rose-400" : saveState === "saving" ? "text-amber-400" : "text-emerald-400"}`}>
-              {loadError
-                ? `Could not load saved ledger: ${loadError}`
-                : saveState === "error"
-                ? "Not saved yet — retrying every 10s. Don't close this page."
-                : saveState === "saving"
-                ? "Saving…"
-                : "All changes saved to database"}
+      {/* ━━ IMEI / Barcode Scanner — stays in reach while the sheet scrolls ━━ */}
+      <div className="sticky top-16 z-20 print:hidden">
+        <Card className="space-y-3 shadow-pop">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <div className="flex items-center gap-2">
+              <ScanLine size={18} className="text-brand-600" aria-hidden="true" />
+              <label htmlFor="ledger-scan" className="text-sm font-semibold text-ink">Scan IMEI or barcode</label>
+            </div>
+            {currentInvoiceId && <Badge tone="brand">Invoice open</Badge>}
+            <p role="status" className={`sm:ml-auto flex items-start gap-1.5 text-xs font-semibold ${saveTone}`}>
+              <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${saveDot}`} aria-hidden="true" />
+              <span>{saveText}</span>
             </p>
           </div>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <button onClick={handleNewInvoice}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all shadow active:scale-95">
-            <FileText size={14} /> New Invoice
-          </button>
 
-          {currentInvoiceId && (
-            <button onClick={handleCheckoutClick}
-              disabled={noRateLines.length > 0}
-              title={noRateLines.length > 0 ? "Enter a rate for every item first" : undefined}
-              className={`px-4 py-2 bg-emerald-600 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all ${noRateLines.length > 0 ? "opacity-50 cursor-not-allowed" : "hover:bg-emerald-500 shadow shadow-emerald-600/30 active:scale-95 animate-pulse"}`}>
-              <CheckCircle2 size={14} /> Checkout & Finalize
-            </button>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <div className="relative flex-1 min-w-0">
+              <Search size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+              <input
+                id="ledger-scan"
+                ref={scanRef}
+                type="text"
+                inputMode="numeric"
+                value={scanInput}
+                onChange={(e) => setScanInput(e.target.value)}
+                onKeyDown={handleScan}
+                placeholder="Scan or paste, then press Enter"
+                className="w-full h-12 pl-11 pr-4 sm:pr-44 rounded-xl border-2 border-brand-200 bg-surface font-mono text-base text-ink placeholder:font-sans placeholder:text-sm placeholder:text-muted/80 focus:outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-100 transition-colors"
+                autoComplete="off"
+              />
+              {scanInput && (
+                <span className="hidden sm:block absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted">
+                  {scanInput.length} digit{scanInput.length !== 1 ? "s" : ""} — press Enter
+                </span>
+              )}
+            </div>
+            {currentInvoiceId && (
+              <Button
+                size="lg"
+                icon={CheckCircle2}
+                onClick={handleCheckoutClick}
+                disabled={noRateLines.length > 0}
+                title={noRateLines.length > 0 ? "Enter a rate for every item first" : undefined}
+                className="w-full sm:w-auto"
+              >
+                Checkout · Rs {fmt(checkoutTotal)}
+              </Button>
+            )}
+          </div>
+          <p className="text-xs text-muted">Several codes at once? Paste them separated by spaces or commas.</p>
+
+          {/* Lines without a rate block the checkout */}
+          {noRateLines.length > 0 && (
+            <div className="flex items-start gap-2 rounded-xl border border-saffron-200 bg-saffron-50 px-3 py-2 text-xs font-semibold text-saffron-700">
+              <AlertCircle size={14} className="shrink-0 mt-0.5" aria-hidden="true" />
+              <span>Rate needed before checkout: {noRateNames.join(", ")}. Type the rate in the highlighted box.</span>
+            </div>
           )}
-          <button onClick={() => setShowManual(true)}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all shadow shadow-indigo-600/30 active:scale-95">
-            <Plus size={14} /> Manual Entry
-          </button>
-          <button onClick={handlePrint}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl flex items-center gap-1.5 border border-slate-700 transition-all">
-            <Printer size={14} /> Print
-          </button>
-        </div>
+
+          {/* Scan status feedback */}
+          {scanStatus && (
+            <div
+              role="status"
+              className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-xs font-semibold ${
+                scanStatus.type === "success"
+                  ? "border-paid-200 bg-paid-50 text-paid-700"
+                  : "border-khata-200 bg-khata-50 text-khata-700"
+              }`}
+            >
+              {scanStatus.type === "success" ? <CheckCircle2 size={14} className="shrink-0 mt-0.5" /> : <AlertCircle size={14} className="shrink-0 mt-0.5" />}
+              <span>{scanStatus.message}</span>
+            </div>
+          )}
+        </Card>
       </div>
 
-      {/* ━━ IMEI / Barcode Scanner Input ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
-        <div className="flex items-center gap-2 mb-1">
-          <ScanLine size={18} className="text-cyan-400" />
-          <span className="text-sm font-bold text-slate-100">Scan Product IMEI / Barcode</span>
-          {currentInvoiceId && (
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 ml-auto">
-              Invoice Active
-            </span>
-          )}
-        </div>
+      {/* ━━ Printable Statement (ruled khata page) ━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      <div id="ledger-print-area" className={`bg-surface border border-line rounded-2xl shadow-card overflow-hidden ${completedSaleInvoice ? "" : "print-target"}`}>
 
-        <div className="relative">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            ref={scanRef}
-            type="text"
-            inputMode="numeric"
-            value={scanInput}
-            onChange={(e) => setScanInput(e.target.value)}
-            onKeyDown={handleScan}
-            placeholder="Scan or paste barcodes/IMEIs (separate multiple with spaces/commas) and press Enter..."
-            className="w-full pl-10 pr-4 py-3 bg-slate-950 border-2 border-cyan-600/40 rounded-xl text-sm font-mono text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-400 transition-all"
-            autoComplete="off"
-          />
-          {scanInput && (
-            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-500">
-              {scanInput.length} digit{scanInput.length !== 1 ? "s" : ""} — press Enter
-            </span>
-          )}
-        </div>
-
-        {/* Lines without a rate block the checkout */}
-        {noRateLines.length > 0 && (
-          <div className="flex items-start gap-2 px-3 py-2 rounded-xl text-xs font-semibold border bg-rose-500/10 text-rose-300 border-rose-500/30">
-            <AlertCircle size={14} className="shrink-0 mt-0.5" />
-            <span>
-              Rate required before checkout: {noRateNames.join(", ")}. Enter the rate in the highlighted Rate box.
-            </span>
-          </div>
-        )}
-
-        {/* Scan status feedback */}
-        {scanStatus && (
-          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border ${scanStatus.type === "success"
-              ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-              : "bg-rose-500/10 text-rose-300 border-rose-500/30"
-            }`}>
-            {scanStatus.type === "success" ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}
-            <span>{scanStatus.message}</span>
-          </div>
-        )}
-      </div>
-
-      {/* ━━ Printable Statement ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
-      <div id="ledger-print-area" className={`bg-white text-slate-900 rounded-2xl border border-slate-700 overflow-hidden shadow-xl ${completedSaleInvoice ? '' : 'print-target'}`}>
-
-        {/* Company header */}
-        <div className="border-b-2 border-slate-800 px-4 pt-3 pb-2">
-          <div className="text-center mb-2">
-            <div className="text-[15px] font-extrabold tracking-widest uppercase">
+        {/* Letterhead and dates */}
+        <div className="border-b border-line px-4 pt-4 pb-3 sm:px-5">
+          <div className="text-center mb-3">
+            <div className="font-display text-lg font-bold text-ink">
               {shopSettings?.shopName || "AL SAEED M/Z KOHAT"}
             </div>
-            <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-[0.2em]">KOHAT</div>
+            <div className="text-xs font-semibold text-muted">Kohat</div>
           </div>
 
-          <div className="flex items-start justify-between text-[11px]">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2">
-                <span className="font-bold w-8 text-slate-700">From</span>
-                <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
-                  className="border border-slate-400 rounded px-1 py-0.5 text-[11px] text-slate-800 bg-slate-50 focus:outline-none focus:border-indigo-500" />
-                <span className="text-slate-500">{fmtDate(dateFrom)}</span>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:gap-3">
+              <div className="min-w-0 space-y-1">
+                <label htmlFor="ledger-from" className="block text-xs font-semibold text-ink-soft">
+                  From <span className="font-normal text-muted">{fmtDate(dateFrom)}</span>
+                </label>
+                <input id="ledger-from" type="date" value={dateFrom} onChange={(e) => e.target.value && setDateFrom(e.target.value)}
+                  className={`${inputClass} sm:w-44`} />
               </div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold w-8 text-slate-700">To</span>
-                <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
-                  className="border border-slate-400 rounded px-1 py-0.5 text-[11px] text-slate-800 bg-slate-50 focus:outline-none focus:border-indigo-500" />
-                <span className="text-slate-500">{fmtDate(dateTo)}</span>
+              <div className="min-w-0 space-y-1">
+                <label htmlFor="ledger-to" className="block text-xs font-semibold text-ink-soft">
+                  To <span className="font-normal text-muted">{fmtDate(dateTo)}</span>
+                </label>
+                <input id="ledger-to" type="date" value={dateTo} onChange={(e) => e.target.value && setDateTo(e.target.value)}
+                  className={`${inputClass} sm:w-44`} />
               </div>
             </div>
-            <div className="text-right text-[11px] font-semibold text-slate-600">{genTime}</div>
+            <div className="text-xs text-muted sm:text-right">Generated {genTime}</div>
           </div>
         </div>
 
         {/* ── Ledger Table ── */}
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse" style={{ fontSize: "11px" }}>
+        <div className="overflow-x-auto custom-scrollbar">
+          <table className="w-full min-w-[900px] border-collapse text-xs">
             <colgroup>
-              <col style={{ width: "82px" }} />
-              <col style={{ width: "210px" }} />
-              <col style={{ width: "36px" }} />
-              <col style={{ width: "52px" }} />
-              <col style={{ width: "34px" }} />
+              <col style={{ width: "86px" }} />
+              <col style={{ width: "230px" }} />
+              <col style={{ width: "64px" }} />
+              <col style={{ width: "108px" }} />
               <col style={{ width: "40px" }} />
-              <col style={{ width: "26px" }} />
-              <col style={{ width: "72px" }} />
-              <col style={{ width: "84px" }} />
-              <col style={{ width: "72px" }} />
-              <col style={{ width: "90px" }} />
-              <col style={{ width: "26px" }} />
+              <col style={{ width: "44px" }} />
+              <col style={{ width: "36px" }} />
+              <col style={{ width: "80px" }} />
+              <col style={{ width: "88px" }} />
+              <col style={{ width: "80px" }} />
+              <col style={{ width: "96px" }} />
+              <col style={{ width: "48px" }} />
             </colgroup>
 
             <thead>
-              <tr className="bg-slate-200 border-y-2 border-slate-800">
+              <tr className="bg-sunken">
                 {["Date", "Description", "Qty", "Rate", "Dis", "Deal", "LP", "Amount", "Debit", "Credit", "Balance", ""].map((h, i) => (
-                  <th key={i} className={`${i >= 2 ? cellC : cell} font-bold bg-slate-200 ${i === 11 ? "print:hidden" : ""}`}>{h}</th>
+                  <th
+                    key={i}
+                    className={`${i >= 7 && i <= 10 ? cellR : i >= 2 ? cellC : cell} py-2 font-semibold text-ink-soft bg-sunken ${i === 11 ? "print:hidden" : ""}`}
+                  >
+                    {h}
+                  </th>
                 ))}
               </tr>
             </thead>
@@ -1158,7 +1263,7 @@ const Ledger = () => {
                   }
                 });
 
-                return groupedRows.map((row, idx) => {
+                return groupedRows.map((row) => {
                   const isInvoice = row.type === "invoice";
                   const isPayment = row.type === "payment";
                   const isActive = !!currentInvoiceId && (row.id === currentInvoiceId || row.parentInvoiceId === currentInvoiceId);
@@ -1176,30 +1281,40 @@ const Ledger = () => {
                   }
 
                   const bg = isInvoice
-                    ? isActive ? "bg-sky-100" : "bg-sky-50"
+                    ? isActive ? "bg-brand-50" : "bg-sunken/70"
                     : isPayment
-                      ? "bg-green-50"
-                      : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
+                      ? "bg-paid-50"
+                      : needsRate ? "bg-saffron-50/60" : "bg-surface hover:bg-sunken/40";
 
                   return (
-                    <tr key={row.id} className={`${bg} hover:bg-yellow-50 transition-colors`}>
-                      <td className={cell}>
-                        <span className="text-slate-700">{fmtDate(row.date)}</span>
+                    <tr key={row.id} className={`${bg} transition-colors`}>
+                      <td className={`${cell} whitespace-nowrap text-ink-soft`}>
+                        {fmtDate(row.date)}
                       </td>
-                      <td className={`${cell} ${isInvoice ? "font-semibold text-sky-800" : isPayment ? "font-semibold text-emerald-800" : "text-slate-800"}`}>
+                      <td className={`${cell} break-words ${isInvoice ? "font-semibold text-brand-800" : isPayment ? "font-semibold text-paid-700" : locked ? "text-ink-soft" : ""}`}>
                         {displayDesc}
-                        {isActive && isInvoice && <span className="ml-1 text-[9px] text-sky-500 font-bold">● CURRENT</span>}
+                        {isActive && isInvoice && <Badge tone="brand" className="ml-1.5 align-middle print:hidden">Current</Badge>}
+                        {locked && isInvoice && (
+                          <Badge tone="neutral" className="ml-1.5 align-middle print:hidden">
+                            <Lock size={10} aria-hidden="true" /> Checked out
+                          </Badge>
+                        )}
+                        {needsRate && <Badge tone="saffron" className="ml-1.5 align-middle print:hidden">Rate needed</Badge>}
                       </td>
-                      <td className={`${cellC} p-[1px]`}>
+                      <td className={`${cellC} px-1 py-1`}>
                         {!isInvoice && !isPayment && !row.imei ? (
                           <input
                             type="number"
                             min="1"
                             value={row.qty !== undefined && row.qty !== null ? row.qty : 1}
                             onChange={(e) => handleQtyChange(row, e.target.value)}
+                            onFocus={(e) => !locked && e.target.select()}
+                            onBlur={() => !locked && row.qty === "" && handleQtyChange(row, "1")}
+                            onKeyDown={(e) => e.key === "Enter" && focusScan()}
                             readOnly={locked}
-                            className={`w-12 font-bold text-center text-slate-900 rounded px-1 py-0.5 focus:outline-none transition-colors print:bg-transparent print:border-none print:w-auto ${locked ? "bg-transparent border border-transparent cursor-default" : "bg-slate-100 border border-slate-300 focus:bg-white focus:border-indigo-500"}`}
-                            title={locked ? "Checked out — cannot be edited" : "Edit Quantity"}
+                            aria-label="Quantity"
+                            className={`w-14 h-9 rounded-lg px-1 text-center font-semibold text-ink tabular-nums focus:outline-none transition-colors ${locked ? "bg-transparent border border-transparent cursor-default" : "bg-surface border border-line-strong focus:border-brand-500 focus:ring-2 focus:ring-brand-100"}`}
+                            title={locked ? "Checked out — cannot be edited" : "Edit quantity"}
                           />
                         ) : !isInvoice && !isPayment ? (
                           row.qty || 1
@@ -1207,7 +1322,7 @@ const Ledger = () => {
                           ""
                         )}
                       </td>
-                      <td className={`${cellC} p-[1px]`}>
+                      <td className={`${cellR} px-1 py-1`}>
                         {!isInvoice && !isPayment ? (
                           <input
                             type="number"
@@ -1215,10 +1330,12 @@ const Ledger = () => {
                             value={row.rate !== undefined && row.rate !== null ? row.rate : ""}
                             onChange={(e) => handleRateChange(row, e.target.value)}
                             onFocus={(e) => !locked && e.target.select()}
+                            onKeyDown={(e) => e.key === "Enter" && focusScan()}
                             readOnly={locked}
-                            className={`w-24 font-extrabold text-center text-slate-900 rounded-lg px-1.5 py-1 focus:outline-none transition-all print:bg-transparent print:border-none print:w-auto ${locked ? "bg-transparent border-2 border-transparent cursor-default" : needsRate ? "bg-rose-50 border-2 border-rose-500 ring-2 ring-rose-500/30 focus:bg-yellow-200 focus:border-indigo-600 shadow-sm" : "bg-amber-50 border-2 border-amber-400 focus:bg-yellow-200 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 shadow-sm"}`}
+                            aria-label="Rate"
+                            className={`w-24 h-9 rounded-lg px-2 text-right font-semibold text-ink tabular-nums focus:outline-none transition-colors ${locked ? "bg-transparent border border-transparent cursor-default" : needsRate ? "bg-saffron-50 border-2 border-saffron-500 focus:border-brand-500 focus:ring-2 focus:ring-saffron-100" : "bg-surface border border-line-strong focus:border-brand-500 focus:ring-2 focus:ring-brand-100"}`}
                             placeholder="Rate"
-                            title={locked ? "Checked out — cannot be edited" : needsRate ? "Rate required — enter the selling price" : "Click to edit custom rate required"}
+                            title={locked ? "Checked out — cannot be edited" : needsRate ? "Rate required — enter the selling price" : "Edit rate"}
                           />
                         ) : (
                           ""
@@ -1230,22 +1347,32 @@ const Ledger = () => {
                       <td className={cellR}>
                         {!isInvoice && !isPayment && row.computedAmount ? fmt(row.computedAmount) : ""}
                       </td>
-                      <td className={`${cellR} font-semibold text-blue-900`}>
+                      <td className={`${cellR} font-semibold`}>
                         {row.debit ? fmt(row.debit) : ""}
                       </td>
-                      <td className={`${cellR} text-emerald-800`}>
+                      <td className={`${cellR} font-semibold text-paid-700`}>
                         {row.credit ? fmt(row.credit) : ""}
                       </td>
-                      <td className={`${cellR} font-bold text-slate-900`}>
+                      <td className={`${cellR} font-bold`}>
                         {fmt(row.runningBalance)}
                       </td>
-                      <td className={`${cell} text-center print:hidden`}>
-                        {!locked && (
-                          <button onClick={() => row.groupIds.forEach(id => handleDelete(id))}
-                            className="text-rose-400 hover:text-rose-600 transition-colors p-0.5" title="Delete">
-                            <Trash2 size={10} />
+                      <td className={`${cell} px-1 py-1 text-center print:hidden`}>
+                        {!locked && (isAdmin || !isPayment) ? (
+                          <button
+                            type="button"
+                            onClick={() => row.groupIds.forEach(id => handleDelete(id))}
+                            aria-label="Delete row"
+                            title="Delete"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-khata-600 hover:bg-khata-50 transition-colors"
+                          >
+                            <Trash2 size={15} aria-hidden="true" />
                           </button>
-                        )}
+                        ) : locked ? (
+                          <span className="inline-flex h-9 w-9 items-center justify-center text-muted" title="Checked out — cannot be edited">
+                            <Lock size={14} aria-hidden="true" />
+                            <span className="sr-only">Checked out</span>
+                          </span>
+                        ) : null}
                       </td>
                     </tr>
                   );
@@ -1255,29 +1382,32 @@ const Ledger = () => {
               {/* Empty state */}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={12} className="border border-slate-700 text-center py-8 text-slate-400 text-sm">
-                    <ScanLine size={24} className="mx-auto mb-2 opacity-40" />
-                    Scan an IMEI above to start adding items to the bill
+                  <td colSpan={12} className="border border-line py-10 px-4 text-sm text-muted">
+                    <div className="sticky left-4 w-[min(22rem,calc(100vw-4rem))] sm:w-auto sm:static sm:text-center">
+                      <ScanLine size={24} className="sm:mx-auto mb-2 text-muted" aria-hidden="true" />
+                      <span className="block font-semibold text-ink">Nothing on this sheet yet</span>
+                      <span className="block mt-1">Scan an IMEI or barcode above to start a bill, or add a manual entry.</span>
+                    </div>
                   </td>
                 </tr>
               )}
             </tbody>
 
             <tfoot>
-              <tr className="bg-slate-200 border-t-2 border-slate-800">
-                <td className={`${cell} font-bold text-center`} colSpan={7}>
-                  <span className="text-slate-700 mr-6">
-                    Total Dr= <span className="text-blue-800">{fmt(totalDebit, 2)}</span>
+              <tr className="bg-sunken">
+                <td className={`${cell} font-semibold text-center text-ink-soft`} colSpan={7}>
+                  <span className="mr-6">
+                    Total Dr = <span className="text-ink tabular-nums">{fmt(totalDebit, 2)}</span>
                   </span>
-                  <span className="text-slate-700">
-                    Total Cr= <span className="text-emerald-700">{fmt(totalCredit, 2)}</span>
+                  <span>
+                    Total Cr = <span className="text-paid-700 tabular-nums">{fmt(totalCredit, 2)}</span>
                   </span>
                 </td>
                 <td className={cellR}></td>
-                <td className={`${cellR} font-bold text-blue-800`}>{fmt(totalDebit, 2)}</td>
-                <td className={`${cellR} font-bold text-emerald-700`}>{fmt(totalCredit, 2)}</td>
-                <td className={`${cellR} font-extrabold text-slate-900 text-[12px]`}>
-                  Balance= {fmt(finalBalance, 2)}
+                <td className={`${cellR} font-bold`}>{fmt(totalDebit, 2)}</td>
+                <td className={`${cellR} font-bold text-paid-700`}>{fmt(totalCredit, 2)}</td>
+                <td className={`${cellR} font-bold text-[12px]`}>
+                  Balance = {fmt(finalBalance, 2)}
                 </td>
                 <td className={`${cell} print:hidden`}></td>
               </tr>
@@ -1286,363 +1416,349 @@ const Ledger = () => {
         </div>
       </div>
 
-      {/* ━━ Summary Cards ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-          <div className="flex items-center justify-between mb-1">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Opening Balance</p>
-            <button onClick={() => { setObInput(String(openingBalance)); setEditingOB(true); }}
-              className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 bg-slate-800 hover:bg-slate-700 px-2 py-0.5 rounded transition-colors">
-              Edit
-            </button>
+      {/* ━━ Summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 print:hidden">
+        <div className="bg-surface border border-line rounded-2xl p-4 shadow-card">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-muted">Opening balance</span>
+            {isAdmin && (
+              <IconButton
+                icon={Pencil}
+                label="Edit opening balance"
+                className="-my-2 -mr-2"
+                onClick={() => { setObInput(String(openingBalance)); setEditingOB(true); }}
+              />
+            )}
           </div>
-          <p className="text-lg font-extrabold text-slate-300">Rs {fmt(openingBalance, 2)}</p>
+          <div className="mt-1.5 font-display text-2xl font-bold leading-tight text-ink break-words">Rs {fmt(openingBalance, 2)}</div>
         </div>
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Total Debit (Dr)</p>
-          <p className="text-lg font-extrabold text-blue-400">Rs {fmt(totalDebit, 2)}</p>
-        </div>
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Total Credit (Cr)</p>
-          <p className="text-lg font-extrabold text-emerald-400">Rs {fmt(totalCredit, 2)}</p>
-        </div>
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Final Balance</p>
-          <p className="text-lg font-extrabold text-amber-400">Rs {fmt(finalBalance, 2)}</p>
-        </div>
+        <Stat label="Total debit (Dr)" value={`Rs ${fmt(totalDebit, 2)}`} />
+        <Stat label="Total credit (Cr)" value={`Rs ${fmt(totalCredit, 2)}`} tone="paid" />
+        <Stat label="Closing balance" value={`Rs ${fmt(finalBalance, 2)}`} tone="brand" />
       </div>
 
       {/* ━━ Edit Opening Balance Modal ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
-      {editingOB && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl space-y-4">
-            <h3 className="font-bold text-slate-100 text-sm">Edit Opening Balance</h3>
-            <input type="number" value={obInput} onChange={(e) => setObInput(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-slate-100 text-lg font-mono focus:outline-none focus:border-indigo-500" placeholder="0" />
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setEditingOB(false)}
-                className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl">Cancel</button>
-              <button onClick={saveOB}
-                className="px-5 py-2 bg-indigo-600 text-white text-xs font-bold rounded-xl hover:bg-indigo-500 shadow">Save</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Modal
+        open={editingOB && isAdmin}
+        onClose={closeOB}
+        title="Edit opening balance"
+        description={`Opening balance for ${fmtDate(dateFrom)}`}
+        size="sm"
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeOB}>Cancel</Button>
+            <Button onClick={saveOB} loading={savingOB}>{savingOB ? "Saving…" : "Save"}</Button>
+          </>
+        }
+      >
+        <Field label="Amount (Rs)" htmlFor="ledger-ob">
+          <Input id="ledger-ob" type="number" value={obInput} onChange={(e) => setObInput(e.target.value)}
+            className="h-12 text-lg font-semibold tabular-nums" placeholder="0" />
+        </Field>
+      </Modal>
 
       {/* ━━ Manual Entry Modal ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
-      {showManual && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-lg shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
-                <FileText size={17} className="text-indigo-400" />
-                <h3 className="font-bold text-slate-100 text-sm">Manual Ledger Entry</h3>
+      <Modal
+        open={showManual}
+        onClose={closeManual}
+        title="Manual entry"
+        description="Add a line by hand when there is nothing to scan."
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeManual}>Cancel</Button>
+            <Button icon={Plus} onClick={handleManualAdd} disabled={!manualForm.description}>Add entry</Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <Field label="Entry type" hint={manualForm.type === "item" ? "Adds a line to the current invoice." : "Records a payment received (credit) or a debit."}>
+            <Segmented
+              options={[
+                { value: "item", label: "Item on bill" },
+                { value: "payment", label: "Payment" },
+              ]}
+              value={manualForm.type}
+              onChange={(v) => setManualForm({ ...manualForm, type: v })}
+            />
+          </Field>
+
+          <Field label="Date" htmlFor="manual-date">
+            <Input id="manual-date" type="date" value={manualForm.date} onChange={(e) => setManualForm({ ...manualForm, date: e.target.value })} />
+          </Field>
+
+          <Field label={<>Description <span className="text-khata-600">*</span></>} htmlFor="manual-desc">
+            <Input id="manual-desc" type="text" value={manualForm.description} onChange={(e) => setManualForm({ ...manualForm, description: e.target.value })}
+              placeholder={manualForm.type === "item" ? "Product name" : "Payment description"} />
+          </Field>
+
+          {manualForm.type === "item" && (
+            <>
+              <div className="grid grid-cols-3 gap-2 sm:gap-3">
+                <Field label="Qty" htmlFor="manual-qty">
+                  <Input id="manual-qty" type="number" value={manualForm.qty} onChange={(e) => setManualForm({ ...manualForm, qty: e.target.value })} placeholder="1" />
+                </Field>
+                <Field label="Rate (Rs) *" htmlFor="manual-rate">
+                  <Input
+                    id="manual-rate"
+                    type="number"
+                    min="0"
+                    value={manualForm.rate}
+                    onChange={(e) => setManualForm({ ...manualForm, rate: e.target.value })}
+                    onFocus={(e) => e.target.select()}
+                    className="border-2 border-saffron-400 font-semibold"
+                    placeholder="Rate"
+                  />
+                </Field>
+                <Field label="Dis %" htmlFor="manual-dis">
+                  <Input id="manual-dis" type="number" value={manualForm.dis} onChange={(e) => setManualForm({ ...manualForm, dis: e.target.value })} placeholder="0" />
+                </Field>
               </div>
-              <button onClick={() => setShowManual(false)} className="text-slate-400 hover:text-white"><X size={17} /></button>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="font-semibold text-slate-400">Entry Type</label>
-                <select value={manualForm.type} onChange={(e) => setManualForm({ ...manualForm, type: e.target.value })}
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-slate-100 focus:outline-none focus:border-indigo-500">
-                  <option value="item">Item Row (adds to current invoice)</option>
-                  <option value="payment">Payment / Receipt (Credit)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="font-semibold text-slate-400">Date</label>
-                <input type="date" value={manualForm.date} onChange={(e) => setManualForm({ ...manualForm, date: e.target.value })}
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-slate-100 focus:outline-none focus:border-indigo-500" />
-              </div>
-
-              <div>
-                <label className="font-semibold text-slate-400">Description <span className="text-rose-400">*</span></label>
-                <input type="text" value={manualForm.description} onChange={(e) => setManualForm({ ...manualForm, description: e.target.value })}
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-slate-100 focus:outline-none focus:border-indigo-500"
-                  placeholder={manualForm.type === "item" ? "Product name" : "Payment description"} />
-              </div>
-
-              {manualForm.type === "item" && (
-                <>
-                  <div className="grid grid-cols-3 gap-2">
-                    <div>
-                      <label className="font-semibold text-slate-400">Qty</label>
-                      <input type="number" value={manualForm.qty} onChange={(e) => setManualForm({ ...manualForm, qty: e.target.value })}
-                        className="w-full mt-1 bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="1" />
-                    </div>
-                    <div>
-                      <label className="font-bold text-amber-400">Rate (Rs) *</label>
-                      <input
-                        type="number"
-                        min="0"
-                        value={manualForm.rate}
-                        onChange={(e) => setManualForm({ ...manualForm, rate: e.target.value })}
-                        onFocus={(e) => e.target.select()}
-                        className="w-full mt-1 bg-slate-950 border-2 border-amber-500/50 rounded-xl p-2.5 font-bold text-slate-100 focus:outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-500/20"
-                        placeholder="Enter Rate..."
-                      />
-                    </div>
-                    <div>
-                      <label className="font-semibold text-slate-400">Dis %</label>
-                      <input type="number" value={manualForm.dis} onChange={(e) => setManualForm({ ...manualForm, dis: e.target.value })}
-                        className="w-full mt-1 bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="0" />
-                    </div>
-                  </div>
-                  {manualForm.qty && manualForm.rate && (
-                    <div className="p-2.5 bg-indigo-950/50 border border-indigo-800/40 rounded-xl text-indigo-300 font-semibold flex justify-between">
-                      <span>Amount (Qty × Rate)</span>
-                      <span>Rs {fmt(Number(manualForm.qty) * Number(manualForm.rate))}</span>
-                    </div>
-                  )}
-                </>
-              )}
-
-              {manualForm.type === "payment" && (
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="font-semibold text-slate-400">Debit (Dr)</label>
-                    <input type="number" value={manualForm.debit} onChange={(e) => setManualForm({ ...manualForm, debit: e.target.value })}
-                      className="w-full mt-1 bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="0" />
-                  </div>
-                  <div>
-                    <label className="font-semibold text-slate-400">Credit (Cr)</label>
-                    <input type="number" value={manualForm.credit} onChange={(e) => setManualForm({ ...manualForm, credit: e.target.value })}
-                      className="w-full mt-1 bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="0" />
-                  </div>
+              {manualForm.qty && manualForm.rate && (
+                <div className="flex justify-between gap-3 rounded-xl bg-brand-50 px-3 py-2.5 text-sm font-semibold text-brand-700">
+                  <span>Amount (qty × rate)</span>
+                  <span className="tabular-nums">Rs {fmt(Number(manualForm.qty) * Number(manualForm.rate))}</span>
                 </div>
               )}
-            </div>
+            </>
+          )}
 
-            <div className="flex justify-end gap-2 pt-1 border-t border-slate-800">
-              <button onClick={() => setShowManual(false)}
-                className="px-4 py-2 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-700">Cancel</button>
-              <button onClick={handleManualAdd} disabled={!manualForm.description}
-                className="px-5 py-2 bg-indigo-600 text-white text-xs font-bold rounded-xl hover:bg-indigo-500 disabled:opacity-40 shadow">
-                Add Entry
-              </button>
+          {manualForm.type === "payment" && (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Debit (Dr)" htmlFor="manual-debit">
+                <Input id="manual-debit" type="number" value={manualForm.debit} onChange={(e) => setManualForm({ ...manualForm, debit: e.target.value })} placeholder="0" />
+              </Field>
+              <Field label="Credit (Cr)" htmlFor="manual-credit">
+                <Input id="manual-credit" type="number" value={manualForm.credit} onChange={(e) => setManualForm({ ...manualForm, credit: e.target.value })} placeholder="0" />
+              </Field>
             </div>
-          </div>
+          )}
         </div>
-      )}
-
+      </Modal>
 
       {/* ━━ Checkout Modal ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
-      {showCheckoutModal && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h2 className="text-xl font-bold text-slate-800">Finalize Ledger Invoice</h2>
-              <button onClick={() => setShowCheckoutModal(false)} className="text-slate-400 hover:text-slate-700 bg-white p-2 rounded-full shadow-sm">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-6 overflow-y-auto custom-scrollbar">
-              {/* Payment Method Selection */}
-              <div>
-                <label className="text-sm font-bold text-slate-700 mb-3 block">Payment Method</label>
-                <div className="grid grid-cols-3 gap-3">
-                  {["Cash", "Card", "Pending Bill"].map(method => (
-                    <button
-                      key={method}
-                      onClick={() => setPaymentMethod(method)}
-                      className={`py-3 rounded-2xl font-bold text-sm flex flex-col items-center gap-2 border-2 transition-all ${
-                        paymentMethod === method 
-                          ? 'border-indigo-600 bg-indigo-50 text-indigo-700 shadow-md shadow-indigo-600/10' 
-                          : 'border-slate-200 bg-white text-slate-500 hover:border-indigo-300'
-                      }`}
-                    >
-                      {method === "Cash" && <Banknote size={20} />}
-                      {method === "Card" && <CreditCard size={20} />}
-                      {method === "Pending Bill" && <BookOpen size={20} />}
-                      {method}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Seller Selection */}
-              <div>
-                <label className="text-sm font-bold text-slate-700 mb-2.5 block">Select Seller</label>
-                <div className="grid grid-cols-2 gap-3">
-                  {SELLERS.map((sellerName) => {
-                    const isSelected = selectedSeller === sellerName;
-                    return (
-                      <button
-                        key={sellerName}
-                        type="button"
-                        onClick={() => setSelectedSeller(sellerName)}
-                        className={`py-3 px-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 border-2 transition-all ${
-                          isSelected
-                            ? "border-indigo-600 bg-indigo-50 text-indigo-700 shadow-md shadow-indigo-600/10"
-                            : "border-slate-200 bg-white text-slate-600 hover:border-indigo-300"
-                        }`}
-                      >
-                        <User size={18} />
-                        <span>Seller: {sellerName}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Customer Selection (To whom you want to sell) */}
-              <div>
-                <div className="flex justify-between items-center mb-2">
-                  <label className="text-sm font-bold text-slate-700 block">
-                    Select Customer {(paymentMethod === "Pending Bill" || checkoutDue > 0) && <span className="text-rose-500">*</span>}
-                  </label>
-                  <button 
-                    onClick={() => setShowQuickAddCustomer(!showQuickAddCustomer)}
-                    className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 bg-indigo-50 px-2 py-1 rounded"
-                  >
-                    <Plus size={12} /> {showQuickAddCustomer ? "Cancel" : "New Customer"}
-                  </button>
-                </div>
-
-                {showQuickAddCustomer ? (
-                  <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4 mb-3 space-y-3">
-                    <input 
-                      type="text" 
-                      placeholder="Customer Name *" 
-                      value={newCustomerName}
-                      onChange={(e) => setNewCustomerName(e.target.value)}
-                      className="w-full bg-white border border-slate-300 rounded-xl p-2.5 text-sm text-slate-900 focus:outline-none focus:border-indigo-500"
-                    />
-                    <input 
-                      type="text" 
-                      placeholder="Phone Number (Optional)" 
-                      value={newCustomerPhone}
-                      onChange={(e) => setNewCustomerPhone(e.target.value)}
-                      className="w-full bg-white border border-slate-300 rounded-xl p-2.5 text-sm text-slate-900 focus:outline-none focus:border-indigo-500"
-                    />
-                    <button 
-                      onClick={handleQuickAddCustomer}
-                      className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm rounded-xl"
-                    >
-                      Save & Select
-                    </button>
-                  </div>
-                ) : (
-                  <div className="relative" ref={customerDropdownRef}>
-                    <div 
-                      onClick={() => setShowCustomerDropdown(true)}
-                      className="w-full bg-slate-50 border border-slate-300 rounded-2xl p-3.5 text-slate-700 font-medium cursor-pointer flex justify-between items-center transition-all hover:border-indigo-300"
-                    >
-                      <span>
-                        {selectedCustomer 
-                          ? (() => {
-                              const c = allCustomers.find(c => c.id === selectedCustomer);
-                              return c ? `${c.name} (${c.phone || 'No Phone'})` : "Unknown";
-                            })()
-                          : "-- Walk-in Customer --"
-                        }
-                      </span>
-                      <span className="text-slate-400">▼</span>
-                    </div>
-
-                    {showCustomerDropdown && (
-                      <div className="mt-2 bg-white border border-slate-200 rounded-2xl shadow-inner overflow-hidden">
-                        <div className="p-3 border-b border-slate-100 bg-slate-50">
-                          <input 
-                            type="text" 
-                            autoFocus
-                            placeholder="Search by name or phone..." 
-                            value={customerSearch}
-                            onChange={(e) => setCustomerSearch(e.target.value)}
-                            className="w-full bg-white border border-slate-300 rounded-xl p-2.5 text-sm text-slate-700 focus:outline-none focus:border-indigo-500"
-                          />
-                        </div>
-                        <div className="max-h-48 overflow-y-auto custom-scrollbar">
-                          <div 
-                            onClick={() => { setSelectedCustomer(""); setShowCustomerDropdown(false); }}
-                            className="px-4 py-3 text-sm text-slate-500 hover:bg-slate-50 cursor-pointer"
-                          >
-                            -- Walk-in Customer --
-                          </div>
-                          {allCustomers.filter(c => (c.name || "").toLowerCase().includes(customerSearch.toLowerCase()) || (c.phone && c.phone.includes(customerSearch))).map(c => (
-                            <div 
-                              key={c.id} 
-                              onClick={() => { setSelectedCustomer(c.id); setShowCustomerDropdown(false); }}
-                              className="px-4 py-3 text-sm text-slate-700 hover:bg-indigo-50 cursor-pointer border-t border-slate-100"
-                            >
-                              <div className="font-bold">{c.name}</div>
-                              {c.phone && <div className="text-xs text-slate-400 mt-0.5">{c.phone}</div>}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-                {needsCustomer && (
-                  <p className="text-rose-500 text-xs font-semibold mt-2 px-1 flex items-center gap-1">
-                    <AlertCircle size={12}/> A registered customer is required for Udhaar.
-                  </p>
-                )}
-              </div>
-
-              {/* Paid now — Cash/Card default to the full total, Pending Bill to 0 */}
-              <div>
-                <label className="text-sm font-bold text-slate-700 mb-2 block">
-                  {paymentMethod === "Pending Bill" ? "Amount Paid Now (Optional)" : "Amount Received (Cash/Card)"}
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  value={paidAmountInput}
-                  onChange={(e) => setPaidAmountInput(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-2xl p-3.5 text-slate-900 font-bold text-lg focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
-                  placeholder={paymentMethod === "Pending Bill" ? "0" : `Full amount: Rs ${fmt(checkoutTotal)}`}
-                />
-                <div className="flex justify-between text-xs font-semibold mt-2 px-1">
-                  <span className="text-slate-500">Bill Total: Rs {fmt(checkoutTotal)}</span>
-                  {checkoutDue > 0 && <span className="text-rose-500">Udhaar: Rs {fmt(checkoutDue)}</span>}
-                </div>
-              </div>
-
-              {paymentMethod === "Pending Bill" && (
-                <div>
-                  <label className="text-sm font-bold text-slate-700 mb-2 block">Due Date (Optional)</label>
-                  <input
-                    type="date"
-                    value={dueDate}
-                    onChange={(e) => setDueDate(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-300 rounded-2xl p-3.5 text-slate-700 font-medium focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
-                  />
-                </div>
-              )}
-            </div>
-
-            {noRateLines.length > 0 && (
-              <div className="px-6 py-3 bg-rose-50 border-t border-rose-100 text-rose-600 text-xs font-semibold flex items-start gap-1.5">
-                <AlertCircle size={14} className="shrink-0 mt-0.5" />
-                <span>Rate required for: {noRateNames.join(", ")}. Close this window and enter the rate in the highlighted box.</span>
-              </div>
-            )}
-            <div className="p-6 bg-slate-50 border-t border-slate-100 flex gap-4">
-              <button
-                onClick={finalizeCheckout}
-                disabled={isSubmitting || needsCustomer || noRateLines.length > 0}
-                className="flex-1 py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-2xl flex items-center justify-center gap-2 shadow-xl shadow-emerald-600/30 transition-all disabled:opacity-50 disabled:shadow-none"
-              >
-                <CheckCircle2 size={20} />
-                {isSubmitting ? "Saving…" : "CONFIRM & GENERATE INVOICE"}
-              </button>
+      <Modal
+        open={showCheckoutModal}
+        onClose={closeCheckout}
+        title="Checkout"
+        description={`Bill total Rs ${fmt(checkoutTotal)}`}
+        size="lg"
+        closeOnBackdrop={false}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeCheckout} className="w-full sm:w-auto">Cancel</Button>
+            <Button
+              size="lg"
+              icon={CheckCircle2}
+              onClick={finalizeCheckout}
+              disabled={isSubmitting || needsCustomer || noRateLines.length > 0}
+              className="w-full sm:w-auto"
+            >
+              {isSubmitting ? "Saving…" : "Confirm and save bill"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-6">
+          {/* Payment Method Selection */}
+          <div>
+            <p className="text-xs font-semibold text-ink-soft mb-2">Payment method</p>
+            <div className="grid grid-cols-3 gap-2 sm:gap-3">
+              {["Cash", "Card", "Pending Bill"].map(method => (
+                <button
+                  key={method}
+                  type="button"
+                  aria-pressed={paymentMethod === method}
+                  onClick={() => setPaymentMethod(method)}
+                  className={`min-h-[64px] rounded-xl border-2 px-2 py-2.5 text-sm font-semibold flex flex-col items-center justify-center gap-1.5 transition-colors ${
+                    paymentMethod === method
+                      ? "border-brand-600 bg-brand-50 text-brand-700"
+                      : "border-line bg-surface text-ink-soft hover:border-brand-300"
+                  }`}
+                >
+                  {method === "Cash" && <Banknote size={20} aria-hidden="true" />}
+                  {method === "Card" && <CreditCard size={20} aria-hidden="true" />}
+                  {method === "Pending Bill" && <BookOpen size={20} aria-hidden="true" />}
+                  {METHOD_LABELS[method]}
+                </button>
+              ))}
             </div>
           </div>
-        </div>
-      )}
 
+          {/* Seller Selection */}
+          <div>
+            <p className="text-xs font-semibold text-ink-soft mb-2">Seller</p>
+            <div className="grid grid-cols-2 gap-2 sm:gap-3">
+              {SELLERS.map((sellerName) => {
+                const isSelected = selectedSeller === sellerName;
+                return (
+                  <button
+                    key={sellerName}
+                    type="button"
+                    aria-pressed={isSelected}
+                    onClick={() => setSelectedSeller(sellerName)}
+                    className={`h-12 px-3 rounded-xl border-2 text-sm font-semibold flex items-center justify-center gap-2 transition-colors ${
+                      isSelected
+                        ? "border-brand-600 bg-brand-50 text-brand-700"
+                        : "border-line bg-surface text-ink-soft hover:border-brand-300"
+                    }`}
+                  >
+                    <User size={16} aria-hidden="true" />
+                    <span className="truncate">{sellerName}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Customer Selection (To whom you want to sell) */}
+          <div>
+            <div className="flex flex-wrap justify-between items-center gap-2 mb-2">
+              <p className="text-xs font-semibold text-ink-soft">
+                Customer {(paymentMethod === "Pending Bill" || checkoutDue > 0) && <span className="text-khata-600">*</span>}
+              </p>
+              <Button
+                variant="soft"
+                icon={showQuickAddCustomer ? X : Plus}
+                onClick={() => setShowQuickAddCustomer(!showQuickAddCustomer)}
+              >
+                {showQuickAddCustomer ? "Cancel" : "New customer"}
+              </Button>
+            </div>
+
+            {showQuickAddCustomer ? (
+              <div className="bg-sunken border border-line rounded-xl p-3 sm:p-4 space-y-3">
+                <Input
+                  type="text"
+                  placeholder="Customer name *"
+                  aria-label="Customer name"
+                  value={newCustomerName}
+                  onChange={(e) => setNewCustomerName(e.target.value)}
+                />
+                <Input
+                  type="text"
+                  placeholder="Phone number (optional)"
+                  aria-label="Phone number"
+                  value={newCustomerPhone}
+                  onChange={(e) => setNewCustomerPhone(e.target.value)}
+                />
+                <Button onClick={handleQuickAddCustomer} loading={isSavingCustomer} className="w-full">
+                  {isSavingCustomer ? "Saving…" : "Save and select"}
+                </Button>
+              </div>
+            ) : (
+              <div className="relative" ref={customerDropdownRef}>
+                <button
+                  type="button"
+                  onClick={() => setShowCustomerDropdown(true)}
+                  className="w-full h-12 rounded-xl border border-line-strong bg-surface px-3.5 text-left text-sm font-medium text-ink flex justify-between items-center gap-2 hover:border-brand-300 transition-colors"
+                >
+                  <span className="truncate">
+                    {selectedCustomer
+                      ? (() => {
+                          const c = allCustomers.find(c => c.id === selectedCustomer);
+                          return c ? `${c.name} (${c.phone || 'No Phone'})` : "Unknown";
+                        })()
+                      : "Walk-in customer"
+                    }
+                  </span>
+                  <ChevronDown size={16} className="shrink-0 text-muted" aria-hidden="true" />
+                </button>
+
+                {showCustomerDropdown && (
+                  <div className="mt-2 bg-surface border border-line rounded-xl shadow-pop overflow-hidden">
+                    <div className="p-2.5 border-b border-line bg-sunken">
+                      <Input
+                        type="text"
+                        autoFocus
+                        placeholder="Search by name or phone"
+                        aria-label="Search customers"
+                        value={customerSearch}
+                        onChange={(e) => setCustomerSearch(e.target.value)}
+                      />
+                    </div>
+                    <div className="max-h-48 overflow-y-auto custom-scrollbar">
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedCustomer(""); setShowCustomerDropdown(false); }}
+                        className="w-full text-left px-4 py-3 text-sm text-muted hover:bg-sunken"
+                      >
+                        Walk-in customer
+                      </button>
+                      {allCustomers.filter(c => (c.name || "").toLowerCase().includes(customerSearch.toLowerCase()) || (c.phone && c.phone.includes(customerSearch))).map(c => (
+                        <button
+                          type="button"
+                          key={c.id}
+                          onClick={() => { setSelectedCustomer(c.id); setShowCustomerDropdown(false); }}
+                          className={`w-full text-left px-4 py-2.5 text-sm text-ink hover:bg-brand-50 border-t border-line ${selectedCustomer === c.id ? "bg-brand-50" : ""}`}
+                        >
+                          <div className="font-semibold">{c.name}</div>
+                          {c.phone && <div className="text-xs text-muted mt-0.5">{c.phone}</div>}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {needsCustomer && (
+              <p className="text-khata-600 text-xs font-semibold mt-2 flex items-center gap-1">
+                <AlertCircle size={12} aria-hidden="true" /> Pick a registered customer to record the Udhaar.
+              </p>
+            )}
+          </div>
+
+          {/* Paid now — Cash/Card default to the full total, Pending Bill to 0 */}
+          <Field
+            label={paymentMethod === "Pending Bill" ? "Amount paid now (optional)" : "Amount received"}
+            htmlFor="checkout-paid"
+          >
+            <Input
+              id="checkout-paid"
+              type="number"
+              min="0"
+              value={paidAmountInput}
+              onChange={(e) => setPaidAmountInput(e.target.value)}
+              className="h-12 text-lg font-semibold tabular-nums"
+              placeholder={paymentMethod === "Pending Bill" ? "0" : `Full amount: Rs ${fmt(checkoutTotal)}`}
+            />
+            <div className="flex flex-wrap justify-between gap-2 text-xs font-semibold pt-0.5">
+              <span className="text-muted">Bill total: Rs {fmt(checkoutTotal)}</span>
+              {checkoutDue > 0 && <span className="text-khata-600">Udhaar: Rs {fmt(checkoutDue)}</span>}
+            </div>
+          </Field>
+
+          {paymentMethod === "Pending Bill" && (
+            <Field label="Due date (optional)" htmlFor="checkout-due">
+              <Input id="checkout-due" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+            </Field>
+          )}
+
+          {noRateLines.length > 0 && (
+            <div className="flex items-start gap-2 rounded-xl border border-saffron-200 bg-saffron-50 px-3 py-2 text-xs font-semibold text-saffron-700">
+              <AlertCircle size={14} className="shrink-0 mt-0.5" aria-hidden="true" />
+              <span>Rate needed for: {noRateNames.join(", ")}. Close this window and type the rate in the highlighted box.</span>
+            </div>
+          )}
+        </div>
+      </Modal>
+
+    </Page>
     </div>
 
       {/* ━━ Invoice Print Modal (Micro POS Thermal Receipt Slip) ━━━━━━━━━ */}
       {completedSaleInvoice && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 print:static print:p-0 print:block print:bg-transparent">
-          <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl relative max-h-[95vh] overflow-y-auto print:shadow-none print:w-full print:max-w-none print:rounded-none">
-            
+        <div className="fixed inset-0 z-50 flex items-stretch sm:items-center justify-center bg-ink/40 backdrop-blur-[2px] sm:p-4 print:static print:p-0 print:block print:bg-transparent">
+          <div className="bg-surface w-full sm:max-w-[26rem] h-full sm:h-auto sm:max-h-[95vh] sm:rounded-2xl shadow-pop flex flex-col print:block print:h-auto print:max-h-none print:shadow-none print:w-full print:max-w-none print:rounded-none">
+            <div className="flex items-start justify-between gap-3 px-5 pt-4 pb-3 border-b border-line print:hidden">
+              <div className="min-w-0">
+                <h2 className="text-lg font-bold leading-snug">Bill saved</h2>
+                <p className="text-xs text-muted mt-0.5">Print the receipt or share it on WhatsApp.</p>
+              </div>
+              <IconButton icon={X} label="Close" size="sm" onClick={closeReceipt} />
+            </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar bg-sunken p-4 print:p-0 print:bg-transparent print:overflow-visible">
+              <div className="mx-auto w-full max-w-sm rounded-xl border border-line bg-white shadow-card overflow-hidden print:border-0 print:shadow-none print:max-w-none print:rounded-none">
             {/* MICRO POS THERMAL RECEIPT SLIP — the modal box scrolls, so the image gets the whole receipt */}
             <div id="invoice-print-area" ref={receiptRef} className="p-5 print:p-0 bg-white text-black print-target">
               {/* Shop Header */}
@@ -1663,7 +1779,10 @@ const Ledger = () => {
                     {new Date(completedSaleInvoice.createdAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}
                   </div>
                   {completedSaleInvoice.customerName && completedSaleInvoice.customerName !== "Walk-in Customer" && (
-                    <div className="font-semibold mt-1">Cust: {completedSaleInvoice.customerName}</div>
+                    <div className="font-semibold mt-1">
+                      Cust: {completedSaleInvoice.customerName}
+                      {completedSaleInvoice.customerPhone && <div className="font-normal text-xs">{completedSaleInvoice.customerPhone}</div>}
+                    </div>
                   )}
                   {completedSaleInvoice.cashierName && (
                     <div>Seller: {completedSaleInvoice.cashierName}</div>
@@ -1691,6 +1810,9 @@ const Ledger = () => {
                         <div className="pr-2">
                           <div className="font-semibold">{item.description || item.productName || item.name}</div>
                           <div className="text-xs">{item.quantity || item.qty || 1} × Rs. {Number(rate).toLocaleString()}</div>
+                          {itemImeis(item).length > 0 && (
+                            <div className="font-mono text-[10px]">IMEI: {itemImeis(item).join(", ")}</div>
+                          )}
                         </div>
                         <span className="font-semibold whitespace-nowrap">Rs. {Number(sub).toLocaleString()}</span>
                       </div>
@@ -1707,16 +1829,16 @@ const Ledger = () => {
                 {completedSaleInvoice.discountAmount > 0 && (
                   <div className="flex justify-between"><span>Discount</span><span>−Rs. {completedSaleInvoice.discountAmount.toLocaleString()}</span></div>
                 )}
-                
+
                 <div className="flex justify-between text-lg font-black mt-2 pt-2 border-t border-black"><span>TOTAL</span><span>Rs. {completedSaleInvoice.grandTotal.toLocaleString()}</span></div>
-                
+
                 {completedSaleInvoice.dueAmount > 0 && (
                   <div className="mt-2 pt-2 border-t border-dashed border-black">
                     <div className="flex justify-between text-sm"><span>Paid</span><span>Rs. {(completedSaleInvoice.paidAmount || 0).toLocaleString()}</span></div>
                     <div className="flex justify-between text-sm font-bold mt-1"><span>BALANCE DUE</span><span>Rs. {completedSaleInvoice.dueAmount.toLocaleString()}</span></div>
                   </div>
                 )}
-                
+
                 {(completedUdhaar.previous > 0 || completedUdhaar.total > 0) && (
                   <div className="mt-2 pt-2 border-t border-dashed border-black text-rose-600">
                     {completedUdhaar.previous > 0 && (
@@ -1733,32 +1855,20 @@ const Ledger = () => {
               <div className="text-center text-xs font-bold mt-2">THANK YOU FOR YOUR BUSINESS</div>
               <div className="text-center text-[10px] mt-1 mb-2">Developed By Syed</div>
             </div>
-
-            {shareMessage && (
-              <div className="px-4 py-2 text-[11px] font-semibold text-emerald-800 bg-emerald-50 border-t border-emerald-100 print:hidden">
-                {shareMessage}
               </div>
-            )}
+            </div>
 
             {/* Actions */}
-            <div className="flex gap-2 p-4 border-t border-slate-100 bg-slate-50 print:hidden">
-              <button onClick={handlePrintReceipt} className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow">
-                <Printer size={14} /> Print
-              </button>
-              <button onClick={handleWhatsAppShareModal} disabled={isCapturingImage} className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow disabled:opacity-60">
-                {isCapturingImage ? (
-                  <><svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> Preparing...</>
-                ) : (
-                  <><Smartphone size={14} /> WhatsApp</>
-                )}
-              </button>
-              <button onClick={() => setCompletedSaleInvoice(null)} className="py-2.5 px-3 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs rounded-xl flex items-center justify-center gap-1">
-                <CheckCircle2 size={14} /> Done
-              </button>
+            <div className="grid grid-cols-3 gap-2 p-4 border-t border-line bg-surface sm:rounded-b-2xl print:hidden">
+              <Button icon={Printer} onClick={handlePrintReceipt}>Print</Button>
+              <Button variant="success" icon={Smartphone} onClick={handleWhatsAppShareModal}>Share</Button>
+              <Button variant="secondary" icon={CheckCircle2} onClick={closeReceipt}>Done</Button>
             </div>
           </div>
         </div>
       )}
+
+      {shareDialog}
     </>
   );
 };

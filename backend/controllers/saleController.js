@@ -1,16 +1,13 @@
 const supabase = require("../config/supabase");
+const { fetchAll, hideSaleCost } = require("../lib/fetchAll");
 
 // Get all sales
 exports.getSales = async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("sales")
-      .select("*")
-      .eq("is_deleted", false)
-      .order("created_at", { ascending: false });
-
-    if (error) throw new Error(error.message);
-    res.json(data);
+    const data = await fetchAll(() =>
+      supabase.from("sales").select("*").eq("is_deleted", false).order("created_at", { ascending: false })
+    );
+    res.json(data.map((s) => hideSaleCost(req, s)));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -54,7 +51,7 @@ exports.createSale = async (req, res) => {
 
     const { data, error } = await supabase.rpc("create_sale", { p: payload });
     if (error) throw new Error(error.message);
-    res.status(201).json(data);
+    res.status(201).json(hideSaleCost(req, data));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -117,8 +114,7 @@ exports.deleteSale = async (req, res) => {
 // Get analytics: top 5 products, totals
 exports.getAnalytics = async (req, res) => {
   try {
-    const { data: sales, error } = await supabase.from("sales").select("*").eq("is_deleted", false);
-    if (error) throw new Error(error.message);
+    const sales = await fetchAll(() => supabase.from("sales").select("*").eq("is_deleted", false).order("created_at"));
 
     let totalRevenue = 0;
     let totalProfit = 0;

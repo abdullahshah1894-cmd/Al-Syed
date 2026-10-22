@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useApp, getProductStock } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
@@ -6,7 +6,6 @@ import {
   Boxes,
   Plus,
   Search,
-  Filter,
   AlertTriangle,
   Barcode,
   Smartphone,
@@ -14,8 +13,77 @@ import {
   Trash2,
   X,
   PlusCircle,
-  SmartphoneNfc,
 } from "lucide-react";
+import {
+  Page, PageHeader, Card, Badge, Button, IconButton, Field, Input, Select, Textarea, Segmented,
+  TableWrap, Th, Td, EmptyState, Modal, inputClass,
+} from "../components/ui";
+
+const cx = (...parts) => parts.filter(Boolean).join(" ");
+
+// IMEI boxes turn green once all 15 digits are in
+const imeiInputClass = (valid) =>
+  cx(
+    "w-full h-10 rounded-xl border bg-surface pl-3 pr-14 font-mono text-sm text-ink placeholder:font-sans placeholder:text-muted/70",
+    "focus:outline-none focus:ring-2",
+    valid ? "border-paid-500 focus:ring-paid-100" : "border-line-strong focus:border-brand-500 focus:ring-brand-100"
+  );
+
+const DigitCount = ({ value }) => (
+  <span
+    className={cx(
+      "absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-semibold tabular-nums pointer-events-none",
+      value.length === 15 ? "text-paid-600" : "text-muted"
+    )}
+  >
+    {value.length}/15
+  </span>
+);
+
+// Stock badge: green in stock, saffron at / below the alert level, red when none are left
+const StockBadge = ({ stock, isLowStock }) =>
+  stock <= 0 ? (
+    <Badge tone="khata">Out of stock</Badge>
+  ) : isLowStock ? (
+    <Badge tone="saffron">
+      <AlertTriangle size={11} aria-hidden="true" /> {stock} in stock · low
+    </Badge>
+  ) : (
+    <Badge tone="paid">{stock} in stock</Badge>
+  );
+
+// Phones in the shop for one product
+const ImeiList = ({ units }) => (
+  <div className="mt-2 space-y-1">
+    <div className="text-xs text-muted">
+      {units.length} phone{units.length === 1 ? "" : "s"} in the shop
+    </div>
+    {units.length > 0 && (
+      <ul className="max-h-28 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
+        {units.map((iObj, idx) => (
+          <li
+            key={`${iObj.imei || iObj.imei1 || ""}-${idx}`}
+            className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 rounded-lg bg-sunken px-2 py-1"
+          >
+            <span className="font-mono text-[11px] text-ink-soft break-all">
+              {iObj.imei1 ? `SIM 1: ${iObj.imei1}` : `IMEI: ${iObj.imei}`}
+              {iObj.imei2 ? ` | SIM 2: ${iObj.imei2}` : ""}
+            </span>
+            {iObj.ptaStatus && <span className="text-[10px] font-semibold text-muted">{iObj.ptaStatus}</span>}
+          </li>
+        ))}
+      </ul>
+    )}
+  </div>
+);
+
+const PTA_OPTIONS = (
+  <>
+    <option value="Approved">PTA approved</option>
+    <option value="Non-PTA">Non-PTA</option>
+    <option value="CPID">CPID approved</option>
+  </>
+);
 
 // Categories whose units are tracked by IMEI (Smartphones must have at least one)
 const IMEI_CATEGORIES = ["Smartphones", "Tablets & iPads", "Wearables"];
@@ -46,6 +114,7 @@ const Inventory = () => {
   }
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [showAddModal, setShowAddModal] = useState(false);
+  const [savingAdd, setSavingAdd] = useState(false);
 
   // Form State for Add Product
   const [name, setName] = useState("");
@@ -82,23 +151,26 @@ const Inventory = () => {
   const [stockPta, setStockPta] = useState("Approved");
   const [savingStock, setSavingStock] = useState(false);
 
+  // Stable close handlers: the shared Modal refocuses itself whenever onClose changes
+  const closeAddModal = useCallback(() => setShowAddModal(false), []);
+  const closeEditModal = useCallback(() => setEditProduct(null), []);
+  const closeStockModal = useCallback(() => setStockProduct(null), []);
+
   const categories = ["All", "Smartphones", "Tablets & iPads", "Accessories", "Spare Parts", "Wearables"];
   const usesImeis = IMEI_CATEGORIES.includes(category);
 
   const filteredProducts = products.filter((p) => {
-    const qLower = searchTerm.toLowerCase();
+    if (p.isDeleted) return false;
+    const q = searchTerm.trim();
+    const qLower = q.toLowerCase();
     const matchesSearch =
+      !q ||
       (p.name || "").toLowerCase().includes(qLower) ||
       (p.brand || "").toLowerCase().includes(qLower) ||
       (p.model || "").toLowerCase().includes(qLower) ||
-      (p.barcode && p.barcode.includes(searchTerm)) ||
-      (p.imeis &&
-        p.imeis.some(
-          (i) =>
-            (i.imei && i.imei.includes(searchTerm)) ||
-            (i.imei1 && i.imei1.includes(searchTerm)) ||
-            (i.imei2 && i.imei2.includes(searchTerm))
-        ));
+      String(p.barcode || "").includes(q) ||
+      (Array.isArray(p.imeis) &&
+        p.imeis.some((i) => [i?.imei, i?.imei1, i?.imei2].some((k) => k && String(k).includes(q))));
     const matchesCategory = selectedCategory === "All" || p.category === selectedCategory;
     return matchesSearch && matchesCategory;
   });
@@ -319,7 +391,11 @@ const Inventory = () => {
 
   const handleAddSubmit = async (e) => {
     e.preventDefault();
-    if (!name || !brand || !purchasePrice || !supplierName) return;
+    if (!isAdmin || savingAdd) return;
+    if (!name.trim() || !brand.trim() || purchasePrice === "" || !supplierName.trim()) {
+      alert("Please fill in Product Name, Brand, Purchase Price and Supplier Name.");
+      return;
+    }
 
     let imeisArr = [];
 
@@ -356,6 +432,7 @@ const Inventory = () => {
             imeiLines.forEach((im, i) => { if (im.length > 0 && im.length < 15) next.add(i); });
             return next;
           });
+          alert("Please make sure all entered IMEI numbers are exactly 15 digits (or leave blank).");
           return;
         }
 
@@ -376,20 +453,24 @@ const Inventory = () => {
       }
     }
 
+    setSavingAdd(true);
     const saved = await addProduct({
-      name,
-      brand,
-      model,
+      name: name.trim(),
+      brand: brand.trim(),
+      model: model.trim(),
       category,
-      purchasePrice: Number(purchasePrice),
-      salePrice: Number(salePrice),
-      quantity: imeisArr.length > 0 ? imeisArr.length : Number(quantity),
-      minStockAlert: Number(minStockAlert),
-      warrantyDuration: Number(warrantyDuration),
+      purchasePrice: Math.max(0, Number(purchasePrice) || 0),
+      salePrice: Math.max(0, Number(salePrice) || 0),
+      // Smartphones are counted only by IMEI; other items by a whole, non-negative quantity
+      quantity:
+        imeisArr.length > 0 || category === "Smartphones" ? imeisArr.length : Math.max(0, Math.floor(Number(quantity) || 0)),
+      minStockAlert: Math.max(0, Math.floor(Number(minStockAlert) || 0)),
+      warrantyDuration: warrantyType === "No Warranty" ? 0 : Math.max(0, Math.floor(Number(warrantyDuration) || 0)),
       warrantyType,
       imeis: imeisArr,
-      supplier: { name: supplierName },
+      supplier: { name: supplierName.trim() },
     });
+    setSavingAdd(false);
     // Keep the form filled if the database did not save it
     if (!saved) return;
 
@@ -431,21 +512,29 @@ const Inventory = () => {
 
   const handleEditSubmit = async (e) => {
     e.preventDefault();
-    if (!editProduct || savingEdit || !editForm.name.trim() || !editForm.brand.trim()) return;
+    if (!isAdmin || !editProduct || savingEdit) return;
+    if (!editForm.name.trim() || !editForm.brand.trim()) {
+      alert("Product Name and Brand are required.");
+      return;
+    }
+    const supplierName = editForm.supplierName.trim();
+    const supplierPhone = editForm.supplierPhone.trim();
     const fields = {
       name: editForm.name.trim(),
       brand: editForm.brand.trim(),
       model: editForm.model.trim(),
       category: editForm.category,
-      salePrice: Number(editForm.salePrice),
-      minStockAlert: Number(editForm.minStockAlert),
-      warrantyDuration: Number(editForm.warrantyDuration),
+      purchasePrice: Math.max(0, Number(editForm.purchasePrice) || 0),
+      salePrice: Math.max(0, Number(editForm.salePrice) || 0),
+      minStockAlert: Math.max(0, Math.floor(Number(editForm.minStockAlert) || 0)),
+      warrantyDuration:
+        editForm.warrantyType === "No Warranty" ? 0 : Math.max(0, Math.floor(Number(editForm.warrantyDuration) || 0)),
       warrantyType: editForm.warrantyType,
-      supplierName: editForm.supplierName.trim(),
-      supplierPhone: editForm.supplierPhone.trim(),
+      // Sent as `supplier` too, so the screen shows the new supplier even when the server echoes nothing back
+      supplier: { name: supplierName, phone: supplierPhone },
+      supplierName,
+      supplierPhone,
     };
-    // Cashiers cannot see the cost, so they do not change it
-    if (isAdmin) fields.purchasePrice = Number(editForm.purchasePrice);
 
     setSavingEdit(true);
     const ok = await updateProduct(editProduct.id, fields);
@@ -463,7 +552,7 @@ const Inventory = () => {
 
   const handleAddStockSubmit = async (e) => {
     e.preventDefault();
-    if (!stockProduct || savingStock) return;
+    if (!isAdmin || !stockProduct || savingStock) return;
 
     let payload;
     if (isImeiProduct(stockProduct)) {
@@ -492,6 +581,16 @@ const Inventory = () => {
         alert(`These IMEIs are duplicates, please remove them:\n${dups.join("\n")}`);
         return;
       }
+      // A phone counted only by quantity (no IMEIs yet): once IMEIs are added, stock is the IMEI count
+      const plainQty = (stockProduct.imeis || []).length === 0 ? Number(stockProduct.quantity || 0) : 0;
+      if (
+        plainQty > 0 &&
+        !window.confirm(
+          `${stockProduct.name} has ${plainQty} unit(s) in stock without IMEIs. After adding IMEIs, stock will be counted ` +
+            `from IMEIs only (${units.length} unit(s)). Include the IMEIs of the existing units too if they are still in the shop.\n\nContinue?`
+        )
+      )
+        return;
       payload = { imeis: units };
     } else {
       const qty = Math.floor(Number(stockQty));
@@ -508,861 +607,593 @@ const Inventory = () => {
     if (saved) setStockProduct(null);
   };
 
-  const handleDelete = (prod) => {
+  const handleDelete = async (prod) => {
+    if (!isAdmin) return;
     if (!window.confirm(`Delete ${prod.name}? ${getProductStock(prod)} unit(s) in stock`)) return;
-    deleteProduct(prod.id);
+    await deleteProduct(prod.id);
   };
 
-  return (
-    <div className="p-6 space-y-6">
-      {/* Header & Controls */}
-      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-sm">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <Boxes size={24} className="text-indigo-400" />
-            <h1 className="text-xl font-bold text-slate-100">Product & Inventory Management</h1>
-          </div>
-          <p className="text-xs text-slate-400">
-            Add/edit products, manage Dual/Single IMEIs, PTA status, pricing, and stock alert limits
-          </p>
-        </div>
+  const curr = shopSettings.currencySymbol;
+  const money = (n) => `${curr} ${n.toLocaleString()}`;
+  const categoryOptions = categories.map((c) => ({ value: c, label: c }));
 
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="px-5 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-2xl text-sm flex items-center gap-2 shadow-lg shadow-indigo-600/30 transition-all active:scale-95"
-        >
-          <Plus size={18} />
-          <span>Add New Product</span>
-        </button>
-      </div>
+  // Per-row numbers used by both the table (desktop) and the cards (phones)
+  const rowInfo = (prod) => {
+    const availableImeis = Array.isArray(prod.imeis) ? prod.imeis.filter((i) => i && i.status === "in_stock") : [];
+    const stock = getProductStock(prod);
+    const isLowStock = stock <= Number(prod.minStockAlert || 0);
+    const purchasePriceNum = Number(prod.purchasePrice || 0);
+    const salePriceNum = Number(prod.salePrice || 0);
+    const profitMargin = salePriceNum - purchasePriceNum;
+    return { availableImeis, stock, isLowStock, purchasePriceNum, salePriceNum, profitMargin };
+  };
 
-      {/* Search & Category Filter bar */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-900 border border-slate-800 rounded-2xl p-3">
-        <div className="relative w-full sm:w-80">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Search by name, brand, IMEI..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
-          />
-        </div>
-
-        {/* Category Tabs */}
-        <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto custom-scrollbar pb-1 sm:pb-0">
-          {categories.map((cat) => (
-            <button
-              key={cat}
-              onClick={() => setSelectedCategory(cat)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
-                selectedCategory === cat
-                  ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-                  : "bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              {cat}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Products Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="text-slate-400 uppercase bg-slate-950/60 rounded-xl">
-              <tr>
-                <th className="p-3.5 font-semibold">Product Name</th>
-                <th className="p-3.5 font-semibold">Category</th>
-                <th className="p-3.5 font-semibold">Stock / IMEIs</th>
-                <th className="p-3.5 font-semibold">Purchase Price</th>
-                <th className="p-3.5 font-semibold">Sale Price</th>
-                <th className="p-3.5 font-semibold">Profit Margin</th>
-                <th className="p-3.5 font-semibold text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800">
-              {filteredProducts.map((prod) => {
-                const availableImeis = prod.imeis && prod.imeis.length > 0 ? prod.imeis.filter((i) => i.status === "in_stock") : [];
-                const stock = prod.imeis && prod.imeis.length > 0 ? availableImeis.length : Number(prod.quantity || 0);
-                const isLowStock = stock <= prod.minStockAlert;
-                const profitMargin = prod.salePrice - prod.purchasePrice;
-
-                return (
-                  <tr key={prod.id} className="hover:bg-slate-800/40 transition-colors">
-                    <td className="p-3.5">
-                      <div className="font-bold text-slate-100">{prod.name}</div>
-                      <div className="text-[11px] text-slate-400">{prod.brand} {prod.model}</div>
-                      {prod.barcode && (
-                        <div className="flex items-center gap-1 font-mono text-[10px] text-indigo-400 mt-0.5">
-                          <Barcode size={12} />
-                          <span>{prod.barcode}</span>
-                        </div>
-                      )}
-                    </td>
-
-                    <td className="p-3.5">
-                      <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-950 text-indigo-300 border border-slate-800">
-                        {prod.category}
-                      </span>
-                    </td>
-
-                    <td className="p-3.5">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`font-bold px-2.5 py-1 rounded-full text-xs ${
-                            isLowStock
-                              ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
-                              : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                          }`}
-                        >
-                          {stock} in stock
-                        </span>
-                        {isLowStock && <AlertTriangle size={14} className="text-amber-400 animate-pulse" />}
-                      </div>
-                      {prod.imeis && prod.imeis.length > 0 && (
-                        <div className="text-[10px] text-slate-400 mt-1.5 space-y-1">
-                          <div className="text-slate-500 font-semibold">{availableImeis.length} Available Phone Unit(s):</div>
-                          <div className="max-h-20 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
-                            {availableImeis.map((iObj, idx) => (
-                              <div key={idx} className="font-mono text-[10px] bg-slate-950/70 p-1 rounded border border-slate-800 flex items-center justify-between gap-1">
-                                <span className="text-cyan-300">
-                                  {iObj.imei1 ? `SIM 1: ${iObj.imei1}` : `IMEI: ${iObj.imei}`}
-                                  {iObj.imei2 ? ` | SIM 2: ${iObj.imei2}` : ""}
-                                </span>
-                                {iObj.ptaStatus && (
-                                  <span className="text-[9px] px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800/40">
-                                    {iObj.ptaStatus}
-                                  </span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </td>
-
-                    <td className="p-3.5 font-semibold text-slate-300">
-                      {isAdmin ? `${shopSettings.currencySymbol} ${prod.purchasePrice.toLocaleString()}` : "••••••"}
-                    </td>
-
-                    <td className="p-3.5 font-bold text-indigo-400">
-                      {shopSettings.currencySymbol} {prod.salePrice.toLocaleString()}
-                    </td>
-
-                    <td className="p-3.5 font-bold text-emerald-400">
-                      {isAdmin ? `${shopSettings.currencySymbol} ${profitMargin.toLocaleString()}` : "••••••"}
-                    </td>
-
-                    <td className="p-3.5 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          onClick={() => openStockModal(prod)}
-                          className="p-2 text-slate-400 hover:text-emerald-400 hover:bg-slate-800 rounded-lg transition-colors"
-                          title="Add Stock"
-                        >
-                          <PlusCircle size={16} />
-                        </button>
-                        <button
-                          onClick={() => openEditModal(prod)}
-                          className="p-2 text-slate-400 hover:text-indigo-400 hover:bg-slate-800 rounded-lg transition-colors"
-                          title="Edit Product"
-                        >
-                          <Edit2 size={16} />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(prod)}
-                          className="p-2 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors"
-                          title="Delete Product"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Add Product Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-xl rounded-3xl p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div>
-                <h3 className="font-bold text-slate-100 text-base">Add New Product / Smartphone</h3>
-                <p className="text-[11px] text-slate-400">Add multiple units or Dual-SIM (IMEI 1 & IMEI 2) per phone</p>
-              </div>
-              <button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-white">
-                <X size={20} />
-              </button>
-            </div>
-
-            <form onSubmit={handleAddSubmit} onKeyDown={handleFormKeyDown} className="space-y-3 text-xs">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="font-semibold text-slate-400">Product Name *</label>
-                  <input
-                    type="text"
-                    required
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                    placeholder="e.g. iPhone 15 Pro Max"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-400">Brand *</label>
-                  <input
-                    type="text"
-                    required
-                    value={brand}
-                    onChange={(e) => setBrand(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                    placeholder="e.g. Apple / Samsung"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="font-semibold text-slate-400">Model / Variant</label>
-                  <input
-                    type="text"
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                    placeholder="e.g. 256GB Black"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-400">Category *</label>
-                  <select
-                    value={category}
-                    onChange={(e) => setCategory(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  >
-                    <option value="Smartphones">Smartphones</option>
-                    <option value="Tablets & iPads">Tablets & iPads</option>
-                    <option value="Accessories">Accessories</option>
-                    <option value="Spare Parts">Spare Parts</option>
-                    <option value="Wearables">Wearables</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="font-semibold text-slate-400">Purchase Price (Cost) *</label>
-                  <input
-                    type="number"
-                    required
-                    min="0"
-                    value={purchasePrice}
-                    onChange={(e) => setPurchasePrice(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                    placeholder="Rs. Cost"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-400">Sale Price</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={salePrice}
-                    onChange={(e) => setSalePrice(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                    placeholder="Rs. Retail"
-                  />
-                </div>
-              </div>
-
-              {usesImeis && (
-                <div className="space-y-3 p-3.5 bg-indigo-950/30 border border-indigo-900/40 rounded-2xl">
-                  {/* Mode & Toolbar */}
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-indigo-900/40 pb-2.5">
-                    <div>
-                      <label className="font-bold text-indigo-300 flex items-center gap-1.5">
-                        <Smartphone size={16} />
-                        <span>IMEI Entry Mode</span>
-                      </label>
-                      <p className="text-[10px] text-slate-400">Pressing Enter or typing 15 digits auto-jumps to next IMEI without auto-saving</p>
-                    </div>
-
-                    <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
-                      <button
-                        type="button"
-                        onClick={() => { setImeiMode("dual"); setPasteMode(false); }}
-                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
-                          imeiMode === "dual" && !pasteMode
-                            ? "bg-indigo-600 text-white shadow"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        Dual-SIM (IMEI 1 & 2)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setImeiMode("single"); setPasteMode(false); }}
-                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
-                          imeiMode === "single" && !pasteMode
-                            ? "bg-indigo-600 text-white shadow"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        Single-SIM
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setPasteMode(!pasteMode); setPasteRawInput(""); }}
-                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
-                          pasteMode
-                            ? "bg-cyan-600 text-white shadow"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        ⊞ Bulk Paste
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* ── PASTE MODE ── */}
-                  {pasteMode ? (
-                    <div className="space-y-2">
-                      <textarea
-                        rows={5}
-                        value={pasteRawInput}
-                        onChange={(e) => setPasteRawInput(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs font-mono text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyan-500 resize-none"
-                        placeholder={
-                          imeiMode === "dual"
-                            ? `One phone per line, IMEI 1 and IMEI 2:
-358921098471201,358921098471219
-358921098471227 (IMEI 1 only)`
-                            : `Paste IMEIs in any format:
-["358921098471201","358921098471202"]
-or newline/comma separated...`
-                        }
-                      />
-                      <button
-                        type="button"
-                        onClick={applyPastedImeis}
-                        disabled={pasteCount === 0}
-                        className="w-full py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white font-bold rounded-xl text-xs transition-all shadow"
-                      >
-                        Import {pasteCount} {imeiMode === "dual" ? "Phone(s)" : "IMEI(s)"}
-                      </button>
-                    </div>
-                  ) : imeiMode === "dual" ? (
-                    /* ── DUAL SIM ENTRY (IMEI 1 & IMEI 2) ── */
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span className="font-semibold text-slate-300">Dual SIM Phones ({dualImeiLines.filter(p => /^\d{15}$/.test(p.imei1) || /^\d{15}$/.test(p.imei2)).length} Device(s))</span>
-                        <span className="text-[10px] text-indigo-400">1 Device = IMEI 1 + IMEI 2</span>
-                      </div>
-
-                      <div className="space-y-2 max-h-52 overflow-y-auto custom-scrollbar pr-1">
-                        {dualImeiLines.map((pair, index) => {
-                          const isV1 = /^\d{15}$/.test(pair.imei1);
-                          const isV2 = /^\d{15}$/.test(pair.imei2);
-
-                          return (
-                            <div key={index} className="p-2 bg-slate-950/80 border border-slate-800 rounded-xl space-y-1.5">
-                              <div className="flex items-center justify-between text-[10px] font-bold text-slate-400">
-                                <span>Device #{index + 1}</span>
-                                {dualImeiLines.length > 1 && (
-                                  <button
-                                    type="button"
-                                    onClick={() => removeDualImeiLine(index)}
-                                    className="text-slate-500 hover:text-red-400 transition-colors"
-                                  >
-                                    <X size={13} />
-                                  </button>
-                                )}
-                              </div>
-
-                              <div className="grid grid-cols-2 gap-2">
-                                {/* IMEI 1 */}
-                                <div className="relative">
-                                  <input
-                                    id={`imei1-input-${index}`}
-                                    type="text"
-                                    inputMode="numeric"
-                                    maxLength={15}
-                                    value={pair.imei1}
-                                    onChange={(e) => handleDualImeiChange(index, "imei1", e.target.value)}
-                                    onKeyDown={(e) => handleDualImeiKeyDown(e, index, "imei1")}
-                                    placeholder="IMEI 1 (SIM 1)..."
-                                    className={`w-full bg-slate-900 border rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-100 focus:outline-none transition-all ${
-                                      isV1 ? "border-emerald-500/60 focus:border-emerald-400" : "border-slate-800 focus:border-indigo-500"
-                                    }`}
-                                  />
-                                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-bold text-slate-500">
-                                    {pair.imei1.length}/15
-                                  </span>
-                                </div>
-
-                                {/* IMEI 2 */}
-                                <div className="relative">
-                                  <input
-                                    id={`imei2-input-${index}`}
-                                    type="text"
-                                    inputMode="numeric"
-                                    maxLength={15}
-                                    value={pair.imei2}
-                                    onChange={(e) => handleDualImeiChange(index, "imei2", e.target.value)}
-                                    onKeyDown={(e) => handleDualImeiKeyDown(e, index, "imei2")}
-                                    placeholder="IMEI 2 (SIM 2)..."
-                                    className={`w-full bg-slate-900 border rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-100 focus:outline-none transition-all ${
-                                      isV2 ? "border-emerald-500/60 focus:border-emerald-400" : "border-slate-800 focus:border-indigo-500"
-                                    }`}
-                                  />
-                                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-bold text-slate-500">
-                                    {pair.imei2.length}/15
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => setDualImeiLines([...dualImeiLines, { imei1: "", imei2: "" }])}
-                        className="text-[11px] font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors pt-1"
-                      >
-                        <PlusCircle size={13} />
-                        <span>Add another Dual-SIM Phone Device</span>
-                      </button>
-                    </div>
-                  ) : (
-                    /* ── SINGLE SIM ENTRY ── */
-                    <div className="space-y-2">
-                      <div className="space-y-1.5 max-h-44 overflow-y-auto custom-scrollbar pr-1">
-                        {imeiLines.map((imei, index) => {
-                          const isValid = /^\d{15}$/.test(imei);
-                          return (
-                            <div key={index} className="flex items-center gap-2">
-                              <span className="text-[10px] font-bold text-slate-500 w-5 text-right shrink-0">#{index + 1}</span>
-                              <div className="relative flex-1">
-                                <input
-                                  id={`imei-input-${index}`}
-                                  type="text"
-                                  inputMode="numeric"
-                                  maxLength={15}
-                                  value={imei}
-                                  onChange={(e) => handleSingleImeiChange(index, e.target.value)}
-                                  onKeyDown={(e) => handleSingleImeiKeyDown(e, index)}
-                                  placeholder="Enter 15-digit IMEI..."
-                                  className={`w-full bg-slate-950 border rounded-lg px-3 py-2 text-xs font-mono text-slate-100 focus:outline-none transition-all ${
-                                    isValid ? "border-emerald-500/60 focus:border-emerald-400" : "border-slate-800 focus:border-indigo-500"
-                                  }`}
-                                />
-                                <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-500">
-                                  {imei.length}/15
-                                </span>
-                              </div>
-                              {imeiLines.length > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => removeSingleImeiLine(index)}
-                                  className="p-1 text-slate-500 hover:text-red-400 transition-colors shrink-0"
-                                >
-                                  <X size={13} />
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => setImeiLines([...imeiLines, ""])}
-                        className="text-[11px] font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors"
-                      >
-                        <PlusCircle size={13} />
-                        <span>Add another Single-SIM IMEI row</span>
-                      </button>
-                    </div>
-                  )}
-
-                  {/* PTA Status Selector */}
-                  <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-indigo-900/40">
-                    <span className="text-slate-400">PTA Approval Status:</span>
-                    <select
-                      value={ptaStatus}
-                      onChange={(e) => setPtaStatus(e.target.value)}
-                      className="bg-slate-950 border border-slate-800 rounded-lg p-1 text-cyan-400 font-bold"
-                    >
-                      <option value="Approved">PTA Approved</option>
-                      <option value="Non-PTA">Non-PTA</option>
-                      <option value="CPID">CPID Approved</option>
-                    </select>
-                  </div>
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-3">
-                {category !== "Smartphones" && (
-                  <div>
-                    <label className="font-semibold text-slate-400">
-                      {usesImeis ? "Quantity Stock (if no IMEIs)" : "Quantity Stock"}
-                    </label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={quantity}
-                      onChange={(e) => setQuantity(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1"
-                    />
-                  </div>
-                )}
-
-                <div>
-                  <label className="font-semibold text-slate-400">Min Stock Alert Level</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={minStockAlert}
-                    onChange={(e) => setMinStockAlert(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="font-semibold text-slate-400">Warranty Duration (Months)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={warrantyDuration}
-                    onChange={(e) => setWarrantyDuration(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-400">Warranty Type</label>
-                  <select
-                    value={warrantyType}
-                    onChange={(e) => {
-                      setWarrantyType(e.target.value);
-                      if (e.target.value === "No Warranty") setWarrantyDuration(0);
-                    }}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  >
-                    {WARRANTY_TYPES.map((t) => (
-                      <option key={t} value={t}>{t}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="font-semibold text-slate-400">
-                  Supplier Name
-                  <span className="ml-1 text-rose-400">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={supplierName}
-                  onChange={(e) => setSupplierName(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  placeholder="e.g. Apple Direct Pakistan"
-                />
-              </div>
-
-              <div className="pt-3 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowAddModal(false)}
-                  className="px-4 py-2 bg-slate-800 text-slate-300 font-bold rounded-xl"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-500 shadow"
-                >
-                  Save Product
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Edit Product Modal */}
-      {editProduct && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-xl rounded-3xl p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div>
-                <h3 className="font-bold text-slate-100 text-base">Edit Product</h3>
-                <p className="text-[11px] text-slate-400">Details only. Use Add Stock to add new units.</p>
-              </div>
-              <button onClick={() => setEditProduct(null)} className="text-slate-400 hover:text-white">
-                <X size={20} />
-              </button>
-            </div>
-
-            <form onSubmit={handleEditSubmit} onKeyDown={handleFormKeyDown} className="space-y-3 text-xs">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="font-semibold text-slate-400">Product Name *</label>
-                  <input
-                    type="text"
-                    required
-                    value={editForm.name}
-                    onChange={(e) => setEditField("name", e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-400">Brand *</label>
-                  <input
-                    type="text"
-                    required
-                    value={editForm.brand}
-                    onChange={(e) => setEditField("brand", e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="font-semibold text-slate-400">Model / Variant</label>
-                  <input
-                    type="text"
-                    value={editForm.model}
-                    onChange={(e) => setEditField("model", e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-400">Category *</label>
-                  <select
-                    value={editForm.category}
-                    onChange={(e) => setEditField("category", e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  >
-                    {categories.filter((c) => c !== "All").map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                {isAdmin && (
-                  <div>
-                    <label className="font-semibold text-slate-400">Purchase Price (Cost) *</label>
-                    <input
-                      type="number"
-                      required
-                      min="0"
-                      value={editForm.purchasePrice}
-                      onChange={(e) => setEditField("purchasePrice", e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                )}
-
-                <div>
-                  <label className="font-semibold text-slate-400">Sale Price</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={editForm.salePrice}
-                    onChange={(e) => setEditField("salePrice", e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-400">Min Stock Alert Level</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={editForm.minStockAlert}
-                    onChange={(e) => setEditField("minStockAlert", e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="font-semibold text-slate-400">Warranty Duration (Months)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={editForm.warrantyDuration}
-                    onChange={(e) => setEditField("warrantyDuration", e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-400">Warranty Type</label>
-                  <select
-                    value={editForm.warrantyType}
-                    onChange={(e) => {
-                      setEditField("warrantyType", e.target.value);
-                      if (e.target.value === "No Warranty") setEditField("warrantyDuration", 0);
-                    }}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  >
-                    {WARRANTY_TYPES.map((t) => (
-                      <option key={t} value={t}>{t}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="font-semibold text-slate-400">Supplier Name</label>
-                  <input
-                    type="text"
-                    value={editForm.supplierName}
-                    onChange={(e) => setEditField("supplierName", e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-400">Supplier Phone</label>
-                  <input
-                    type="text"
-                    value={editForm.supplierPhone}
-                    onChange={(e) => setEditField("supplierPhone", e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-3 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditProduct(null)}
-                  className="px-4 py-2 bg-slate-800 text-slate-300 font-bold rounded-xl"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingEdit}
-                  className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-500 disabled:opacity-50 shadow"
-                >
-                  {savingEdit ? "Saving..." : "Save Changes"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Add Stock Modal */}
-      {stockProduct && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div>
-                <h3 className="font-bold text-slate-100 text-base">Add Stock</h3>
-                <p className="text-[11px] text-slate-400">
-                  {stockProduct.name} • {getProductStock(stockProduct)} unit(s) in stock now
-                </p>
-              </div>
-              <button onClick={() => setStockProduct(null)} className="text-slate-400 hover:text-white">
-                <X size={20} />
-              </button>
-            </div>
-
-            <form onSubmit={handleAddStockSubmit} className="space-y-3 text-xs">
-              {isImeiProduct(stockProduct) ? (
-                <>
-                  <div>
-                    <label className="font-semibold text-slate-400 flex items-center gap-1.5">
-                      <Smartphone size={14} />
-                      <span>New IMEIs (one phone per line)</span>
-                    </label>
-                    <textarea
-                      rows={6}
-                      value={stockImeiText}
-                      onChange={(e) => setStockImeiText(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs font-mono text-slate-100 placeholder-slate-600 mt-1 focus:outline-none focus:border-indigo-500 resize-none"
-                      placeholder={`358921098471201
-Dual-SIM: imei1,imei2
-358921098471219,358921098471227`}
-                    />
-                    <p className="text-[10px] text-slate-500 mt-1">
-                      {stockImeiText.split(/\r?\n/).filter((l) => l.trim()).length} phone(s) entered
-                    </p>
-                  </div>
-
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-slate-400">PTA Approval Status:</span>
-                    <select
-                      value={stockPta}
-                      onChange={(e) => setStockPta(e.target.value)}
-                      className="bg-slate-950 border border-slate-800 rounded-lg p-1 text-cyan-400 font-bold"
-                    >
-                      <option value="Approved">PTA Approved</option>
-                      <option value="Non-PTA">Non-PTA</option>
-                      <option value="CPID">CPID Approved</option>
-                    </select>
-                  </div>
-                </>
-              ) : (
-                <div>
-                  <label className="font-semibold text-slate-400">Quantity to Add</label>
-                  <input
-                    type="number"
-                    min="1"
-                    required
-                    value={stockQty}
-                    onChange={(e) => setStockQty(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 mt-1 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              )}
-
-              <div className="pt-3 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setStockProduct(null)}
-                  className="px-4 py-2 bg-slate-800 text-slate-300 font-bold rounded-xl"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingStock}
-                  className="px-5 py-2 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-500 disabled:opacity-50 shadow"
-                >
-                  {savingStock ? "Saving..." : "Add Stock"}
-                </button>
-              </div>
-            </form>
-          </div>
+  const productTitle = (prod) => (
+    <div className="min-w-0">
+      <div className="font-semibold text-ink">{prod.name}</div>
+      <div className="text-xs text-muted">{prod.brand} {prod.model}</div>
+      {prod.barcode && (
+        <div className="flex items-center gap-1 font-mono text-[11px] text-ink-soft mt-0.5">
+          <Barcode size={12} aria-hidden="true" />
+          <span>{prod.barcode}</span>
         </div>
       )}
     </div>
+  );
+
+  return (
+    <Page>
+      <PageHeader
+        title="Inventory"
+        description={
+          isAdmin
+            ? "Products, stock, IMEIs and prices. Add stock, edit or delete a product from its row."
+            : "Products, stock levels, IMEIs and sale prices."
+        }
+        actions={
+          /* Only the owner creates / edits / deletes products */
+          isAdmin && (
+            <Button icon={Plus} onClick={() => setShowAddModal(true)}>
+              Add product
+            </Button>
+          )
+        }
+      />
+
+      {/* Search & category filter */}
+      <Card className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="relative w-full lg:w-80 shrink-0">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+          <input
+            type="search"
+            placeholder="Search name, brand, barcode or IMEI"
+            aria-label="Search products"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className={cx(inputClass, "pl-9")}
+          />
+        </div>
+        <Segmented options={categoryOptions} value={selectedCategory} onChange={setSelectedCategory} />
+      </Card>
+
+      {/* Products */}
+      <Card padded={false} className="overflow-hidden">
+        <div className="px-4 sm:px-5 py-3 border-b border-line flex items-center justify-between gap-2">
+          <h2 className="text-base font-semibold">Products</h2>
+          <span className="text-xs text-muted">{filteredProducts.length} shown</span>
+        </div>
+
+        {filteredProducts.length === 0 ? (
+          <EmptyState
+            icon={Boxes}
+            title={products.length === 0 ? "No products yet" : "No product matches"}
+            description={
+              products.length === 0
+                ? isAdmin
+                  ? "Add your first product to start selling."
+                  : "The owner has not added any products yet."
+                : "Try another name, brand, barcode or IMEI, or pick a different category."
+            }
+            action={
+              products.length === 0 && isAdmin ? (
+                <Button icon={Plus} onClick={() => setShowAddModal(true)}>
+                  Add product
+                </Button>
+              ) : null
+            }
+          />
+        ) : (
+          <>
+            {/* Desktop / tablet table */}
+            <div className="hidden md:block px-4 sm:px-5 py-3">
+              <TableWrap>
+                <thead>
+                  <tr>
+                    <Th>Product</Th>
+                    <Th>Category</Th>
+                    <Th>Stock and IMEIs</Th>
+                    <Th className="text-right">Cost</Th>
+                    <Th className="text-right">Sale price</Th>
+                    <Th className="text-right">Profit</Th>
+                    {isAdmin && <Th className="text-right">Actions</Th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredProducts.map((prod) => {
+                    const { availableImeis, stock, isLowStock, purchasePriceNum, salePriceNum, profitMargin } = rowInfo(prod);
+                    return (
+                      <tr key={prod.id} className="hover:bg-sunken/60 transition-colors">
+                        <Td className="align-top min-w-[12rem]">{productTitle(prod)}</Td>
+                        <Td className="align-top">
+                          <Badge tone="neutral">{prod.category}</Badge>
+                        </Td>
+                        <Td className="align-top min-w-[15rem]">
+                          <StockBadge stock={stock} isLowStock={isLowStock} />
+                          {prod.imeis && prod.imeis.length > 0 && <ImeiList units={availableImeis} />}
+                        </Td>
+                        <Td className="align-top text-right whitespace-nowrap text-ink-soft">
+                          {isAdmin ? money(purchasePriceNum) : "••••••"}
+                        </Td>
+                        <Td className="align-top text-right whitespace-nowrap font-semibold text-ink">{money(salePriceNum)}</Td>
+                        <Td className={`align-top text-right whitespace-nowrap font-semibold ${profitMargin < 0 ? "text-saffron-700" : "text-paid-600"}`}>
+                          {isAdmin ? money(profitMargin) : "••••••"}
+                        </Td>
+                        {isAdmin && (
+                          <Td className="align-top text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              <IconButton icon={PlusCircle} label="Add stock" onClick={() => openStockModal(prod)} />
+                              <IconButton icon={Edit2} label="Edit product" onClick={() => openEditModal(prod)} />
+                              <IconButton
+                                icon={Trash2}
+                                label="Delete product"
+                                onClick={() => handleDelete(prod)}
+                                className="hover:text-khata-600"
+                              />
+                            </div>
+                          </Td>
+                        )}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </TableWrap>
+            </div>
+
+            {/* Phone cards */}
+            <ul className="md:hidden divide-y divide-line">
+              {filteredProducts.map((prod) => {
+                const { availableImeis, stock, isLowStock, purchasePriceNum, salePriceNum, profitMargin } = rowInfo(prod);
+                return (
+                  <li key={prod.id} className="p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      {productTitle(prod)}
+                      <Badge tone="neutral" className="shrink-0">{prod.category}</Badge>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 rounded-xl bg-sunken p-2.5 text-xs">
+                      <div className="min-w-0">
+                        <div className="text-muted">Cost</div>
+                        <div className="font-semibold text-ink-soft truncate">{isAdmin ? money(purchasePriceNum) : "••••••"}</div>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-muted">Sale price</div>
+                        <div className="font-semibold text-ink truncate">{money(salePriceNum)}</div>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-muted">Profit</div>
+                        <div className={`font-semibold truncate ${profitMargin < 0 ? "text-saffron-700" : "text-paid-600"}`}>{isAdmin ? money(profitMargin) : "••••••"}</div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <StockBadge stock={stock} isLowStock={isLowStock} />
+                      {prod.imeis && prod.imeis.length > 0 && <ImeiList units={availableImeis} />}
+                    </div>
+
+                    {isAdmin && (
+                      <div className="flex items-center gap-2">
+                        <Button variant="secondary" icon={PlusCircle} onClick={() => openStockModal(prod)} className="flex-1">
+                          Add stock
+                        </Button>
+                        <Button variant="secondary" icon={Edit2} onClick={() => openEditModal(prod)} className="flex-1">
+                          Edit
+                        </Button>
+                        <IconButton icon={Trash2} label="Delete product" variant="danger-soft" onClick={() => handleDelete(prod)} />
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
+      </Card>
+
+      {/* Add Product Modal */}
+      <Modal
+        open={isAdmin && showAddModal}
+        onClose={closeAddModal}
+        title="Add product"
+        description="Phones are added one unit per IMEI. Dual-SIM phones take IMEI 1 and IMEI 2."
+        size="lg"
+        closeOnBackdrop={false}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeAddModal}>Cancel</Button>
+            <Button type="submit" form="add-product-form" disabled={savingAdd}>
+              {savingAdd ? "Saving…" : "Save product"}
+            </Button>
+          </>
+        }
+      >
+        <form id="add-product-form" onSubmit={handleAddSubmit} onKeyDown={handleFormKeyDown} className="grid gap-4 sm:grid-cols-2">
+          <Field label="Product name *" htmlFor="add-name">
+            <Input id="add-name" type="text" required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. iPhone 15 Pro Max" />
+          </Field>
+          <Field label="Brand *" htmlFor="add-brand">
+            <Input id="add-brand" type="text" required value={brand} onChange={(e) => setBrand(e.target.value)} placeholder="e.g. Apple or Samsung" />
+          </Field>
+          <Field label="Model or variant" htmlFor="add-model">
+            <Input id="add-model" type="text" value={model} onChange={(e) => setModel(e.target.value)} placeholder="e.g. 256GB Black" />
+          </Field>
+          <Field label="Category *" htmlFor="add-category">
+            <Select id="add-category" value={category} onChange={(e) => setCategory(e.target.value)}>
+              <option value="Smartphones">Smartphones</option>
+              <option value="Tablets & iPads">Tablets & iPads</option>
+              <option value="Accessories">Accessories</option>
+              <option value="Spare Parts">Spare Parts</option>
+              <option value="Wearables">Wearables</option>
+            </Select>
+          </Field>
+          <Field label="Purchase price (cost) *" htmlFor="add-cost">
+            <Input id="add-cost" type="number" required min="0" inputMode="decimal" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} placeholder="Rs. cost" />
+          </Field>
+          <Field label="Sale price" htmlFor="add-sale">
+            <Input id="add-sale" type="number" min="0" inputMode="decimal" value={salePrice} onChange={(e) => setSalePrice(e.target.value)} placeholder="Rs. retail" />
+          </Field>
+
+          {usesImeis && (
+            <div className="sm:col-span-2 space-y-3 rounded-2xl border border-line bg-sunken/60 p-3 sm:p-4">
+              {/* Mode & Toolbar */}
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between border-b border-line pb-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-ink flex items-center gap-1.5">
+                    <Smartphone size={16} className="text-muted" aria-hidden="true" />
+                    <span>IMEIs</span>
+                  </p>
+                  <p className="text-xs text-muted mt-0.5">Typing or scanning 15 digits jumps to the next box. Nothing saves until you press Save product.</p>
+                </div>
+                <Segmented
+                  size="sm"
+                  className="shrink-0"
+                  value={pasteMode ? "paste" : imeiMode}
+                  onChange={(v) => {
+                    if (v === "paste") {
+                      setPasteMode(!pasteMode);
+                      setPasteRawInput("");
+                    } else {
+                      setImeiMode(v);
+                      setPasteMode(false);
+                    }
+                  }}
+                  options={[
+                    { value: "dual", label: "Dual SIM" },
+                    { value: "single", label: "Single SIM" },
+                    { value: "paste", label: "Paste many" },
+                  ]}
+                />
+              </div>
+
+              {/* ── PASTE MODE ── */}
+              {pasteMode ? (
+                <div className="space-y-2">
+                  <Textarea
+                    rows={5}
+                    value={pasteRawInput}
+                    onChange={(e) => setPasteRawInput(e.target.value)}
+                    aria-label="Pasted IMEIs"
+                    className="font-mono text-xs"
+                    placeholder={
+                      imeiMode === "dual"
+                        ? `One phone per line, IMEI 1 and IMEI 2:
+358921098471201,358921098471219
+358921098471227 (IMEI 1 only)`
+                        : `Paste IMEIs in any format:
+["358921098471201","358921098471202"]
+or newline/comma separated...`
+                    }
+                  />
+                  <Button variant="soft" onClick={applyPastedImeis} disabled={pasteCount === 0} className="w-full">
+                    Add {pasteCount} {imeiMode === "dual" ? "phone(s)" : "IMEI(s)"}
+                  </Button>
+                </div>
+              ) : imeiMode === "dual" ? (
+                /* ── DUAL SIM ENTRY (IMEI 1 & IMEI 2) ── */
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-1 text-xs">
+                    <span className="font-semibold text-ink-soft">
+                      {dualImeiLines.filter((p) => /^\d{15}$/.test(p.imei1) || /^\d{15}$/.test(p.imei2)).length} phone(s) ready
+                    </span>
+                    <span className="text-muted">1 phone = IMEI 1 + IMEI 2</span>
+                  </div>
+
+                  <div className="space-y-2 max-h-72 overflow-y-auto custom-scrollbar pr-1">
+                    {dualImeiLines.map((pair, index) => {
+                      const isV1 = /^\d{15}$/.test(pair.imei1);
+                      const isV2 = /^\d{15}$/.test(pair.imei2);
+
+                      return (
+                        <div key={index} className="rounded-xl border border-line bg-surface p-2.5 space-y-2">
+                          <div className="flex items-center justify-between text-xs font-semibold text-ink-soft min-h-8">
+                            <span>Phone {index + 1}</span>
+                            {dualImeiLines.length > 1 && (
+                              <IconButton
+                                icon={X}
+                                size="sm"
+                                label={`Remove phone ${index + 1}`}
+                                onClick={() => removeDualImeiLine(index)}
+                                className="hover:text-khata-600"
+                              />
+                            )}
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {/* IMEI 1 */}
+                            <div className="relative">
+                              <input
+                                id={`imei1-input-${index}`}
+                                type="text"
+                                inputMode="numeric"
+                                maxLength={15}
+                                value={pair.imei1}
+                                onChange={(e) => handleDualImeiChange(index, "imei1", e.target.value)}
+                                onKeyDown={(e) => handleDualImeiKeyDown(e, index, "imei1")}
+                                placeholder="IMEI 1 (SIM 1)"
+                                aria-label={`Phone ${index + 1} IMEI 1`}
+                                className={imeiInputClass(isV1)}
+                              />
+                              <DigitCount value={pair.imei1} />
+                            </div>
+
+                            {/* IMEI 2 */}
+                            <div className="relative">
+                              <input
+                                id={`imei2-input-${index}`}
+                                type="text"
+                                inputMode="numeric"
+                                maxLength={15}
+                                value={pair.imei2}
+                                onChange={(e) => handleDualImeiChange(index, "imei2", e.target.value)}
+                                onKeyDown={(e) => handleDualImeiKeyDown(e, index, "imei2")}
+                                placeholder="IMEI 2 (SIM 2)"
+                                aria-label={`Phone ${index + 1} IMEI 2`}
+                                className={imeiInputClass(isV2)}
+                              />
+                              <DigitCount value={pair.imei2} />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <Button
+                    variant="soft"
+                    icon={PlusCircle}
+                    onClick={() => setDualImeiLines([...dualImeiLines, { imei1: "", imei2: "" }])}
+                  >
+                    Add another phone
+                  </Button>
+                </div>
+              ) : (
+                /* ── SINGLE SIM ENTRY ── */
+                <div className="space-y-2">
+                  <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar pr-1">
+                    {imeiLines.map((imei, index) => {
+                      const isValid = /^\d{15}$/.test(imei);
+                      return (
+                        <div key={index} className="flex items-center gap-2">
+                          <span className="text-xs font-semibold text-muted w-6 text-right shrink-0 tabular-nums">{index + 1}</span>
+                          <div className="relative flex-1 min-w-0">
+                            <input
+                              id={`imei-input-${index}`}
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={15}
+                              value={imei}
+                              onChange={(e) => handleSingleImeiChange(index, e.target.value)}
+                              onKeyDown={(e) => handleSingleImeiKeyDown(e, index)}
+                              placeholder="15-digit IMEI"
+                              aria-label={`IMEI ${index + 1}`}
+                              className={imeiInputClass(isValid)}
+                            />
+                            <DigitCount value={imei} />
+                          </div>
+                          {imeiLines.length > 1 && (
+                            <IconButton
+                              icon={X}
+                              size="sm"
+                              label={`Remove IMEI ${index + 1}`}
+                              onClick={() => removeSingleImeiLine(index)}
+                              className="shrink-0 hover:text-khata-600"
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <Button variant="soft" icon={PlusCircle} onClick={() => setImeiLines([...imeiLines, ""])}>
+                    Add another IMEI
+                  </Button>
+                </div>
+              )}
+
+              {/* PTA Status Selector */}
+              <div className="pt-3 border-t border-line">
+                <Field label="PTA status" htmlFor="add-pta" className="sm:max-w-xs">
+                  <Select id="add-pta" value={ptaStatus} onChange={(e) => setPtaStatus(e.target.value)}>
+                    {PTA_OPTIONS}
+                  </Select>
+                </Field>
+              </div>
+            </div>
+          )}
+
+          {category !== "Smartphones" && (
+            <Field label={usesImeis ? "Quantity in stock (if no IMEIs)" : "Quantity in stock"} htmlFor="add-qty">
+              <Input id="add-qty" type="number" min="1" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+            </Field>
+          )}
+          <Field label="Low-stock alert at" htmlFor="add-min" hint="Warn when stock falls to this number">
+            <Input id="add-min" type="number" min="0" inputMode="numeric" value={minStockAlert} onChange={(e) => setMinStockAlert(e.target.value)} />
+          </Field>
+          <Field label="Warranty (months)" htmlFor="add-warranty">
+            <Input id="add-warranty" type="number" min="0" inputMode="numeric" value={warrantyDuration} onChange={(e) => setWarrantyDuration(e.target.value)} />
+          </Field>
+          <Field label="Warranty type" htmlFor="add-warranty-type">
+            <Select
+              id="add-warranty-type"
+              value={warrantyType}
+              onChange={(e) => {
+                setWarrantyType(e.target.value);
+                if (e.target.value === "No Warranty") setWarrantyDuration(0);
+              }}
+            >
+              {WARRANTY_TYPES.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Supplier name *" htmlFor="add-supplier" className="sm:col-span-2">
+            <Input id="add-supplier" type="text" required value={supplierName} onChange={(e) => setSupplierName(e.target.value)} placeholder="e.g. Apple Direct Pakistan" />
+          </Field>
+        </form>
+      </Modal>
+
+      {/* Edit Product Modal */}
+      <Modal
+        open={isAdmin && !!editProduct}
+        onClose={closeEditModal}
+        title="Edit product"
+        description="Details only. Use Add stock to add new units."
+        size="lg"
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeEditModal}>Cancel</Button>
+            <Button type="submit" form="edit-product-form" disabled={savingEdit}>
+              {savingEdit ? "Saving…" : "Save changes"}
+            </Button>
+          </>
+        }
+      >
+        {editProduct && (
+          <form id="edit-product-form" onSubmit={handleEditSubmit} onKeyDown={handleFormKeyDown} className="grid gap-4 sm:grid-cols-2">
+            <Field label="Product name *" htmlFor="edit-name">
+              <Input id="edit-name" type="text" required value={editForm.name} onChange={(e) => setEditField("name", e.target.value)} />
+            </Field>
+            <Field label="Brand *" htmlFor="edit-brand">
+              <Input id="edit-brand" type="text" required value={editForm.brand} onChange={(e) => setEditField("brand", e.target.value)} />
+            </Field>
+            <Field label="Model or variant" htmlFor="edit-model">
+              <Input id="edit-model" type="text" value={editForm.model} onChange={(e) => setEditField("model", e.target.value)} />
+            </Field>
+            <Field label="Category *" htmlFor="edit-category">
+              <Select id="edit-category" value={editForm.category} onChange={(e) => setEditField("category", e.target.value)}>
+                {categories.filter((c) => c !== "All").map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </Select>
+            </Field>
+            {isAdmin && (
+              <Field label="Purchase price (cost) *" htmlFor="edit-cost">
+                <Input id="edit-cost" type="number" required min="0" inputMode="decimal" value={editForm.purchasePrice} onChange={(e) => setEditField("purchasePrice", e.target.value)} />
+              </Field>
+            )}
+            <Field label="Sale price" htmlFor="edit-sale">
+              <Input id="edit-sale" type="number" min="0" inputMode="decimal" value={editForm.salePrice} onChange={(e) => setEditField("salePrice", e.target.value)} />
+            </Field>
+            <Field label="Low-stock alert at" htmlFor="edit-min">
+              <Input id="edit-min" type="number" min="0" inputMode="numeric" value={editForm.minStockAlert} onChange={(e) => setEditField("minStockAlert", e.target.value)} />
+            </Field>
+            <Field label="Warranty (months)" htmlFor="edit-warranty">
+              <Input id="edit-warranty" type="number" min="0" inputMode="numeric" value={editForm.warrantyDuration} onChange={(e) => setEditField("warrantyDuration", e.target.value)} />
+            </Field>
+            <Field label="Warranty type" htmlFor="edit-warranty-type">
+              <Select
+                id="edit-warranty-type"
+                value={editForm.warrantyType}
+                onChange={(e) => {
+                  setEditField("warrantyType", e.target.value);
+                  if (e.target.value === "No Warranty") setEditField("warrantyDuration", 0);
+                }}
+              >
+                {WARRANTY_TYPES.map((t) => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Supplier name" htmlFor="edit-supplier">
+              <Input id="edit-supplier" type="text" value={editForm.supplierName} onChange={(e) => setEditField("supplierName", e.target.value)} />
+            </Field>
+            <Field label="Supplier phone" htmlFor="edit-supplier-phone">
+              <Input id="edit-supplier-phone" type="tel" inputMode="tel" value={editForm.supplierPhone} onChange={(e) => setEditField("supplierPhone", e.target.value)} />
+            </Field>
+          </form>
+        )}
+      </Modal>
+
+      {/* Add Stock Modal */}
+      <Modal
+        open={isAdmin && !!stockProduct}
+        onClose={closeStockModal}
+        title="Add stock"
+        description={stockProduct ? `${stockProduct.name} · ${getProductStock(stockProduct)} unit(s) in stock now` : undefined}
+        size="md"
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeStockModal}>Cancel</Button>
+            <Button type="submit" form="add-stock-form" disabled={savingStock}>
+              {savingStock ? "Saving…" : "Add stock"}
+            </Button>
+          </>
+        }
+      >
+        {stockProduct && (
+          <form id="add-stock-form" onSubmit={handleAddStockSubmit} className="space-y-4">
+            {isImeiProduct(stockProduct) ? (
+              <>
+                <Field
+                  label="New IMEIs, one phone per line"
+                  htmlFor="stock-imeis"
+                  hint={`${stockImeiText.split(/\r?\n/).filter((l) => l.trim()).length} phone(s) entered. Dual-SIM: imei1,imei2 on one line.`}
+                >
+                  <Textarea
+                    id="stock-imeis"
+                    rows={6}
+                    value={stockImeiText}
+                    onChange={(e) => setStockImeiText(e.target.value)}
+                    className="font-mono text-xs"
+                    placeholder={`358921098471201
+Dual-SIM: imei1,imei2
+358921098471219,358921098471227`}
+                  />
+                </Field>
+                <Field label="PTA status" htmlFor="stock-pta">
+                  <Select id="stock-pta" value={stockPta} onChange={(e) => setStockPta(e.target.value)}>
+                    {PTA_OPTIONS}
+                  </Select>
+                </Field>
+              </>
+            ) : (
+              <Field label="Quantity to add" htmlFor="stock-qty">
+                <Input id="stock-qty" type="number" min="1" required inputMode="numeric" value={stockQty} onChange={(e) => setStockQty(e.target.value)} />
+              </Field>
+            )}
+          </form>
+        )}
+      </Modal>
+    </Page>
   );
 };
 

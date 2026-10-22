@@ -1,16 +1,13 @@
 const supabase = require("../config/supabase");
+const { fetchAll, hideProductCost } = require("../lib/fetchAll");
 
 // Get all products (not deleted)
 exports.getProducts = async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("products")
-      .select("*")
-      .eq("is_deleted", false)
-      .order("created_at", { ascending: false });
-
-    if (error) throw new Error(error.message);
-    res.json(data);
+    const data = await fetchAll(() =>
+      supabase.from("products").select("*").eq("is_deleted", false).order("created_at", { ascending: false })
+    );
+    res.json(data.map((p) => hideProductCost(req, p)));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -19,46 +16,27 @@ exports.getProducts = async (req, res) => {
 // Search product by IMEI or barcode
 exports.searchByImei = async (req, res) => {
   try {
-    const { query } = req.params;
+    const query = String(req.params.query || "").trim();
+    if (!query) return res.status(400).json({ error: "Enter an IMEI or barcode." });
 
-    // Search by barcode first
-    const { data: byBarcode } = await supabase
-      .from("products")
-      .select("*")
-      .eq("barcode", query)
-      .eq("is_deleted", false)
-      .single();
+    const all = await fetchAll(() => supabase.from("products").select("*").eq("is_deleted", false).order("created_at"));
 
-    if (byBarcode) {
-      return res.json({ product: byBarcode, matchedImei: null });
-    }
+    const byBarcode = all.find((p) => p.barcode && p.barcode === query);
+    if (byBarcode) return res.json({ product: hideProductCost(req, byBarcode), matchedImei: null });
 
-    // Search all products with IMEI arrays
-    const { data: allProducts, error } = await supabase
-      .from("products")
-      .select("*")
-      .eq("is_deleted", false);
-
-    if (error) throw new Error(error.message);
-
-    let matchedProduct = null;
-    let matchedImei = null;
-
-    for (const product of allProducts) {
-      const imeis = product.imeis || [];
-      const found = imeis.find((i) => i.imei === query || i.imei1 === query || i.imei2 === query);
-      if (found) {
-        matchedProduct = product;
-        matchedImei = found;
-        break;
+    // A phone sold from one product and later bought back into another has two entries:
+    // prefer the unit that is in stock now, and fall back to a sold one only if none is
+    let soldMatch = null;
+    for (const product of all) {
+      for (const unit of product.imeis || []) {
+        if (![unit.imei, unit.imei1, unit.imei2].includes(query)) continue;
+        if (unit.status === "in_stock") return res.json({ product: hideProductCost(req, product), matchedImei: unit });
+        if (!soldMatch) soldMatch = { product, unit };
       }
     }
+    if (soldMatch) return res.json({ product: hideProductCost(req, soldMatch.product), matchedImei: soldMatch.unit });
 
-    if (!matchedProduct) {
-      return res.status(404).json({ message: "Product not found for scanned code" });
-    }
-
-    res.json({ product: matchedProduct, matchedImei });
+    res.status(404).json({ message: "Product not found for scanned code" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -74,8 +52,7 @@ exports.createProduct = async (req, res) => {
     const keys = imeis.flatMap((i) => [...new Set([i.imei, i.imei1, i.imei2].filter(Boolean))]);
     if (keys.length > 0) {
       const repeated = keys.filter((k, idx) => keys.indexOf(k) !== idx);
-      const { data: existing, error: exError } = await supabase.from("products").select("name, imeis").eq("is_deleted", false);
-      if (exError) throw new Error(exError.message);
+      const existing = await fetchAll(() => supabase.from("products").select("id, name, imeis").eq("is_deleted", false).order("id"));
       const inStock = new Map();
       (existing || []).forEach((p) =>
         (p.imeis || []).forEach((i) => {
@@ -106,7 +83,8 @@ exports.createProduct = async (req, res) => {
       purchase_price: body.purchasePrice || body.purchase_price || 0,
       sale_price: body.salePrice || body.sale_price || 0,
       quantity: derivedQuantity,
-      min_stock_alert: body.minStockAlert || body.min_stock_alert || 2,
+      // 0 (no low-stock alert) is a real choice; default to 2 only when nothing was sent
+      min_stock_alert: Math.max(0, parseInt(body.minStockAlert ?? body.min_stock_alert ?? 2, 10) || 0),
       barcode: body.barcode || null,
       // 0 months ("No Warranty") is a real value, so only fall back when nothing was sent
       warranty_duration: Number(body.warrantyDuration ?? body.warranty_duration ?? 12) || 0,
