@@ -1,9 +1,9 @@
-import React, { useState, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
 import { localDate } from "../utils/dates";
 import {
-  Wallet, Plus, Trash2, Edit3, X, Search, Filter,
-  Calendar, Tag, User, TrendingDown, DollarSign, CheckCircle2,
+  Wallet, Plus, Trash2, Edit3, X, Search,
+  Tag, User, TrendingDown, CheckCircle2, CreditCard,
 } from "lucide-react";
 
 const CATEGORIES = [
@@ -14,15 +14,83 @@ const CATEGORIES = [
 const PAYMENT_METHODS = ["Cash", "Card", "Easypaisa", "JazzCash", "Bank Transfer"];
 
 const today = () => localDate();
+const num = (v) => Number(v || 0);
+const sumAmount = (list) => list.reduce((s, e) => s + num(e.amount), 0);
+const expenseDay = (e) => e.expenseDate || (e.createdAt ? localDate(e.createdAt) : "");
+const sameName = (a, b) => (a || "").trim().toLowerCase() === (b || "").trim().toLowerCase();
+
+// Local-date bounds of the quick periods (week starts on Sunday)
+const periodBounds = () => {
+  const todayStr = today();
+  const d = new Date();
+  d.setDate(d.getDate() - d.getDay());
+  return {
+    Today: { from: todayStr, to: todayStr },
+    "This Week": { from: localDate(d), to: todayStr },
+    "This Month": { from: `${todayStr.slice(0, 7)}-01`, to: todayStr },
+    "All Time": { from: "", to: "" },
+  };
+};
+
+// Totals per key, biggest first, with share of the total
+const breakdown = (list, keyOf) => {
+  const map = {};
+  list.forEach((e) => {
+    const key = keyOf(e);
+    if (!map[key]) map[key] = { key, total: 0, count: 0 };
+    map[key].total += num(e.amount);
+    map[key].count += 1;
+  });
+  const total = sumAmount(list);
+  return Object.values(map)
+    .sort((a, b) => b.total - a.total)
+    .map((r) => ({ ...r, percent: total > 0 ? Math.round((r.total / total) * 100) : 0 }));
+};
+
+// One breakdown list (category / seller / payment method)
+const BreakdownCard = ({ title, icon: Icon, rows, bar, curr }) => (
+  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+    <div className="flex items-center gap-2 mb-3">
+      <Icon size={16} className="text-amber-400" />
+      <h3 className="font-bold text-slate-100 text-sm">{title}</h3>
+    </div>
+    {rows.length === 0 ? (
+      <p className="text-xs text-slate-500 py-4 text-center">No expenses</p>
+    ) : (
+      <div className="space-y-2.5">
+        {rows.map((r) => (
+          <div key={r.key}>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-300 font-semibold truncate">
+                {r.key} <span className="text-slate-500 font-normal">({r.count})</span>
+              </span>
+              <span className="text-slate-100 font-bold shrink-0">
+                {curr} {r.total.toLocaleString()} <span className="text-slate-500 font-normal">{r.percent}%</span>
+              </span>
+            </div>
+            <div className="w-full bg-slate-950 rounded-full h-1.5 mt-1 overflow-hidden border border-slate-800">
+              <div className={`h-full rounded-full ${bar}`} style={{ width: `${r.percent}%` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
+  </div>
+);
 
 const Expenses = () => {
-  const { expenses, addExpense, updateExpense, deleteExpense, shopSettings } = useApp();
+  const { allExpenses, activeSeller, addExpense, updateExpense, deleteExpense, shopSettings } = useApp();
   const curr = shopSettings.currencySymbol || "Rs.";
+  const expenses = useMemo(() => allExpenses || [], [allExpenses]);
 
-  // Filters
+  // Filters. The seller filter follows the header seller picker until changed here.
+  const headerSeller = activeSeller && activeSeller !== "All Sellers" && activeSeller !== "All" ? activeSeller : "All";
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterSeller, setFilterSeller] = useState("All");
+  const [sellerChoice, setSellerChoice] = useState(null);
+  const filterSeller = sellerChoice ?? headerSeller;
+  const setFilterSeller = setSellerChoice;
   const [filterCategory, setFilterCategory] = useState("All");
+  const [filterMethod, setFilterMethod] = useState("All");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
 
@@ -92,38 +160,71 @@ const Expenses = () => {
     }
   };
 
-  // Filtered expenses
-  const filtered = useMemo(() => {
+  // Everything except the date range (used for the period cards)
+  const baseFiltered = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
     return expenses.filter((e) => {
-      if (searchTerm && !(e.title || "").toLowerCase().includes(searchTerm.toLowerCase()) &&
-        !(e.description || "").toLowerCase().includes(searchTerm.toLowerCase())) return false;
-      if (filterSeller !== "All" && (e.sellerName || "") !== filterSeller) return false;
+      if (q && !(e.title || "").toLowerCase().includes(q) && !(e.description || "").toLowerCase().includes(q)) return false;
+      if (filterSeller !== "All" && !sameName(e.sellerName, filterSeller)) return false;
       if (filterCategory !== "All" && e.category !== filterCategory) return false;
-      if (filterDateFrom && e.expenseDate < filterDateFrom) return false;
-      if (filterDateTo && e.expenseDate > filterDateTo) return false;
+      if (filterMethod !== "All" && (e.paymentMethod || "Cash") !== filterMethod) return false;
       return true;
     });
-  }, [expenses, searchTerm, filterSeller, filterCategory, filterDateFrom, filterDateTo]);
+  }, [expenses, searchTerm, filterSeller, filterCategory, filterMethod]);
 
-  // Summary stats
-  const todayStr = today();
-  const startOfWeek = (() => {
-    const d = new Date();
-    d.setDate(d.getDate() - d.getDay());
-    return localDate(d);
-  })();
-  const startOfMonth = todayStr.slice(0, 7) + "-01";
+  // Filtered expenses (all filters), newest first
+  const filtered = useMemo(() => {
+    return baseFiltered
+      .filter((e) => {
+        const day = expenseDay(e);
+        if (filterDateFrom && day < filterDateFrom) return false;
+        if (filterDateTo && day > filterDateTo) return false;
+        return true;
+      })
+      .sort((a, b) => expenseDay(b).localeCompare(expenseDay(a)) || new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  }, [baseFiltered, filterDateFrom, filterDateTo]);
 
-  const totalAll = expenses.reduce((s, e) => s + e.amount, 0);
-  const totalToday = expenses.filter((e) => e.expenseDate === todayStr).reduce((s, e) => s + e.amount, 0);
-  const totalWeek = expenses.filter((e) => e.expenseDate >= startOfWeek && e.expenseDate <= todayStr).reduce((s, e) => s + e.amount, 0);
-  const totalMonth = expenses.filter((e) => e.expenseDate >= startOfMonth && e.expenseDate <= todayStr).reduce((s, e) => s + e.amount, 0);
+  // Summary stats (local dates)
+  const periods = periodBounds();
+  const periodTotal = ({ from, to }) =>
+    sumAmount(baseFiltered.filter((e) => {
+      const day = expenseDay(e);
+      return (!from || day >= from) && (!to || day <= to);
+    }));
+  const activePeriod = Object.keys(periods).find(
+    (k) => periods[k].from === filterDateFrom && periods[k].to === filterDateTo
+  );
+  const applyPeriod = (k) => {
+    setFilterDateFrom(periods[k].from);
+    setFilterDateTo(periods[k].to);
+  };
 
-  // Per-seller totals
-  const sellerTotals = SELLERS.map((seller) => ({
-    seller,
-    total: expenses.filter((e) => e.sellerName === seller).reduce((s, e) => s + e.amount, 0),
-  }));
+  const filteredTotal = sumAmount(filtered);
+  const filteredDays = new Set(filtered.map(expenseDay)).size;
+  const byCategory = useMemo(() => breakdown(filtered, (e) => e.category || "Other"), [filtered]);
+  const bySeller = useMemo(() => breakdown(filtered, (e) => e.sellerName || "No seller"), [filtered]);
+  const byMethod = useMemo(() => breakdown(filtered, (e) => e.paymentMethod || "Cash"), [filtered]);
+
+  // Filter options: the standard lists plus anything already saved
+  const categoryOptions = [...new Set([...CATEGORIES, ...expenses.map((e) => e.category).filter(Boolean)])];
+  const methodOptions = [...new Set([...PAYMENT_METHODS, ...expenses.map((e) => e.paymentMethod).filter(Boolean)])];
+
+  const filtersActive =
+    searchTerm || filterSeller !== "All" || filterCategory !== "All" || filterMethod !== "All" || filterDateFrom || filterDateTo;
+  const clearFilters = () => {
+    setSearchTerm("");
+    setFilterSeller("All");
+    setFilterCategory("All");
+    setFilterMethod("All");
+    setFilterDateFrom("");
+    setFilterDateTo("");
+  };
+
+  const rangeLabel = activePeriod
+    ? activePeriod
+    : filterDateFrom || filterDateTo
+    ? `${filterDateFrom || "start"} → ${filterDateTo || "today"}`
+    : "All Time";
 
   return (
     <div className="p-6 space-y-6">
@@ -144,44 +245,30 @@ const Expenses = () => {
         </button>
       </div>
 
-      {/* Summary Cards */}
+      {/* Summary Cards (click to show that period) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Today", value: totalToday, color: "from-rose-600 to-rose-500" },
-          { label: "This Week", value: totalWeek, color: "from-amber-600 to-amber-500" },
-          { label: "This Month", value: totalMonth, color: "from-orange-600 to-orange-500" },
-          { label: "All Time", value: totalAll, color: "from-slate-700 to-slate-600" },
-        ].map(({ label, value, color }) => (
-          <div key={label} className={`bg-gradient-to-br ${color} rounded-2xl p-4 shadow`}>
+          { label: "Today", color: "from-rose-600 to-rose-500" },
+          { label: "This Week", color: "from-amber-600 to-amber-500" },
+          { label: "This Month", color: "from-orange-600 to-orange-500" },
+          { label: "All Time", color: "from-slate-700 to-slate-600" },
+        ].map(({ label, color }) => (
+          <button
+            key={label}
+            onClick={() => applyPeriod(label)}
+            className={`text-left bg-gradient-to-br ${color} rounded-2xl p-4 shadow transition-all ${
+              activePeriod === label ? "ring-2 ring-white/70" : "opacity-90 hover:opacity-100"
+            }`}
+          >
             <div className="text-xs text-white/70 font-semibold uppercase mb-1">{label}</div>
-            <div className="text-xl font-black text-white">{curr} {value.toLocaleString()}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Seller-wise Summary */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {sellerTotals.map(({ seller, total }) => (
-          <div key={seller} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-indigo-600/20 border border-indigo-600/30 flex items-center justify-center">
-                <User size={18} className="text-indigo-400" />
-              </div>
-              <div>
-                <div className="font-bold text-slate-100 text-sm">{seller}</div>
-                <div className="text-xs text-slate-400">Seller Expenses</div>
-              </div>
-            </div>
-            <div className="text-right">
-              <div className="font-extrabold text-amber-400 text-lg">{curr} {total.toLocaleString()}</div>
-            </div>
-          </div>
+            <div className="text-xl font-black text-white">{curr} {periodTotal(periods[label]).toLocaleString()}</div>
+          </button>
         ))}
       </div>
 
       {/* Filters */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-3">
           <div className="relative sm:col-span-2 md:col-span-1">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input type="text" placeholder="Search expenses..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
@@ -196,13 +283,66 @@ const Expenses = () => {
           <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)}
             className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500">
             <option value="All">All Categories</option>
-            {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            {categoryOptions.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
-          <input type="date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)}
+          <select value={filterMethod} onChange={(e) => setFilterMethod(e.target.value)}
+            className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500">
+            <option value="All">All Payment Methods</option>
+            {methodOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+          <input type="date" value={filterDateFrom} max={filterDateTo || undefined} onChange={(e) => setFilterDateFrom(e.target.value)}
             className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500" />
-          <input type="date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)}
+          <input type="date" value={filterDateTo} min={filterDateFrom || undefined} onChange={(e) => setFilterDateTo(e.target.value)}
             className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500" />
         </div>
+        <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {Object.keys(periods).map((k) => (
+              <button
+                key={k}
+                onClick={() => applyPeriod(k)}
+                className={`px-3 py-1 rounded-lg font-bold transition-colors ${
+                  activePeriod === k ? "bg-amber-500 text-white" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                }`}
+              >
+                {k}
+              </button>
+            ))}
+          </div>
+          {filtersActive && (
+            <button onClick={clearFilters} className="text-slate-400 hover:text-amber-400 font-semibold flex items-center gap-1">
+              <X size={12} /> Clear filters
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Selected range summary & breakdowns */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-xs text-slate-400 font-semibold uppercase">Selected: {rangeLabel}</div>
+          <div className="text-2xl font-black text-amber-400">{curr} {filteredTotal.toLocaleString()}</div>
+        </div>
+        <div className="flex gap-6 text-xs">
+          <div>
+            <div className="text-slate-500">Entries</div>
+            <div className="font-bold text-slate-100">{filtered.length}</div>
+          </div>
+          <div>
+            <div className="text-slate-500">Avg per entry</div>
+            <div className="font-bold text-slate-100">{curr} {(filtered.length ? Math.round(filteredTotal / filtered.length) : 0).toLocaleString()}</div>
+          </div>
+          <div>
+            <div className="text-slate-500">Avg per day with expenses</div>
+            <div className="font-bold text-slate-100">{curr} {(filteredDays ? Math.round(filteredTotal / filteredDays) : 0).toLocaleString()}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <BreakdownCard title="By Category" icon={Tag} rows={byCategory} bar="bg-gradient-to-r from-amber-500 to-orange-400" curr={curr} />
+        <BreakdownCard title="By Seller" icon={User} rows={bySeller} bar="bg-gradient-to-r from-indigo-500 to-indigo-300" curr={curr} />
+        <BreakdownCard title="By Payment Method" icon={CreditCard} rows={byMethod} bar="bg-gradient-to-r from-cyan-500 to-emerald-400" curr={curr} />
       </div>
 
       {/* Expenses List */}
@@ -213,7 +353,7 @@ const Expenses = () => {
           </h2>
           {filtered.length > 0 && (
             <span className="text-xs font-bold text-amber-400">
-              Total: {curr} {filtered.reduce((s, e) => s + e.amount, 0).toLocaleString()}
+              Total: {curr} {filteredTotal.toLocaleString()}
             </span>
           )}
         </div>
@@ -221,8 +361,12 @@ const Expenses = () => {
         {filtered.length === 0 ? (
           <div className="text-center py-16 text-slate-500">
             <Wallet size={48} className="mx-auto mb-3 opacity-20" />
-            <p className="text-sm">No expenses found</p>
-            <button onClick={handleOpenAdd} className="mt-3 text-xs text-amber-400 hover:underline">Add your first expense</button>
+            <p className="text-sm">{expenses.length === 0 ? "No expenses recorded yet" : "No expenses match these filters"}</p>
+            {expenses.length === 0 ? (
+              <button onClick={handleOpenAdd} className="mt-3 text-xs text-amber-400 hover:underline">Add your first expense</button>
+            ) : (
+              filtersActive && <button onClick={clearFilters} className="mt-3 text-xs text-amber-400 hover:underline">Clear filters</button>
+            )}
           </div>
         ) : (
           <div className="divide-y divide-slate-800">
@@ -240,12 +384,12 @@ const Expenses = () => {
                     )}
                   </div>
                   <div className="text-[11px] text-slate-400 mt-0.5">
-                    {exp.expenseDate} · {exp.paymentMethod}
+                    {expenseDay(exp)} · {exp.paymentMethod}
                     {exp.description && ` · ${exp.description}`}
                   </div>
                 </div>
                 <div className="text-right shrink-0">
-                  <div className="font-extrabold text-amber-400 text-sm">{curr} {exp.amount.toLocaleString()}</div>
+                  <div className="font-extrabold text-amber-400 text-sm">{curr} {num(exp.amount).toLocaleString()}</div>
                 </div>
                 <div className="flex gap-1 shrink-0">
                   <button onClick={() => handleOpenEdit(exp)} className="p-1.5 text-slate-500 hover:text-indigo-400 hover:bg-slate-800 rounded-lg transition-colors"><Edit3 size={14} /></button>

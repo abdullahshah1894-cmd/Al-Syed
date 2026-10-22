@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from "react-router-dom";
 import { useApp } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
 import { itemImeis } from "../utils/sales";
+import { formatWAPhone } from "../utils/shareImage";
 import {
   Search,
   ShieldCheck,
@@ -17,6 +18,9 @@ import {
   Truck,
   Building2,
   Phone,
+  MessageCircle,
+  RotateCcw,
+  ExternalLink,
 } from "lucide-react";
 
 // Helper: Luhn Algorithm Validation for 15-digit IMEI
@@ -36,8 +40,10 @@ const validateLuhnIMEI = (imeiStr) => {
 };
 
 const ImeiChecker = () => {
-  const { products, allSales, warranties, shopSettings } = useApp();
+  const { products, allSales, warranties, shopSettings, allCustomers, suppliers } = useApp();
   const { isAdmin } = useAuth();
+  const navigate = useNavigate();
+  const curr = shopSettings.currencySymbol || "Rs.";
   const [searchParams] = useSearchParams();
   const [imeiInput, setImeiInput] = useState(searchParams.get("imei") || "");
   const [searchResult, setSearchResult] = useState(null);
@@ -73,17 +79,32 @@ const ImeiChecker = () => {
 
     // Search all sales (not only the selected seller's) to find bill details if sold:
     // the unit's own sale link first, then any bill item carrying one of its IMEIs
+    // (newest first, preferring a bill where the unit was not returned)
+    const itemHasKey = (item) => [...itemImeis(item), item.imei1, item.imei2].some((k) => k && keys.includes(k));
     let matchedSale = null;
     if (matchedImeiObj?.soldInSale) {
       matchedSale = (allSales || []).find((s) => s.id === matchedImeiObj.soldInSale) || null;
     }
     if (!matchedSale) {
-      matchedSale =
-        (allSales || []).find((s) =>
-          (s.items || []).some((item) =>
-            [...itemImeis(item), item.imei1, item.imei2].some((k) => k && keys.includes(k))
-          )
-        ) || null;
+      const candidates = (allSales || [])
+        .filter((s) => (s.items || []).some(itemHasKey))
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      const notReturned = candidates.find((s) =>
+        (s.items || []).some((item) => itemHasKey(item) && !(item.returnedImeis || []).some((k) => keys.includes(k)))
+      );
+      matchedSale = notReturned || candidates[0] || null;
+    }
+    const matchedItem = matchedSale ? (matchedSale.items || []).find(itemHasKey) || null : null;
+
+    // Returned: the bill line lists it as returned, or the unit came back into stock after a return
+    const returnedOnBill = !!matchedItem && (matchedItem.returnedImeis || []).some((k) => keys.includes(k));
+    const unitReturned = matchedImeiObj?.status === "in_stock" && !!matchedImeiObj?.returnedAt;
+    let returnedDate = null;
+    if (returnedOnBill || unitReturned) {
+      const entry = (matchedSale?.returns || []).find((r) =>
+        (r.items || []).some((ri) => (ri.imeis || []).some((k) => keys.includes(k)))
+      );
+      returnedDate = entry?.date || entry?.at || matchedImeiObj?.returnedAt || null;
     }
 
     // Search warranty records
@@ -95,6 +116,9 @@ const ImeiChecker = () => {
       matchedProduct,
       matchedImeiObj,
       matchedSale,
+      matchedItem,
+      isReturned: returnedOnBill || unitReturned,
+      returnedDate,
       matchedWarranty,
     });
   }, [products, allSales, warranties]);
@@ -115,27 +139,132 @@ const ImeiChecker = () => {
       ? "bg-amber-500/20 text-amber-300"
       : "bg-rose-500/20 text-rose-300";
 
-  // Bill details block (shared by the product-found and product-deleted views)
-  const renderSaleDetails = (sale) => (
-    <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-1">
-      <div className="flex justify-between text-xs">
-        <span className="text-slate-400">Bill Number:</span>
-        <span className="font-mono font-bold text-indigo-400">{sale.billNumber}</span>
-      </div>
-      <div className="flex justify-between text-xs">
-        <span className="text-slate-400">Customer Name:</span>
-        <span className="font-bold text-slate-200">{sale.customerName || "Walk-in Customer"}</span>
-      </div>
-      <div className="flex justify-between text-xs">
-        <span className="text-slate-400">Phone:</span>
-        <span className="text-slate-200">{sale.customerPhone || "N/A"}</span>
-      </div>
-      <div className="flex justify-between text-xs">
-        <span className="text-slate-400">Sale Date:</span>
-        <span className="text-slate-200">{new Date(sale.createdAt).toLocaleDateString()}</span>
-      </div>
+  const fmtDate = (d) => {
+    if (!d) return "—";
+    const dt = new Date(d);
+    return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString();
+  };
+
+  // Price this unit was billed at
+  const unitPrice = (item) => {
+    if (!item) return null;
+    const qty = Number(item.quantity || item.qty || 1) || 1;
+    const p = item.unitSalePrice ?? item.price ?? (item.subtotal !== undefined ? Number(item.subtotal) / qty : null);
+    return p === null || p === undefined ? null : Number(p);
+  };
+
+  const row = (label, value, valueClass = "text-slate-200") => (
+    <div className="flex justify-between gap-3 text-xs">
+      <span className="text-slate-400 shrink-0">{label}</span>
+      <span className={`text-right ${valueClass}`}>{value}</span>
     </div>
   );
+
+  // "Sold to" block (shared by the product-found and product-deleted views)
+  const renderSaleDetails = (result) => {
+    const sale = result.matchedSale;
+    const customer = sale.customerId ? (allCustomers || []).find((c) => c.id === sale.customerId) : null;
+    const phone = sale.customerPhone || customer?.phone || "";
+    const price = unitPrice(result.matchedItem);
+    const udhaar = customer ? Number(customer.totalPending || 0) : null;
+
+    return (
+      <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-1.5">
+        {result.isReturned ? (
+          <div className="flex items-center gap-2 text-amber-300 text-xs font-bold bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2 mb-1">
+            <RotateCcw size={14} />
+            <span>Returned on {fmtDate(result.returnedDate)}</span>
+          </div>
+        ) : (
+          <div className="text-[10px] uppercase font-extrabold tracking-wider text-indigo-300 mb-1">Sold To</div>
+        )}
+        {row(result.isReturned ? "Was sold to:" : "Customer Name:", sale.customerName || "Walk-in Customer", "font-bold text-slate-200")}
+        <div className="flex justify-between gap-3 text-xs items-center">
+          <span className="text-slate-400">Phone:</span>
+          {phone ? (
+            <span className="flex items-center gap-2">
+              <a href={`tel:${phone}`} className="font-mono text-cyan-300 hover:underline flex items-center gap-1">
+                <Phone size={11} /> {phone}
+              </a>
+              {formatWAPhone(phone) && (
+                <a
+                  href={`https://wa.me/${formatWAPhone(phone)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-emerald-400 hover:text-emerald-300"
+                  title="WhatsApp"
+                >
+                  <MessageCircle size={14} />
+                </a>
+              )}
+            </span>
+          ) : (
+            <span className="text-slate-200">N/A</span>
+          )}
+        </div>
+        {row("Bill Number:", sale.billNumber, "font-mono font-bold text-indigo-400")}
+        {row("Sale Date:", fmtDate(sale.createdAt))}
+        {row("Seller:", sale.sellerName || "—")}
+        {row("Unit Sale Price:", price !== null ? `${curr} ${price.toLocaleString()}` : "—", "font-bold text-slate-100")}
+        {row("Payment Method:", sale.paymentMethod || "—")}
+        {udhaar !== null &&
+          row(
+            "Customer Udhaar (now):",
+            `${curr} ${udhaar.toLocaleString()}`,
+            udhaar > 0 ? "font-bold text-rose-400" : "font-bold text-emerald-400"
+          )}
+      </div>
+    );
+  };
+
+  // Supplier block: from the unit (set by supplier purchases) and the product's supplier
+  const renderSupplier = (product, unit) => {
+    const name = unit?.supplierName || product?.supplier?.name || product?.supplierName || product?.supplier_name || "";
+    const lower = name.trim().toLowerCase();
+    const supplier =
+      (unit?.supplierId && (suppliers || []).find((s) => s.id === unit.supplierId)) ||
+      (lower && (suppliers || []).find((s) => (s.name || "").trim().toLowerCase() === lower)) ||
+      null;
+    const phone = supplier?.phone || product?.supplier?.phone || product?.supplier_phone || "";
+
+    return (
+      <div className="bg-emerald-950/40 p-4 rounded-2xl border border-emerald-500/30 space-y-1.5 shadow-lg shadow-emerald-950/50">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-emerald-400">
+            <Truck size={18} className="text-emerald-400" />
+            <span className="text-[11px] uppercase font-extrabold tracking-wider text-emerald-300">Supplier / Vendor Name</span>
+          </div>
+          {phone && (
+            <a
+              href={`tel:${phone}`}
+              className="text-[10px] font-mono text-emerald-300 bg-emerald-900/60 px-2.5 py-0.5 rounded-full border border-emerald-500/40 flex items-center gap-1 hover:bg-emerald-800/60"
+            >
+              <Phone size={10} />
+              <span>{phone}</span>
+            </a>
+          )}
+        </div>
+        <div className="text-base font-extrabold text-emerald-100 pl-6 tracking-wide">
+          {supplier?.name || name || "Direct Vendor / Unknown Supplier"}
+        </div>
+        {supplier?.company && <p className="text-[11px] text-emerald-300/80 pl-6">{supplier.company}</p>}
+        {unit?.purchaseDate && (
+          <p className="text-[11px] text-emerald-300/80 pl-6">Purchased on {fmtDate(unit.purchaseDate)}</p>
+        )}
+        {supplier && (
+          <div className="pl-6 pt-1">
+            <button
+              type="button"
+              onClick={() => navigate(`/suppliers?open=${supplier.id}`)}
+              className="text-[11px] font-bold text-emerald-300 hover:text-emerald-200 flex items-center gap-1"
+            >
+              <ExternalLink size={12} /> Open supplier account
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // Warranty status block — shown whenever a warranty exists for this IMEI
   const renderWarranty = (w) => (
@@ -199,24 +328,6 @@ const ImeiChecker = () => {
           </button>
         </form>
 
-        {/* Quick Sample IMEI Fillers */}
-        <div className="mt-3 flex items-center gap-2 text-xs text-slate-400">
-          <span>Try sample IMEIs:</span>
-          <button
-            type="button"
-            onClick={() => { setImeiInput("358921098471201"); performLookup("358921098471201"); }}
-            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 font-mono text-indigo-300 rounded-lg"
-          >
-            In-Stock iPhone
-          </button>
-          <button
-            type="button"
-            onClick={() => { setImeiInput("354112091234504"); performLookup("354112091234504"); }}
-            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 font-mono text-emerald-300 rounded-lg"
-          >
-            Sold Samsung S24
-          </button>
-        </div>
       </div>
 
       {/* Results Display Panel */}
@@ -262,7 +373,11 @@ const ImeiChecker = () => {
                         : "bg-rose-500/20 text-rose-300"
                     }`}
                   >
-                    {searchResult.matchedImeiObj?.status === "in_stock" ? "IN CURRENT STOCK" : "SOLD TO CUSTOMER"}
+                    {searchResult.matchedImeiObj?.status === "in_stock"
+                      ? searchResult.isReturned
+                        ? "IN STOCK (RETURNED)"
+                        : "IN CURRENT STOCK"
+                      : "SOLD TO CUSTOMER"}
                   </span>
                 </div>
 
@@ -271,27 +386,8 @@ const ImeiChecker = () => {
                   <p className="text-xs text-indigo-400 font-semibold">{searchResult.matchedProduct.brand} • {searchResult.matchedProduct.category}</p>
                 </div>
 
-                {/* ── SUPPLIER NAME DISPLAY (Emerald Green & Mint) ── */}
-                <div className="bg-emerald-950/40 p-4 rounded-2xl border border-emerald-500/30 space-y-1.5 shadow-lg shadow-emerald-950/50">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-emerald-400">
-                      <Truck size={18} className="text-emerald-400" />
-                      <span className="text-[11px] uppercase font-extrabold tracking-wider text-emerald-300">Supplier / Vendor Name</span>
-                    </div>
-                    {(searchResult.matchedProduct.supplier?.phone || searchResult.matchedProduct.supplier_phone) && (
-                      <span className="text-[10px] font-mono text-emerald-300 bg-emerald-900/60 px-2.5 py-0.5 rounded-full border border-emerald-500/40 flex items-center gap-1">
-                        <Phone size={10} />
-                        <span>{searchResult.matchedProduct.supplier?.phone || searchResult.matchedProduct.supplier_phone}</span>
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-base font-extrabold text-emerald-100 pl-6 tracking-wide">
-                    {searchResult.matchedProduct.supplier?.name ||
-                      searchResult.matchedProduct.supplierName ||
-                      searchResult.matchedProduct.supplier_name ||
-                      "Direct Vendor / Unknown Supplier"}
-                  </div>
-                </div>
+                {/* ── SUPPLIER (Emerald Green & Mint) ── */}
+                {renderSupplier(searchResult.matchedProduct, searchResult.matchedImeiObj)}
 
                 {/* Pricing & PTA Status */}
                 <div className="grid grid-cols-2 gap-3 text-xs">
@@ -344,7 +440,7 @@ const ImeiChecker = () => {
 
                 <div className="space-y-3">
                   {searchResult.matchedSale ? (
-                    renderSaleDetails(searchResult.matchedSale)
+                    renderSaleDetails(searchResult)
                   ) : (
                     <div className="text-center p-6 text-slate-400 text-xs space-y-2">
                       <AlertCircle size={32} className="mx-auto text-slate-600" />
@@ -379,7 +475,7 @@ const ImeiChecker = () => {
               <p className="text-[11px] text-amber-400">
                 This IMEI is no longer linked to a product in inventory (the product may have been deleted).
               </p>
-              {searchResult.matchedSale && renderSaleDetails(searchResult.matchedSale)}
+              {searchResult.matchedSale && renderSaleDetails(searchResult)}
               {searchResult.matchedWarranty && renderWarranty(searchResult.matchedWarranty)}
             </div>
           ) : (
