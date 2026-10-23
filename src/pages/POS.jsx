@@ -117,6 +117,12 @@ const POS = () => {
   });
 
   // Add product to cart
+  // A product already in the cart keeps the price typed for it; otherwise its saved sale price
+  const cartPriceFor = (productId, fallback) => {
+    const typed = cart.find((i) => i.product === productId && Number(i.unitSalePrice) > 0);
+    return typed ? Number(typed.unitSalePrice) : Number(fallback) || 0;
+  };
+
   const addToCart = (product, selectedImeiObj = null) => {
     let imeiToAssign = null;
     if (product.imeis && product.imeis.length > 0) {
@@ -155,8 +161,8 @@ const POS = () => {
         imei: imeiToAssign,
         quantity: 1,
         unitPurchasePrice: product.purchasePrice,
-        unitSalePrice: product.salePrice,
-        subtotal: product.salePrice,
+        unitSalePrice: cartPriceFor(product.id, product.salePrice),
+        subtotal: cartPriceFor(product.id, product.salePrice),
       }]);
     } else {
       setCart((prev) => {
@@ -178,8 +184,8 @@ const POS = () => {
           imei: null,
           quantity: 1,
           unitPurchasePrice: product.purchasePrice,
-          unitSalePrice: product.salePrice,
-          subtotal: product.salePrice,
+          unitSalePrice: cartPriceFor(product.id, product.salePrice),
+          subtotal: cartPriceFor(product.id, product.salePrice),
         }];
       });
     }
@@ -221,8 +227,8 @@ const POS = () => {
           imei: null,
           quantity: qty,
           unitPurchasePrice: productToAdd.purchasePrice,
-          unitSalePrice: productToAdd.salePrice,
-          subtotal: productToAdd.salePrice * qty,
+          unitSalePrice: cartPriceFor(productToAdd.id, productToAdd.salePrice),
+          subtotal: cartPriceFor(productToAdd.id, productToAdd.salePrice) * qty,
         }];
       });
     }
@@ -302,9 +308,27 @@ const POS = () => {
   const dueAmount = Math.max(0, currentSaleTotal - effectivePaid);
   const balanceAfterSale = Math.max(0, previousBalance + currentSaleTotal - effectivePaid);
 
+  // Set the price of every unit of one product in the cart
+  const setCartPrice = (productId, value) => {
+    const price = value === "" ? "" : Math.max(0, Number(value) || 0);
+    setCart((prev) =>
+      prev.map((item) =>
+        item.product === productId
+          ? { ...item, unitSalePrice: price, subtotal: Number(item.quantity || 1) * (Number(price) || 0) }
+          : item
+      )
+    );
+  };
+  // Lines without a price: a bill cannot go out with an item at Rs 0
+  const unpricedNames = [...new Set(cart.filter((i) => !(Number(i.unitSalePrice) > 0)).map((i) => i.productName))];
+
   // ── Checkout ──────────────────────────────────────────────────
   const handleCheckoutClick = () => {
     if (cart.length === 0) return;
+    if (unpricedNames.length > 0) {
+      alert(`Enter a price for: ${unpricedNames.join(", ")}`);
+      return;
+    }
     if (paymentMethod === "Credit (Udhaar)" && !selectedCustomer) {
       alert("Please select a customer for Udhaar (Credit) sales.");
       return;
@@ -314,6 +338,10 @@ const POS = () => {
 
   const finalizeCheckout = async () => {
     if (cart.length === 0 || isSubmitting || submittingRef.current) return;
+    if (unpricedNames.length > 0) {
+      alert(`Enter a price for: ${unpricedNames.join(", ")}`);
+      return;
+    }
     if (paymentMethod === "Credit (Udhaar)" && !selectedCustomer) {
       alert("Please select a customer for Udhaar (Credit) sales.");
       return;
@@ -688,6 +716,24 @@ const POS = () => {
                   />
                 </div>
 
+                <label className="flex items-center gap-2 text-xs text-muted">
+                  <span className="shrink-0">Price each</span>
+                  <input
+                    type="number"
+                    min="1"
+                    inputMode="numeric"
+                    aria-label={`Price of ${item.productName}`}
+                    value={item.unitSalePrice === 0 ? "" : item.unitSalePrice}
+                    placeholder="Enter price"
+                    onChange={(e) => setCartPrice(item.product, e.target.value)}
+                    className={`h-9 w-full rounded-lg border px-2.5 text-sm font-semibold text-ink tabular-nums focus:outline-none focus:ring-2 ${
+                      Number(item.unitSalePrice) > 0
+                        ? "border-line-strong focus:border-brand-500 focus:ring-brand-100"
+                        : "border-saffron-400 bg-saffron-50 focus:border-saffron-500 focus:ring-saffron-100"
+                    }`}
+                  />
+                </label>
+
                 {item.imeisArray && item.imeisArray.length > 0 ? (
                   <div className="flex flex-wrap gap-1.5">
                     {item.imeisArray.map((imei) => (
@@ -719,9 +765,7 @@ const POS = () => {
                       variant="secondary"
                       onClick={() => item.cartIds.forEach((id) => updateCartQuantity(id, 1))}
                     />
-                    <span className="text-xs text-muted ml-1">
-                      at <Money amount={item.unitSalePrice} /> each
-                    </span>
+
                   </div>
                 )}
               </div>
@@ -775,11 +819,14 @@ const POS = () => {
             <button
               type="button"
               onClick={handleCheckoutClick}
-              disabled={cart.length === 0}
+              disabled={cart.length === 0 || unpricedNames.length > 0}
               className="mt-4 w-full h-12 rounded-xl bg-white text-brand-700 text-base font-semibold hover:bg-brand-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
               Checkout and pay
             </button>
+            {unpricedNames.length > 0 && (
+              <p className="mt-2 text-xs text-white/90">Enter a price for {unpricedNames.join(", ")} to check out.</p>
+            )}
           </div>
         </div>
       </div>

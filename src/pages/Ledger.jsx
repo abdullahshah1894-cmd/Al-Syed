@@ -788,7 +788,6 @@ const Ledger = () => {
       customerPhone: customerObj ? customerObj.phone : "",
       dueDate: paymentMethod === "Pending Bill" ? dueDate || null : null,
       notes: "Generated from Bill Ledger",
-      billNumber: `INV-${Date.now().toString().slice(-6)}`,
     };
 
     // This records the sale (reducing stock in backend) and updates local states
@@ -1000,11 +999,21 @@ const Ledger = () => {
   };
 
   // ── Running balance computation ───────────────────────────────────────────
+  // "bill": only bills not checked out yet, so a finished sale leaves a fresh, empty bill (also after refresh).
+  // "sheet": the whole day — checked-out bills, returns, payments and the opening balance.
+  const [view, setView] = useState("bill");
+  const visibleEntries = useMemo(() => {
+    if (view === "sheet") return entries;
+    const openInvoiceIds = new Set(entries.filter((e) => e.type === "invoice" && !e.saleId).map((e) => e.id));
+    return entries.filter((e) => (e.type === "invoice" ? openInvoiceIds.has(e.id) : e.type === "item" && openInvoiceIds.has(e.parentInvoiceId)));
+  }, [entries, view]);
+  const shownOpening = view === "sheet" ? openingBalance : 0;
+
   const rows = useMemo(() => {
     const computedRows = [];
-    let currentBalance = openingBalance;
+    let currentBalance = shownOpening;
     
-    entries.forEach((e) => {
+    visibleEntries.forEach((e) => {
       const qty = Number(e.qty || 0);
       const rate = Number(e.rate || 0);
       const computedAmount = e.type === "item" ? qty * rate : null;
@@ -1021,11 +1030,11 @@ const Ledger = () => {
     });
     
     return computedRows;
-  }, [entries, openingBalance]);
+  }, [visibleEntries, shownOpening]);
 
   const totalDebit = rows.reduce((s, r) => s + Number(r.debit || 0), 0);
   const totalCredit = rows.reduce((s, r) => s + Number(r.credit || 0), 0);
-  const finalBalance = rows.length > 0 ? rows[rows.length - 1].runningBalance : openingBalance;
+  const finalBalance = rows.length > 0 ? rows[rows.length - 1].runningBalance : shownOpening;
 
   // Invoices that were checked out (linked to a saved sale) can no longer be edited or deleted
   const lockedInvoiceIds = new Set(entries.filter((e) => e.type === "invoice" && e.saleId).map((e) => e.id));
@@ -1090,6 +1099,14 @@ const Ledger = () => {
         description="Scan an IMEI or barcode to add it to the current bill. Every row saves on its own."
         actions={
           <>
+            <Segmented
+              value={view}
+              onChange={setView}
+              options={[
+                { value: "bill", label: "Current bill" },
+                { value: "sheet", label: "Today's sheet" },
+              ]}
+            />
             <Button variant="secondary" icon={FileText} onClick={handleNewInvoice}>New invoice</Button>
             <Button variant="secondary" icon={Plus} onClick={() => setShowManual(true)}>Manual entry</Button>
             <Button variant="ghost" icon={Printer} onClick={handlePrint}>Print</Button>
@@ -1385,7 +1402,7 @@ const Ledger = () => {
                   <td colSpan={12} className="border border-line py-10 px-4 text-sm text-muted">
                     <div className="sticky left-4 w-[min(22rem,calc(100vw-4rem))] sm:w-auto sm:static sm:text-center">
                       <ScanLine size={24} className="sm:mx-auto mb-2 text-muted" aria-hidden="true" />
-                      <span className="block font-semibold text-ink">Nothing on this sheet yet</span>
+                      <span className="block font-semibold text-ink">{view === "bill" ? "No bill open" : "Nothing on this sheet yet"}</span>
                       <span className="block mt-1">Scan an IMEI or barcode above to start a bill, or add a manual entry.</span>
                     </div>
                   </td>
@@ -1417,6 +1434,12 @@ const Ledger = () => {
       </div>
 
       {/* ━━ Summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      {view === "bill" ? (
+        <div className="grid gap-3 sm:grid-cols-2 print:hidden">
+          <Stat label="This bill" value={`Rs ${fmt(totalDebit, 2)}`} tone="brand" hint={currentInvoiceId ? "Not checked out yet" : "Scan to start a bill"} />
+          <Stat label="Today's sheet" value="Finished bills, returns, payments" hint="Switch to Today's sheet above to see the whole day" onClick={() => setView("sheet")} />
+        </div>
+      ) : (
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 print:hidden">
         <div className="bg-surface border border-line rounded-2xl p-4 shadow-card">
           <div className="flex items-center justify-between gap-2">
@@ -1436,6 +1459,7 @@ const Ledger = () => {
         <Stat label="Total credit (Cr)" value={`Rs ${fmt(totalCredit, 2)}`} tone="paid" />
         <Stat label="Closing balance" value={`Rs ${fmt(finalBalance, 2)}`} tone="brand" />
       </div>
+      )}
 
       {/* ━━ Edit Opening Balance Modal ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
       <Modal

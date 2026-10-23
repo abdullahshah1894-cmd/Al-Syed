@@ -19,13 +19,9 @@ exports.getSales = async (req, res) => {
 exports.createSale = async (req, res) => {
   try {
     const body = req.body;
-    const now = new Date();
-    const billNumber =
-      body.billNumber ||
-      `INV-${now.toLocaleDateString("en-CA").replace(/-/g, "")}-${Date.now().toString().slice(-4)}`;
-
     const payload = {
-      bill_number: billNumber,
+      // Empty = the database numbers the bill (INV-YYYYMMDD-NNNN, Pakistan date)
+      bill_number: body.billNumber || null,
       customer_id: body.customerId || body.customer_id || body.customer || null,
       customer_name: body.customerName || body.customer_name || "Walk-in Customer",
       customer_phone: body.customerPhone || body.customer_phone || null,
