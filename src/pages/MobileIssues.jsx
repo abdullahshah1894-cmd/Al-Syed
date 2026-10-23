@@ -43,6 +43,8 @@ const formatDay = (d) => {
     : "—";
 };
 
+const FIELD_IDS = { customerName: "issue-customer", companyName: "issue-company", imei: "issue-imei", phoneIssue: "issue-problem" };
+
 // Inside the Warranties page the repairs list is shown without its own page frame and title
 const EmbeddedWrap = ({ children }) => <div className="space-y-4">{children}</div>;
 
@@ -62,6 +64,12 @@ const MobileIssues = ({ embedded = false }) => {
   const [imei, setImei] = useState("");
   const [phoneIssue, setPhoneIssue] = useState("");
   const [companyName, setCompanyName] = useState("");
+  const [errors, setErrors] = useState({}); // field -> message
+  const clearError = (field) => setErrors((prev) => (prev[field] ? { ...prev, [field]: "" } : prev));
+  const openAddModal = () => {
+    setErrors({});
+    setShowAddModal(true);
+  };
 
   // Stable, so the modal does not grab focus back from the inputs on every keystroke
   const closeAddModal = useCallback(() => {
@@ -75,12 +83,17 @@ const MobileIssues = ({ embedded = false }) => {
     const name = customerName.trim();
     const issueText = phoneIssue.trim();
     const company = companyName.trim();
-    if (!name || !imei || !issueText || !company) {
-      alert("Please fill all required fields.");
-      return;
-    }
-    if (!/^\d{15}$/.test(imei)) {
-      alert("IMEI must be exactly 15 digits.");
+    // Spaces only pass the browser's "required" check, so say exactly which box needs filling
+    const found = {};
+    if (!name) found.customerName = "Enter the customer's name.";
+    if (!company) found.companyName = "Enter the phone company, e.g. Samsung.";
+    if (!imei) found.imei = "Enter the phone's 15-digit IMEI.";
+    else if (!/^\d{15}$/.test(imei)) found.imei = `IMEI must be exactly 15 digits (${imei.length} typed).`;
+    if (!issueText) found.phoneIssue = "Write what is wrong with the phone.";
+    setErrors(found);
+    const firstBad = ["customerName", "companyName", "imei", "phoneIssue"].find((k) => found[k]);
+    if (firstBad) {
+      document.getElementById(FIELD_IDS[firstBad])?.focus();
       return;
     }
 
@@ -187,7 +200,7 @@ const MobileIssues = ({ embedded = false }) => {
     <Wrap>
       {embedded ? (
         <div className="flex justify-end">
-          <Button icon={Plus} onClick={() => setShowAddModal(true)}>
+          <Button icon={Plus} onClick={openAddModal}>
             New repair ticket
           </Button>
         </div>
@@ -196,7 +209,7 @@ const MobileIssues = ({ embedded = false }) => {
           title="Repair tickets"
           description="Phones customers left for repair. Change the status as the work moves on."
           actions={
-            <Button icon={Plus} onClick={() => setShowAddModal(true)}>
+            <Button icon={Plus} onClick={openAddModal}>
               New repair ticket
             </Button>
           }
@@ -309,30 +322,38 @@ const MobileIssues = ({ embedded = false }) => {
           </>
         }
       >
-        <form id="add-issue-form" onSubmit={handleAddIssue} className="space-y-4">
-          <Field label="Customer name *" htmlFor="issue-customer">
+        <form id="add-issue-form" onSubmit={handleAddIssue} noValidate className="space-y-4">
+          <Field label="Customer name *" htmlFor="issue-customer" error={errors.customerName}>
             <Input
               id="issue-customer"
               type="text"
               required
               value={customerName}
-              onChange={(e) => setCustomerName(e.target.value)}
+              onChange={(e) => {
+                setCustomerName(e.target.value);
+                clearError("customerName");
+              }}
+              aria-invalid={!!errors.customerName}
               placeholder="Customer's name"
             />
           </Field>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Phone company *" htmlFor="issue-company">
+            <Field label="Phone company *" htmlFor="issue-company" error={errors.companyName}>
               <Input
                 id="issue-company"
                 type="text"
                 required
                 value={companyName}
-                onChange={(e) => setCompanyName(e.target.value)}
+                onChange={(e) => {
+                  setCompanyName(e.target.value);
+                  clearError("companyName");
+                }}
+                aria-invalid={!!errors.companyName}
                 placeholder="e.g. Samsung"
               />
             </Field>
-            <Field label="IMEI *" htmlFor="issue-imei" hint={`${imei.length}/15 digits`}>
+            <Field label="IMEI *" htmlFor="issue-imei" hint={`${imei.length}/15 digits`} error={errors.imei}>
               <Input
                 id="issue-imei"
                 type="text"
@@ -342,19 +363,27 @@ const MobileIssues = ({ embedded = false }) => {
                 minLength={15}
                 pattern="\d{15}"
                 value={imei}
-                onChange={(e) => setImei(e.target.value.replace(/\D/g, "").slice(0, 15))}
+                onChange={(e) => {
+                  setImei(e.target.value.replace(/\D/g, "").slice(0, 15));
+                  clearError("imei");
+                }}
+                aria-invalid={!!errors.imei}
                 placeholder="15-digit IMEI"
                 className="font-mono"
               />
             </Field>
           </div>
 
-          <Field label="What is wrong with the phone? *" htmlFor="issue-problem">
+          <Field label="What is wrong with the phone? *" htmlFor="issue-problem" error={errors.phoneIssue}>
             <Textarea
               id="issue-problem"
               required
               value={phoneIssue}
-              onChange={(e) => setPhoneIssue(e.target.value)}
+              onChange={(e) => {
+                setPhoneIssue(e.target.value);
+                clearError("phoneIssue");
+              }}
+              aria-invalid={!!errors.phoneIssue}
               placeholder="e.g. Screen cracked, battery drains fast"
               rows={4}
             />

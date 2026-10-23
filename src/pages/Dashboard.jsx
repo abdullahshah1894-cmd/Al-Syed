@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useApp, getProductStock } from "../context/AppContext";
 import { localDate } from "../utils/dates";
-import { isSettlement, realSales, totalProfit, itemCount, udhaarAdded, saleProfit } from "../utils/sales";
+import { realSales, totalProfit, itemCount, udhaarAdded, udhaarCollected, saleProfit } from "../utils/sales";
 import { useAuth } from "../context/AuthContext";
 import { useNavigate } from "react-router-dom";
 import {
@@ -58,7 +58,7 @@ const dayStats = (records, expenses, day) => {
     expenses: spent,
     netProfit: grossProfit - spent,
     udhaarGiven: sumBy(bills, udhaarAdded),
-    udhaarCollected: sumBy(dayRecords.filter(isSettlement), (s) => s.paidAmount),
+    udhaarCollected: sumBy(dayRecords, udhaarCollected),
     returnsCount: returns.length,
     returnsAmount: sumBy(returns, (r) => r.amount),
   };
@@ -156,9 +156,12 @@ const Dashboard = () => {
 
   // Stock
   const liveProducts = useMemo(() => (products || []).filter((p) => !p.isDeleted), [products]);
-  const inventoryCost = sumBy(liveProducts, (p) => num(p.purchasePrice) * getProductStock(p));
-  const inventoryRetail = sumBy(liveProducts, (p) => num(p.salePrice) * getProductStock(p));
-  const inventoryUnits = sumBy(liveProducts, (p) => getProductStock(p));
+  // Units in the shop (a negative count is 0); a sale price of 0 means "not priced", not a Rs 0 sale
+  const unitsOf = (p) => Math.max(0, getProductStock(p) || 0);
+  const inventoryCost = sumBy(liveProducts, (p) => num(p.purchasePrice) * unitsOf(p));
+  const inventoryRetail = sumBy(liveProducts, (p) => (num(p.salePrice) > 0 ? num(p.salePrice) * unitsOf(p) : 0));
+  const inventoryUnits = sumBy(liveProducts, unitsOf);
+  const unpricedProducts = liveProducts.filter((p) => num(p.salePrice) <= 0 && unitsOf(p) > 0).length;
   const lowStockProducts = useMemo(
     () =>
       liveProducts
@@ -317,6 +320,14 @@ const Dashboard = () => {
                 {isAdmin ? `At cost · ${inventoryUnits.toLocaleString()} units` : `${liveProducts.length} products`}
                 <br />
                 Retail {fmt(inventoryRetail)}
+                {unpricedProducts > 0 && (
+                  <>
+                    <br />
+                    <span className="text-saffron-700">
+                      {unpricedProducts} product{unpricedProducts === 1 ? " has" : "s have"} no sale price
+                    </span>
+                  </>
+                )}
               </>
             }
           />

@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState } from "react";
+/* eslint-disable react-refresh/only-export-components -- the provider, its hook and shared helpers live together on purpose */
+import { createContext, useContext, useState } from "react";
 import { api, TOKEN_KEY, USER_KEY, setSessionToken } from "../services/api";
 
 const AuthContext = createContext();
@@ -44,6 +45,8 @@ export const AuthProvider = ({ children }) => {
     try {
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(USER_KEY);
+      // An unfinished POS cart must not carry over to the next person who logs in
+      sessionStorage.removeItem("pos-draft-v1");
     } catch {
       // nothing stored
     }

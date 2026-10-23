@@ -3,6 +3,13 @@ const { fetchAll } = require("../lib/fetchAll");
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SUPPLIER_FIELDS = ["name", "phone", "company", "address", "notes", "opening_balance"];
+// Accept openingBalance (camelCase) as well as opening_balance
+const pickFields = (body) => {
+  const payload = {};
+  SUPPLIER_FIELDS.forEach((k) => { if (body[k] !== undefined) payload[k] = body[k]; });
+  if (payload.opening_balance === undefined && body.openingBalance !== undefined) payload.opening_balance = body.openingBalance;
+  return payload;
+};
 
 // What the shop owes a supplier: opening balance + purchases - everything paid
 const withBalances = (suppliers, txs) =>
@@ -39,8 +46,7 @@ exports.getSuppliers = async (req, res) => {
 exports.createSupplier = async (req, res) => {
   try {
     if (!String(req.body.name || "").trim()) return res.status(400).json({ error: "Supplier name is required." });
-    const payload = {};
-    SUPPLIER_FIELDS.forEach((k) => { if (req.body[k] !== undefined) payload[k] = req.body[k]; });
+    const payload = pickFields(req.body);
     payload.name = String(payload.name).trim();
     payload.opening_balance = Number(payload.opening_balance) || 0;
     const { data, error } = await supabase.from("suppliers").insert([payload]).select().single();
@@ -54,8 +60,7 @@ exports.createSupplier = async (req, res) => {
 exports.updateSupplier = async (req, res) => {
   try {
     if (!UUID_REGEX.test(req.params.id)) return res.status(400).json({ error: "Invalid supplier id" });
-    const payload = { updated_at: new Date().toISOString() };
-    SUPPLIER_FIELDS.forEach((k) => { if (req.body[k] !== undefined) payload[k] = req.body[k]; });
+    const payload = { updated_at: new Date().toISOString(), ...pickFields(req.body) };
     if (payload.opening_balance !== undefined) payload.opening_balance = Number(payload.opening_balance) || 0;
     if (payload.name !== undefined && !String(payload.name).trim()) return res.status(400).json({ error: "Supplier name is required." });
     const { data, error } = await supabase.from("suppliers").update(payload).eq("id", req.params.id).select().single();

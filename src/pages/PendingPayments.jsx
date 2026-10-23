@@ -1,10 +1,10 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useApp, SELLERS } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
 import { useShareImage } from "../components/useShareImage";
 import { printElement } from "../services/printReceipt";
-import { isSettlement, itemImeis, saleBelongsTo, udhaarAdded as saleUdhaar } from "../utils/sales";
+import { isSettlement, itemImeis, saleBelongsTo, udhaarAdded as saleUdhaar, udhaarCollected } from "../utils/sales";
 import {
   Clock,
   CheckCircle2,
@@ -74,13 +74,14 @@ const formatDateWithDay = (dateStr) => {
   const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   const dayName = dayNames[d.getDay()];
 
+  // dd/mm/yyyy, the way the shop writes dates
   const dateFormatted = d.toLocaleDateString("en-GB", {
     day: "2-digit",
-    month: "short",
+    month: "2-digit",
     year: "numeric",
   });
 
-  const timeFormatted = d.toLocaleTimeString([], {
+  const timeFormatted = d.toLocaleTimeString("en-GB", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: true,
@@ -114,6 +115,42 @@ const lineReturnInfo = (item) => {
   };
 };
 
+// What a return took off the customer's balance. New records keep it as accountReduced (dueReduced is
+// how much the bill's due went down); older records only have dueReduced, which meant the same thing.
+const returnAccountPart = (ret) =>
+  Number(ret?.accountReduced !== undefined && ret?.accountReduced !== null ? ret.accountReduced : ret?.dueReduced || 0);
+
+// Letters / digits only, lower case: "0300-123 4567" -> "03001234567"
+const alnum = (v) => String(v || "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
+// Totals of a ledger. billed = bills as they were made, returned = refunds on returns,
+// paidAtSale = what was paid on the bills when they were made, received = Udhaar payments (receipts
+// plus money paid above a bill, the same rule as every report), cashBack = refunds given in cash.
+// billed - returned - paidAtSale - received + cashBack is the balance (before any old record / bill edit).
+const ledgerTotals = (txs) => {
+  const t = (txs || []).reduce(
+    (acc, tx) => {
+      if (tx.isReturnEntry) {
+        acc.cashBack += tx.cashBack;
+        acc.returned += tx.returnAmount;
+      } else if (tx.isPayment) {
+        acc.received += tx.paymentReceived;
+        acc.payments += 1;
+      } else {
+        acc.billed += tx.originalTotal;
+        acc.paidAtSale += tx.paidAtSale;
+        acc.received += tx.oldBalancePaid;
+        acc.bills += 1;
+      }
+      return acc;
+    },
+    { billed: 0, returned: 0, paidAtSale: 0, received: 0, cashBack: 0, bills: 0, payments: 0 }
+  );
+  // Money the customer has paid in all, after the cash given back on returns
+  t.totalPaid = t.paidAtSale + t.received - t.cashBack;
+  return t;
+};
+
 const PendingPayments = () => {
   const {
     customers: ctxCustomers,
@@ -132,8 +169,15 @@ const PendingPayments = () => {
   // Receipt / statement image preview with WhatsApp / Share to… / Copy / Download
   const [openShare, shareDialog] = useShareImage();
 
-  const customers = useMemo(() => allCustomers || ctxCustomers || [], [allCustomers, ctxCustomers]);
+  // The account list follows the header seller filter like every other page (ctxCustomers is already
+  // filtered). A customer's khata always uses all of their records, so its balance matches the account.
+  const everyCustomer = useMemo(() => allCustomers || ctxCustomers || [], [allCustomers, ctxCustomers]);
+  const customers = useMemo(() => ctxCustomers || everyCustomer, [ctxCustomers, everyCustomer]);
   const sales = useMemo(() => allSales || ctxSales || [], [allSales, ctxSales]);
+  // Records of the header seller (all records when no seller is picked there)
+  const headerSales = useMemo(() => ctxSales || sales, [ctxSales, sales]);
+  const headerSellerOn = !!activeSeller && activeSeller !== "All Sellers" && activeSeller !== "All";
+  const findCustomer = (id) => everyCustomer.find((c) => c.id === id) || null;
   const [searchParams] = useSearchParams();
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -143,14 +187,16 @@ const PendingPayments = () => {
   const [paymentAmountInput, setPaymentAmountInput] = useState("");
   const [paymentSeller, setPaymentSeller] = useState("");
   const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
+  // Set at once (state updates only land on the next render), so a fast double / triple click saves once
+  const paymentLockRef = useRef(false);
   const [historyCust, setHistoryCust] = useState(null);
   const [paymentReceipt, setPaymentReceipt] = useState(null);
   // Only the id is kept: the statement always shows the customer's latest balance
   const [statementCustId, setStatementCustId] = useState(null);
-  const statementCustomer = statementCustId ? customers.find((c) => c.id === statementCustId) || null : null;
+  const statementCustomer = statementCustId ? findCustomer(statementCustId) : null;
   // The customer in the payment modal, read fresh so the outstanding amount is current
   const payCust = selectedCustForPayment
-    ? customers.find((c) => c.id === selectedCustForPayment.id) || selectedCustForPayment
+    ? findCustomer(selectedCustForPayment.id) || selectedCustForPayment
     : null;
 
   // Short status message at the bottom of the screen (returns, account changes)
@@ -218,67 +264,67 @@ const PendingPayments = () => {
   }, [customers, sales]);
 
   // Check if a customer record is associated with a specific seller (exact name match only)
-  const isCustomerOfSeller = (c, seller) => {
-    if (!seller || seller === "All" || seller === "All Sellers") return true;
-    return customerSellerMap.get(c.id) === seller.trim().toLowerCase();
-  };
+  const isCustomerOfSeller = useCallback(
+    (c, seller) => {
+      if (!seller || seller === "All" || seller === "All Sellers") return true;
+      return customerSellerMap.get(c.id) === seller.trim().toLowerCase();
+    },
+    [customerSellerMap]
+  );
+
+  // A search needs at least one letter or digit: "-" or "." alone would match almost everyone
+  const activeQuery = /[\p{L}\p{N}]/u.test(searchTerm) ? searchTerm.trim().toLowerCase() : "";
 
   // Comprehensive customer search matcher
-  const matchesSearch = (c, query) => {
-    if (!query) return true;
-    const q = query.trim().toLowerCase();
+  const matchesSearch = useCallback(
+    (c, q) => {
+      if (!q) return true;
 
-    // Customer Name
-    if ((c.name || "").toLowerCase().includes(q)) return true;
+      // Customer Name
+      if ((c.name || "").toLowerCase().includes(q)) return true;
 
-    // Phone (matches partial digits; "-" alone must not match every customer)
-    const qPhone = q.replace(/\s|-/g, "");
-    if (qPhone && (c.phone || "").replace(/\s|-/g, "").includes(qPhone)) return true;
+      // Phone / CNIC: digits only on both sides ("0300-123" finds "0300 1234567"); an empty number never matches
+      const qKey = alnum(q);
+      if (qKey && alnum(c.phone) && alnum(c.phone).includes(qKey)) return true;
+      if (qKey && alnum(c.cnic) && alnum(c.cnic).includes(qKey)) return true;
 
-    // CNIC
-    if ((c.cnic || "").includes(q)) return true;
+      // Address
+      if ((c.address || "").toLowerCase().includes(q)) return true;
 
-    // Address
-    if ((c.address || "").toLowerCase().includes(q)) return true;
+      // Seller Name
+      if ((c.sellerName || "").toLowerCase().includes(q)) return true;
 
-    // Seller Name
-    if ((c.sellerName || "").toLowerCase().includes(q)) return true;
-
-    // Matching invoice number, item name, or note
-    const hasMatchingSale = sales.some((s) => {
-      if (!saleBelongsTo(s, c)) return false;
-
-      if ((s.billNumber || "").toLowerCase().includes(q)) return true;
-      if ((s.notes || "").toLowerCase().includes(q)) return true;
-      return (s.items || []).some((it) => itemSearchText(it).includes(q));
-    });
-
-    return hasMatchingSale;
-  };
+      // Matching invoice number, item name, or note
+      return sales.some((s) => {
+        if (!saleBelongsTo(s, c)) return false;
+        if ((s.billNumber || "").toLowerCase().includes(q)) return true;
+        if ((s.notes || "").toLowerCase().includes(q)) return true;
+        return (s.items || []).some((it) => itemSearchText(it).includes(q));
+      });
+    },
+    [sales]
+  );
 
   // Filtered customer list
-  const filteredCustomers = useMemo(() => {
-    const query = searchTerm.trim().toLowerCase();
+  const filteredCustomers = useMemo(
+    () =>
+      customers.filter((c) => {
+        // 1. Seller filter
+        if (!isCustomerOfSeller(c, selectedSeller)) return false;
 
-    return customers.filter((c) => {
-      // 1. Seller filter
-      if (!isCustomerOfSeller(c, selectedSeller)) return false;
+        // 2. Search match
+        if (!matchesSearch(c, activeQuery)) return false;
 
-      // 2. Search match
-      if (!matchesSearch(c, query)) return false;
+        // 3. Status filter: a search always shows the matching customer, even with a 0 balance
+        if (activeQuery) return true;
 
-      // 3. Status filter:
-      // If user typed a search query, ALWAYS show the matching customer even if balance is 0!
-      if (query) return true;
+        // If user specifically filtered for "pending", only show outstanding accounts
+        if (viewFilter === "pending") return Number(c.totalPending || 0) > 0;
 
-      // If user specifically filtered for "pending", only show outstanding accounts
-      if (viewFilter === "pending") {
-        return Number(c.totalPending || 0) > 0;
-      }
-
-      return true;
-    });
-  }, [customers, sales, searchTerm, selectedSeller, viewFilter, customerSellerMap]);
+        return true;
+      }),
+    [customers, activeQuery, selectedSeller, viewFilter, isCustomerOfSeller, matchesSearch]
+  );
 
   // Dynamic Statistics based on current seller selection
   const stats = useMemo(() => {
@@ -292,16 +338,17 @@ const PendingPayments = () => {
 
     const totalPendingAmount = targetCustomers.reduce((sum, c) => sum + (Number(c.totalPending) || 0), 0);
     const pendingCount = targetCustomers.filter((c) => Number(c.totalPending) > 0).length;
-    // Udhaar money collected: settlement receipts plus the upfront part of sales that left a balance
-    const totalCollected = sales.reduce((sum, s) => {
-      if (!isSettlement(s) && !(Number(s.dueAmount) > 0)) return sum;
-      if (!targetCustomers.some((c) => saleBelongsTo(s, c))) return sum;
-      return sum + (Number(s.paidAmount) || 0);
+    // Udhaar money collected (same rule as every report: receipts plus overpayment on a sale),
+    // only records of the header seller when one is picked there
+    const totalCollected = headerSales.reduce((sum, s) => {
+      const got = udhaarCollected(s);
+      if (!got || !targetCustomers.some((c) => saleBelongsTo(s, c))) return sum;
+      return sum + got;
     }, 0);
     const allCount = targetCustomers.length;
 
     return { totalPendingAmount, pendingCount, totalCollected, allCount };
-  }, [customers, sales, selectedSeller, customerSellerMap]);
+  }, [customers, headerSales, selectedSeller, isCustomerOfSeller]);
 
   // Retrieve and calculate complete chronological ledger for a given customer
   const getCustomerTransactions = (cust) => {
@@ -329,11 +376,13 @@ const PendingPayments = () => {
 
     // Same rules as the server: a sale adds its due amount, money paid above the bill goes against
     // the old balance, a settlement lowers it (never below 0), a return lowers it by what it took off
+    // the customer's account (accountReduced); the rest of the refund was cash back
     let runningBalance = 0;
     return events.map(({ record, ret, idx }) => {
       if (ret) {
         const dueReduced = Number(ret.dueReduced || 0);
-        runningBalance = Math.max(0, runningBalance - dueReduced);
+        const accountReduced = returnAccountPart(ret);
+        runningBalance = Math.max(0, runningBalance - accountReduced);
         const when = ret.at || ret.date || record.createdAt;
         return {
           id: `${record.id}-return-${ret.id || idx}`,
@@ -352,6 +401,7 @@ const PendingPayments = () => {
           returns: [],
           returnAmount: Number(ret.amount || 0),
           dueReduced,
+          accountReduced,
           cashBack: Number(ret.cashBack || 0),
           grandTotal: 0,
           paidAmount: 0,
@@ -365,8 +415,8 @@ const PendingPayments = () => {
       }
 
       const isPayment = isSettlement(record);
-      // Returns lowered the bill's due amount on the server; add back what they took off the
-      // account, so the bill shows the Udhaar it added when it was made (the return rows take it off)
+      // Returns lowered the bill's due amount on the server (by dueReduced); add that back, so the
+      // bill shows the Udhaar it added when it was made (the return rows then take off their part)
       const returnedDue = (record.returns || []).reduce((sum, r) => sum + Number(r.dueReduced || 0), 0);
       const udhaarAdded = isPayment ? 0 : saleUdhaar(record) + returnedDue;
       const isCredit = !isPayment && udhaarAdded > 0;
@@ -375,6 +425,8 @@ const PendingPayments = () => {
       // grandTotal / paidAmount are the bill as it is now (after returns)
       const isReturned = !isPayment && record.paymentStatus === "returned";
       const returnedTotal = (record.returns || []).reduce((sum, r) => sum + Number(r.amount || 0), 0);
+      // The bill as it was made: returns lowered the total, and cash back lowered what counts as paid
+      const returnedCash = (record.returns || []).reduce((sum, r) => sum + Number(r.cashBack || 0), 0);
 
       const grandTotal = Number(record.grandTotal || 0);
       const paidAmount = Number(record.paidAmount || 0);
@@ -387,8 +439,14 @@ const PendingPayments = () => {
         runningBalance = Math.max(0, runningBalance - paymentReceived);
       } else {
         oldBalancePaid = Math.max(0, paidAmount - grandTotal);
-        // upfront paid at time of sale (a cash sale is paid in full)
-        paymentReceived = isCredit || oldBalancePaid > 0 ? paidAmount : grandTotal;
+        // Paid at the time of sale, before any cash back. On an Udhaar bill that is the bill as made minus
+        // the Udhaar it added (the stored paid amount can be clipped at 0 by a cash back); a cash sale was
+        // paid in full, a sale paid above its total also paid that extra
+        paymentReceived = isCredit
+          ? Math.max(0, grandTotal + returnedTotal - udhaarAdded)
+          : oldBalancePaid > 0
+          ? paidAmount + returnedCash
+          : grandTotal + returnedTotal;
         runningBalance = Math.max(0, runningBalance + udhaarAdded - oldBalancePaid);
       }
 
@@ -403,6 +461,9 @@ const PendingPayments = () => {
         isCash,
         isReturned,
         returnedTotal,
+        originalTotal: grandTotal + returnedTotal,
+        // The part of the bill paid at the sale (money above the bill is in oldBalancePaid)
+        paidAtSale: isPayment ? 0 : isCredit ? paymentReceived : grandTotal + returnedTotal,
         paymentReceived,
         udhaarAdded,
         oldBalancePaid,
@@ -425,9 +486,8 @@ const PendingPayments = () => {
       // Toggle back to All Sellers
       setSelectedSeller("All");
     } else {
+      // The "Owes Udhaar" / "All accounts" choice stays as it is
       setSelectedSeller(sellerName);
-      // Switch view filter to "all" so that accounts with 0 balance (e.g. Mubashir) also appear immediately
-      setViewFilter("all");
     }
   };
 
@@ -448,9 +508,10 @@ const PendingPayments = () => {
 
   const handleSettlePayment = async (e) => {
     e.preventDefault();
-    if (isSubmittingPayment) return;
-    if (!selectedCustForPayment || !paymentAmountInput || Number(paymentAmountInput) <= 0) return;
+    if (paymentLockRef.current || isSubmittingPayment) return;
+    if (!selectedCustForPayment || !paymentAmountInput || !(Number(paymentAmountInput) > 0)) return;
 
+    paymentLockRef.current = true;
     setIsSubmittingPayment(true);
     try {
       const receipt = await payPendingAmount(selectedCustForPayment.id, Number(paymentAmountInput), paymentSeller);
@@ -462,6 +523,7 @@ const PendingPayments = () => {
         setPaymentAmountInput("");
       }
     } finally {
+      paymentLockRef.current = false;
       setIsSubmittingPayment(false);
     }
   };
@@ -472,8 +534,12 @@ const PendingPayments = () => {
     const shopPhone = shopSettings.phone || shopSettings.shopPhone || "";
     const currency = shopSettings.currencySymbol || "Rs.";
     const dateStr = new Date(receipt.createdAt || Date.now()).toLocaleDateString("en-GB");
-    const timeStr = new Date(receipt.createdAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const cust = customers.find((c) => c.id === receipt.customerId || c.id === receipt.customer);
+    const timeStr = new Date(receipt.createdAt || Date.now()).toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+    const cust = findCustomer(receipt.customerId || receipt.customer);
 
     let text = `🧾 *${shopName}*\n`;
     if (shopPhone) text += `📞 Phone: ${shopPhone}\n`;
@@ -505,6 +571,7 @@ const PendingPayments = () => {
     const currency = shopSettings.currencySymbol || "Rs.";
     const dateStr = new Date().toLocaleDateString("en-GB");
     const custTx = getCustomerTransactions(cust);
+    const totals = ledgerTotals(custTx);
 
     let text = `📋 *${shopName}*\n`;
     if (shopPhone) text += `📞 Phone: ${shopPhone}\n`;
@@ -515,8 +582,10 @@ const PendingPayments = () => {
     if (cust.phone) text += `*Phone:* ${cust.phone}\n`;
     text += `*Date:* ${dateStr}\n`;
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
-    text += `*Total Purchases:* ${currency} ${Number(cust.totalPurchases || 0).toLocaleString()}\n`;
-    text += `*Total Payments:* ${currency} ${Number(cust.totalPaid || 0).toLocaleString()}\n`;
+    text += `*Total Purchases (after returns):* ${currency} ${Number(cust.totalPurchases || 0).toLocaleString()}\n`;
+    text += `*Paid at sale:* ${currency} ${totals.paidAtSale.toLocaleString()}\n`;
+    text += `*Payments received:* ${currency} ${totals.received.toLocaleString()}\n`;
+    if (totals.cashBack > 0) text += `*Cash back on returns:* ${currency} ${totals.cashBack.toLocaleString()}\n`;
     text += `*⚠️ OUTSTANDING UDHAAR:* ${currency} ${Number(cust.totalPending || 0).toLocaleString()}\n`;
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
     text += `*Recent Transactions (Last 5):*\n`;
@@ -525,7 +594,9 @@ const PendingPayments = () => {
     recent.forEach((tx) => {
       const d = tx.dateInfo ? `${tx.dateInfo.day}, ${tx.dateInfo.date}` : "";
       if (tx.isReturnEntry) {
-        text += `• ${d} | Return on Bill #${tx.billNumber}: -${currency} ${tx.returnAmount.toLocaleString()} (Bal: ${currency} ${tx.runningBalance.toLocaleString()})\n`;
+        const parts = [`Udhaar -${currency} ${tx.accountReduced.toLocaleString()}`];
+        if (tx.cashBack > 0) parts.push(`cash back ${currency} ${tx.cashBack.toLocaleString()}`);
+        text += `• ${d} | Return on Bill #${tx.billNumber}: ${currency} ${tx.returnAmount.toLocaleString()} (${parts.join(", ")}) (Bal: ${currency} ${tx.runningBalance.toLocaleString()})\n`;
       } else if (tx.isPayment) {
         text += `• ${d} | Payment: +${currency} ${tx.paymentReceived?.toLocaleString()} (Bal: ${currency} ${tx.runningBalance?.toLocaleString()})\n`;
       } else {
@@ -534,7 +605,7 @@ const PendingPayments = () => {
           : tx.returnedTotal > 0
           ? ` - Returned ${currency} ${tx.returnedTotal.toLocaleString()}`
           : "";
-        text += `• ${d} | Bill #${tx.billNumber}: ${currency} ${tx.grandTotal?.toLocaleString()}${returnedTag} (Bal: ${currency} ${tx.runningBalance?.toLocaleString()})\n`;
+        text += `• ${d} | Bill #${tx.billNumber}: ${currency} ${tx.originalTotal?.toLocaleString()}${returnedTag} (Bal: ${currency} ${tx.runningBalance?.toLocaleString()})\n`;
       }
     });
 
@@ -550,7 +621,7 @@ const PendingPayments = () => {
   // Share the payment receipt as an image (preview, then WhatsApp / any app / copy / download)
   const handleWhatsAppShare = () => {
     if (!paymentReceipt) return;
-    const cust = customers.find((c) => c.id === paymentReceipt.customerId || c.id === paymentReceipt.customer);
+    const cust = findCustomer(paymentReceipt.customerId || paymentReceipt.customer);
     openShare({
       element: document.getElementById("receipt-content"),
       fileName: pngName(`Receipt_${paymentReceipt.billNumber || "PAY"}`),
@@ -659,8 +730,40 @@ const PendingPayments = () => {
     (returnInfo.isPhone || Number.isInteger(Number(returnQty))) &&
     returnCount >= 1 &&
     returnCount <= returnInfo.remaining;
-  const returnEstimate = returnUnitPrice * returnCount;
-  const returnDuePart = returnSale ? Math.min(Math.max(0, Number(returnSale.dueAmount || 0)), returnEstimate) : 0;
+  // Same as the server: the bill discount / tax is shared over its lines (bill as made / lines value)
+  const returnRatio = (() => {
+    if (!returnSale) return 1;
+    const lines = (returnSale.items || []).reduce(
+      (sum, i) =>
+        sum +
+        (Number(i.subtotal) ||
+          Number(i.unitSalePrice || i.unitPrice || i.price || 0) * Number(i.quantity || i.qty || 1)),
+      0
+    );
+    const made =
+      Number(returnSale.grandTotal || 0) +
+      (returnSale.returns || []).reduce((sum, r) => sum + Number(r.amount || 0), 0);
+    return lines > 0 ? made / lines : 1;
+  })();
+  const returnEstimate = returnSale
+    ? Math.min(Number(returnSale.grandTotal || 0), Math.round(returnUnitPrice * returnCount * returnRatio * 100) / 100)
+    : 0;
+  // Split like the server: off the Udhaar only what this bill still owes AND the customer still owes
+  // (a later payment may have cleared it already); the rest is cash back. Walk-in bills: all cash back.
+  const returnCustId = returnSale ? returnSale.customerId || returnSale.customer : null;
+  const returnCust = returnCustId ? findCustomer(returnCustId) : null;
+  const returnBillDue = returnSale ? Math.max(0, Number(returnSale.dueAmount || 0)) : 0;
+  const returnDuePart = returnSale
+    ? Math.max(
+        0,
+        Math.min(
+          returnBillDue,
+          returnCustId && returnCust ? Number(returnCust.totalPending || 0) : returnBillDue,
+          returnEstimate
+        )
+      )
+    : 0;
+  const returnCashPart = Math.max(0, returnEstimate - returnDuePart);
 
   const openReturnModal = (sale, index) => {
     if (!isAdmin) return;
@@ -692,8 +795,8 @@ const PendingPayments = () => {
         const last = (updated.returns || [])[(updated.returns || []).length - 1];
         const cur = shopSettings.currencySymbol || "Rs.";
         const details = last
-          ? ` ${cur} ${Number(last.amount || 0).toLocaleString()} refunded (Udhaar reduced ${cur} ${Number(
-              last.dueReduced || 0
+          ? ` ${cur} ${Number(last.amount || 0).toLocaleString()} refunded (off the Udhaar ${cur} ${returnAccountPart(
+              last
             ).toLocaleString()}, cash back ${cur} ${Number(last.cashBack || 0).toLocaleString()}).`
           : "";
         setReturnTarget(null);
@@ -705,17 +808,17 @@ const PendingPayments = () => {
   };
 
   // Find active customer in history
-  const activeHistoryCust = historyCust
-    ? customers.find((c) => c.id === historyCust.id) || historyCust
-    : null;
+  const activeHistoryCust = historyCust ? findCustomer(historyCust.id) || historyCust : null;
 
   // Process transactions for active history customer
   const activeTransactions = activeHistoryCust ? getCustomerTransactions(activeHistoryCust) : [];
   const activeGap = activeHistoryCust ? ledgerGap(activeHistoryCust, activeTransactions) : null;
   const statementTransactions = statementCustomer ? getCustomerTransactions(statementCustomer) : [];
   const statementGap = statementCustomer ? ledgerGap(statementCustomer, statementTransactions) : null;
-  const billCount = activeTransactions.filter((t) => !t.isPayment && !t.isReturnEntry).length;
-  const paymentCount = activeTransactions.filter((t) => t.isPayment).length;
+  const activeTotals = ledgerTotals(activeTransactions);
+  const statementTotals = ledgerTotals(statementTransactions);
+  const billCount = activeTotals.bills;
+  const paymentCount = activeTotals.payments;
 
   // Recomputed every render (the ledger is rebuilt from the latest sales each time)
   const filteredHistoryTransactions = (() => {
@@ -789,7 +892,13 @@ const PendingPayments = () => {
           label="Udhaar to collect"
           value={`${cur} ${stats.totalPendingAmount.toLocaleString()}`}
           tone={stats.totalPendingAmount > 0 ? "khata" : "paid"}
-          hint={selectedSeller !== "All" ? `${selectedSeller}'s accounts` : "All sellers"}
+          hint={
+            selectedSeller !== "All"
+              ? `${selectedSeller}'s accounts`
+              : headerSellerOn
+              ? `Accounts of ${activeSeller} (seller picked at the top)`
+              : "All sellers"
+          }
           icon={Clock}
         />
         <Stat
@@ -871,7 +980,9 @@ const PendingPayments = () => {
             {searchTerm.trim() && (
               <span className="inline-flex items-center gap-1 rounded-full bg-sunken text-ink-soft pl-2.5 pr-1 py-0.5 font-semibold max-w-full">
                 <Search size={12} aria-hidden="true" />
-                <span className="truncate">Search: "{searchTerm}"</span>
+                <span className="truncate">
+                  Search: "{searchTerm}"{!activeQuery && " (type a letter or number to search)"}
+                </span>
                 <button
                   type="button"
                   onClick={() => setSearchTerm("")}
@@ -900,6 +1011,7 @@ const PendingPayments = () => {
             // Pre-fetch last transaction info for preview
             const custTx = getCustomerTransactions(cust);
             const lastTx = custTx.length > 0 ? custTx[custTx.length - 1] : null;
+            const custTotals = ledgerTotals(custTx);
             const owes = Number(cust.totalPending || 0);
 
             return (
@@ -946,7 +1058,7 @@ const PendingPayments = () => {
                   <div>
                     <div className="text-muted">Total paid</div>
                     <div className="font-semibold text-paid-700 text-sm">
-                      {cur} {Number(cust.totalPaid || 0).toLocaleString()}
+                      {cur} {custTotals.totalPaid.toLocaleString()}
                     </div>
                   </div>
                 </div>
@@ -1042,9 +1154,9 @@ const PendingPayments = () => {
         <Card padded={false}>
           <EmptyState
             icon={searchTerm.trim() || selectedSeller !== "All" ? Search : CheckCircle2}
-            title={searchTerm.trim() || selectedSeller !== "All" || viewFilter !== "pending" ? "No customers found" : "Nobody owes Udhaar"}
+            title={activeQuery || selectedSeller !== "All" || viewFilter !== "pending" ? "No customers found" : "Nobody owes Udhaar"}
             description={
-              searchTerm.trim()
+              activeQuery
                 ? `No customer matches "${searchTerm}". Check the spelling or reset the filters.`
                 : selectedSeller !== "All"
                 ? `No customer accounts under ${selectedSeller}.`
@@ -1141,9 +1253,11 @@ const PendingPayments = () => {
               />
               <Stat
                 label="Total paid"
-                value={`${cur} ${Number(activeHistoryCust.totalPaid || 0).toLocaleString()}`}
+                value={`${cur} ${activeTotals.totalPaid.toLocaleString()}`}
                 tone="paid"
-                hint={`${paymentCount} ${paymentCount === 1 ? "payment" : "payments"}`}
+                hint={`${cur} ${activeTotals.paidAtSale.toLocaleString()} paid at sale + ${cur} ${activeTotals.received.toLocaleString()} in ${paymentCount} ${paymentCount === 1 ? "payment" : "payments"}${
+                  activeTotals.cashBack > 0 ? ` − ${cur} ${activeTotals.cashBack.toLocaleString()} cash back` : ""
+                }`}
               />
               <Stat
                 label="Udhaar balance"
@@ -1208,9 +1322,7 @@ const PendingPayments = () => {
                           -{cur} {tx.returnAmount.toLocaleString()}
                         </div>
                         <div className="text-xs text-muted space-x-1.5">
-                          {tx.dueReduced > 0 && (
-                            <span className="text-khata-700 font-semibold">Udhaar reduced -{cur} {tx.dueReduced.toLocaleString()}</span>
-                          )}
+                          <span className="text-khata-700 font-semibold">Off the Udhaar -{cur} {tx.accountReduced.toLocaleString()}</span>
                           {tx.cashBack > 0 && (
                             <span className="text-paid-700 font-semibold">Cash back {cur} {tx.cashBack.toLocaleString()}</span>
                           )}
@@ -1285,18 +1397,20 @@ const PendingPayments = () => {
                       >
                         {tx.isPayment
                           ? `+${cur} ${tx.paymentReceived.toLocaleString()}`
-                          : `${cur} ${tx.grandTotal.toLocaleString()}`}
+                          : `${cur} ${tx.originalTotal.toLocaleString()}`}
                       </div>
                       {!tx.isPayment && tx.returnedTotal > 0 && (
                         <div className="text-xs font-semibold text-saffron-700">
-                          {tx.isReturned ? "Bill fully returned" : "After returns"} (returned {cur}{" "}
-                          {tx.returnedTotal.toLocaleString()})
+                          {tx.isReturned
+                            ? `Bill fully returned (${cur} ${tx.returnedTotal.toLocaleString()})`
+                            : `Returned ${cur} ${tx.returnedTotal.toLocaleString()} · now ${cur} ${tx.grandTotal.toLocaleString()}`}
                         </div>
                       )}
                       <div className="text-xs text-muted space-x-1.5">
-                        {tx.isCredit && tx.paymentReceived > 0 && (
+                        {tx.isCredit && (
                           <span className="text-paid-700 font-semibold">
-                            Paid {cur} {tx.paymentReceived.toLocaleString()} · Udhaar +{cur} {tx.udhaarAdded.toLocaleString()}
+                            {tx.paymentReceived > 0 && `Paid at sale ${cur} ${tx.paymentReceived.toLocaleString()} · `}
+                            <span className="text-khata-700">Udhaar +{cur} {tx.udhaarAdded.toLocaleString()}</span>
                           </span>
                         )}
                         {tx.oldBalancePaid > 0 && (
@@ -1480,8 +1594,8 @@ const PendingPayments = () => {
                                 <div className="text-muted">{returnItemsText(r.items) || "Items returned"}</div>
                                 <div className="flex flex-wrap gap-3">
                                   <span>
-                                    Udhaar reduced{" "}
-                                    <strong className="text-khata-700">{cur} {Number(r.dueReduced || 0).toLocaleString()}</strong>
+                                    Off the Udhaar{" "}
+                                    <strong className="text-khata-700">{cur} {returnAccountPart(r).toLocaleString()}</strong>
                                   </span>
                                   <span>
                                     Cash back{" "}
@@ -1533,7 +1647,12 @@ const PendingPayments = () => {
               <Button variant="secondary" onClick={closePaymentModal} disabled={isSubmittingPayment}>
                 Cancel
               </Button>
-              <Button type="submit" form="udhaar-payment-form" variant="success" loading={isSubmittingPayment}>
+              <Button
+                type="submit"
+                form="udhaar-payment-form"
+                variant="success"
+                loading={isSubmittingPayment}
+              >
                 {isSubmittingPayment ? "Saving…" : "Save payment"}
               </Button>
             </>
@@ -1792,12 +1911,23 @@ const PendingPayments = () => {
                   </span>
                 </div>
                 {returnEstimate > 0 && (
-                  <p className="text-xs text-ink-soft">
-                    About {cur} {returnDuePart.toLocaleString()} comes off the Udhaar first
-                    {returnEstimate - returnDuePart > 0 &&
-                      `, ${cur} ${(returnEstimate - returnDuePart).toLocaleString()} cash back`}
-                    .
-                  </p>
+                  <div className="space-y-0.5 border-t border-saffron-200 pt-1.5">
+                    <div className="flex flex-wrap justify-between gap-2">
+                      <span className="text-ink-soft">Off the Udhaar</span>
+                      <strong className="text-khata-700">{cur} {returnDuePart.toLocaleString()}</strong>
+                    </div>
+                    <div className="flex flex-wrap justify-between gap-2">
+                      <span className="text-ink-soft">Cash back to the customer</span>
+                      <strong className="text-paid-700">{cur} {returnCashPart.toLocaleString()}</strong>
+                    </div>
+                    <p className="text-xs text-muted">
+                      {returnCustId || returnBillDue > 0
+                        ? `Only what this bill still owes (${cur} ${returnBillDue.toLocaleString()}) and the customer still owes (${cur} ${Number(
+                            returnCust?.totalPending || 0
+                          ).toLocaleString()}) comes off the Udhaar; the rest is given back in cash.`
+                        : "Walk-in bill: there is no Udhaar account, so the whole refund is cash back."}
+                    </p>
+                  </div>
                 )}
                 {Number(returnSale.discountAmount || 0) > 0 && (
                   <p className="text-xs text-ink-soft">
@@ -1841,7 +1971,8 @@ const PendingPayments = () => {
 
             <div className="flex-1 overflow-y-auto bg-sunken p-3 sm:p-4 custom-scrollbar print:overflow-visible print:bg-transparent print:p-0">
               <div className="overflow-x-auto rounded-xl border border-line bg-white custom-scrollbar print:overflow-visible print:rounded-none print:border-0">
-            <div id="statement-print-area" className="p-4 bg-white text-black print-target">
+            {/* A fixed-width slip: on a phone it scrolls sideways, and the shared picture keeps every column */}
+            <div id="statement-print-area" className="p-4 bg-white text-black print-target min-w-[34rem] print:min-w-0">
               {/* Header */}
               <div className="text-center border-b-2 border-black pb-3 mb-3">
                 <h2 className="text-2xl font-black uppercase tracking-tight">
@@ -1855,49 +1986,50 @@ const PendingPayments = () => {
               </div>
 
               {/* Customer Info */}
-              <div className="flex justify-between text-xs py-2 border-b border-dashed border-black">
-                <div>
+              <div className="flex justify-between gap-4 text-xs py-2 border-b border-dashed border-black">
+                <div className="min-w-0 break-words">
                   <p><span className="font-bold">Customer:</span> {statementCustomer.name}</p>
                   <p><span className="font-bold">Phone:</span> {statementCustomer.phone || "—"}</p>
                   {statementCustomer.address && <p><span className="font-bold">Address:</span> {statementCustomer.address}</p>}
                 </div>
-                <div className="text-right">
+                <div className="shrink-0 text-right">
                   <p><span className="font-bold">Date:</span> {new Date().toLocaleDateString("en-GB")}</p>
-                  <p><span className="font-bold">Time:</span> {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                  <p><span className="font-bold">Time:</span> {new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true })}</p>
                   <p><span className="font-bold">Status:</span> {statementCustomer.totalPending > 0 ? "OUTSTANDING" : "SETTLED"}</p>
                 </div>
               </div>
 
               {/* Transactions Table */}
               <div className="my-3">
-                <table className="w-full text-xs border-collapse">
+                <table className="w-full text-xs border-collapse [&_th]:px-1.5 [&_td]:px-1.5 [&_th:first-child]:pl-0 [&_td:first-child]:pl-0 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
                   <thead>
-                    <tr className="border-b-2 border-black text-left text-[11px] uppercase">
-                      <th className="py-1">Day / Date</th>
-                      <th className="py-1">Bill / Ref #</th>
+                    <tr className="border-b-2 border-black text-left text-[11px] uppercase align-bottom">
+                      <th className="py-1 whitespace-nowrap">Day / Date</th>
+                      <th className="py-1 whitespace-nowrap">Bill / Ref #</th>
                       <th className="py-1">Description / Items</th>
-                      <th className="py-1 text-right">Debit (+)</th>
-                      <th className="py-1 text-right">Credit (-)</th>
-                      <th className="py-1 text-right">Balance</th>
+                      <th className="py-1 text-right whitespace-nowrap">Udhaar (+)</th>
+                      <th className="py-1 text-right whitespace-nowrap">Paid / off (-)</th>
+                      <th className="py-1 text-right whitespace-nowrap">Balance</th>
                     </tr>
                   </thead>
                   <tbody>
                     {statementTransactions.map((tx) => (
-                      <tr key={tx.id} className="border-b border-slate-200 text-[11px]">
+                      <tr key={tx.id} className="border-b border-slate-200 text-[11px] align-top">
                         <td className="py-1.5 whitespace-nowrap">
                           <span className="font-bold block">{tx.dateInfo.day}</span>
                           <span className="text-[10px] text-slate-600">{tx.dateInfo.date}</span>
                         </td>
-                        <td className="py-1.5 font-mono font-bold text-[10px]">{tx.billNumber}</td>
+                        <td className="py-1.5 font-mono font-bold text-[10px] break-words">{tx.billNumber}</td>
                         <td className="py-1.5">
                           {tx.isReturnEntry ? (
                             <div>
                               <span className="font-semibold">
                                 Return: {returnItemsText(tx.items) || "items returned"} (Rs. {tx.returnAmount.toLocaleString()})
                               </span>
-                              {tx.cashBack > 0 && (
-                                <span className="text-[9px] block">Cash back Rs. {tx.cashBack.toLocaleString()}</span>
-                              )}
+                              <span className="text-[9px] block">
+                                Off the Udhaar Rs. {tx.accountReduced.toLocaleString()}
+                                {tx.cashBack > 0 && ` · Cash back Rs. ${tx.cashBack.toLocaleString()}`}
+                              </span>
                             </div>
                           ) : tx.isPayment ? (
                             <span className="font-semibold text-emerald-700">{tx.notes || "Udhaar Payment"}</span>
@@ -1911,6 +2043,14 @@ const PendingPayments = () => {
                                     return `${i.productName || i.name || "Item"} (x${r.qty}${tag})`;
                                   })
                                   .join(", ") || "Sale"}
+                              </span>
+                              <span className="text-[9px] block">
+                                Bill Rs. {tx.originalTotal.toLocaleString()}
+                                {tx.isCredit
+                                  ? ` · paid at sale Rs. ${tx.paymentReceived.toLocaleString()}`
+                                  : tx.oldBalancePaid > 0
+                                  ? ` · paid Rs. ${tx.paymentReceived.toLocaleString()}`
+                                  : " · paid in full"}
                               </span>
                               {(tx.isReturned || tx.returnedTotal > 0) && (
                                 <span className="text-[9px] font-bold block uppercase">
@@ -1926,13 +2066,13 @@ const PendingPayments = () => {
                             </div>
                           )}
                         </td>
-                        <td className="py-1.5 text-right font-semibold">
+                        <td className="py-1.5 text-right font-semibold whitespace-nowrap">
                           {tx.isCredit ? `Rs. ${tx.udhaarAdded.toLocaleString()}` : "—"}
                         </td>
-                        <td className="py-1.5 text-right font-semibold text-emerald-700">
+                        <td className="py-1.5 text-right font-semibold text-emerald-700 whitespace-nowrap">
                           {tx.isReturnEntry
-                            ? tx.dueReduced > 0
-                              ? `Rs. ${tx.dueReduced.toLocaleString()}`
+                            ? tx.accountReduced > 0
+                              ? `Rs. ${tx.accountReduced.toLocaleString()}`
                               : "—"
                             : tx.isPayment
                             ? `Rs. ${tx.paymentReceived.toLocaleString()}`
@@ -1940,7 +2080,7 @@ const PendingPayments = () => {
                             ? `Rs. ${tx.oldBalancePaid.toLocaleString()}`
                             : "—"}
                         </td>
-                        <td className="py-1.5 text-right font-black">
+                        <td className="py-1.5 text-right font-black whitespace-nowrap">
                           Rs. {tx.runningBalance.toLocaleString()}
                         </td>
                       </tr>
@@ -1951,15 +2091,37 @@ const PendingPayments = () => {
 
               {/* Totals */}
               <div className="border-t-2 border-black pt-2 space-y-1 text-xs">
-                <div className="flex justify-between">
-                  <span>Total Purchases / Bills:</span>
-                  <span className="font-bold">Rs. {Number(statementCustomer.totalPurchases || 0).toLocaleString()}</span>
+                <div className="flex justify-between gap-3">
+                  <span>Bills as sold ({statementTotals.bills}):</span>
+                  <span className="font-bold whitespace-nowrap">Rs. {statementTotals.billed.toLocaleString()}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>Total Payments Received:</span>
-                  <span className="font-bold text-emerald-700">Rs. {Number(statementCustomer.totalPaid || 0).toLocaleString()}</span>
+                {statementTotals.returned > 0 && (
+                  <div className="flex justify-between gap-3">
+                    <span>Items returned:</span>
+                    <span className="font-bold whitespace-nowrap">- Rs. {statementTotals.returned.toLocaleString()}</span>
+                  </div>
+                )}
+                <div className="flex justify-between gap-3">
+                  <span>Paid at sale (on the bills):</span>
+                  <span className="font-bold text-emerald-700 whitespace-nowrap">- Rs. {statementTotals.paidAtSale.toLocaleString()}</span>
                 </div>
-                <div className="flex justify-between text-base font-black border-t-2 border-black pt-2 mt-1">
+                <div className="flex justify-between gap-3">
+                  <span>
+                    Payments received ({statementTotals.payments} {statementTotals.payments === 1 ? "receipt" : "receipts"}):
+                  </span>
+                  <span className="font-bold text-emerald-700 whitespace-nowrap">- Rs. {statementTotals.received.toLocaleString()}</span>
+                </div>
+                {statementTotals.cashBack > 0 && (
+                  <div className="flex justify-between gap-3">
+                    <span>Cash given back on returns:</span>
+                    <span className="font-bold whitespace-nowrap">+ Rs. {statementTotals.cashBack.toLocaleString()}</span>
+                  </div>
+                )}
+                <div className="flex justify-between gap-3 text-[11px] text-slate-600">
+                  <span>Total paid (at sale + payments - cash back):</span>
+                  <span className="font-bold whitespace-nowrap">Rs. {statementTotals.totalPaid.toLocaleString()}</span>
+                </div>
+                <div className="flex flex-wrap justify-between gap-x-3 text-base font-black border-t-2 border-black pt-2 mt-1">
                   <span>CURRENT OUTSTANDING UDHAAR:</span>
                   <span className="text-red-600">Rs. {Number(statementCustomer.totalPending || 0).toLocaleString()}</span>
                 </div>
@@ -2050,8 +2212,8 @@ const PendingPayments = () => {
                 <div className="flex justify-between">
                   <span className="font-semibold">Date:</span>
                   <span>
-                    {new Date(paymentReceipt.createdAt).toLocaleDateString()}{" "}
-                    {new Date(paymentReceipt.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    {new Date(paymentReceipt.createdAt).toLocaleDateString("en-GB")}{" "}
+                    {new Date(paymentReceipt.createdAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true })}
                   </span>
                 </div>
                 <div className="flex justify-between mt-2">
@@ -2077,9 +2239,7 @@ const PendingPayments = () => {
 
               {/* Remaining Udhaar */}
               {(() => {
-                const currentCust = customers.find(
-                  (c) => c.id === paymentReceipt.customerId || c.id === paymentReceipt.customer
-                );
+                const currentCust = findCustomer(paymentReceipt.customerId || paymentReceipt.customer);
                 if (currentCust) {
                   return (
                     <div className="flex justify-between font-black text-sm pt-2 border-t-2 border-dashed border-black text-rose-600">

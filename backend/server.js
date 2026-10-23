@@ -38,6 +38,7 @@ const ADMIN_ONLY = [
   ["put", "/api/products/:id"],
   ["delete", "/api/products/:id"],
   ["post", "/api/products/:id/stock"],
+  ["get", "/api/sales/analytics"],
   ["put", "/api/sales/:id"],
   ["delete", "/api/sales/:id"],
   ["post", "/api/sales/:id/returns"],
@@ -46,6 +47,7 @@ const ADMIN_ONLY = [
   ["put", "/api/expenses/:id"],
   ["delete", "/api/expenses/:id"],
   ["delete", "/api/issues/:id"],
+  ["put", "/api/warranties/:imei/claims/:claimId"],
   ["post", "/api/ledger/opening"],
   ["put", "/api/settings"],
 ];

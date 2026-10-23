@@ -34,6 +34,17 @@ const ShareImageDialog = ({ target, onClose }) => {
     };
   }, [element, fileName]);
 
+  // Esc closes this dialog only (caught first, so a receipt dialog behind it stays open)
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onClose?.();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+
   const canShareFiles = !!(png && navigator.canShare && navigator.canShare({ files: [png.file] }));
   const waPhone = formatWAPhone(phone);
 
@@ -85,7 +96,7 @@ const ShareImageDialog = ({ target, onClose }) => {
 
   return (
     <div className="fixed inset-0 z-[80] bg-ink/40 backdrop-blur-[2px] flex items-center justify-center p-4 print:hidden">
-      <div className="bg-surface border border-line rounded-2xl w-full max-w-md shadow-2xl flex flex-col max-h-[92vh]">
+      <div role="dialog" aria-modal="true" aria-label={title} className="bg-surface border border-line rounded-2xl w-full max-w-md shadow-2xl flex flex-col max-h-[92vh]">
         <div className="flex items-center justify-between p-4 border-b border-line">
           <h2 className="text-base font-bold text-ink">{title}</h2>
           <button onClick={onClose} className="text-muted hover:text-ink" aria-label="Close">

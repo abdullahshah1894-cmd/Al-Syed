@@ -79,6 +79,14 @@ const Sidebar = ({ open = false, onClose }) => {
     onClose?.();
   }, [pathname, onClose]);
 
+  // Esc closes the phone drawer
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => e.key === "Escape" && onClose?.();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
   const handleLogout = () => {
     logout();
     navigate("/login", { replace: true });

@@ -250,6 +250,12 @@ BEGIN
 
   UPDATE sales
      SET items = v_items,
+         subtotal_amount = CASE WHEN COALESCE(v_sale.grand_total, 0) > 0
+                                THEN round(COALESCE(subtotal_amount, 0) * v_new_total / v_sale.grand_total, 2) ELSE 0 END,
+         tax_amount = CASE WHEN COALESCE(v_sale.grand_total, 0) > 0
+                           THEN round(COALESCE(tax_amount, 0) * v_new_total / v_sale.grand_total, 2) ELSE 0 END,
+         discount_amount = CASE WHEN COALESCE(v_sale.grand_total, 0) > 0
+                                THEN round(COALESCE(discount_amount, 0) * v_new_total / v_sale.grand_total, 2) ELSE 0 END,
          grand_total = v_new_total,
          due_amount = v_new_due,
          paid_amount = GREATEST(0, COALESCE(paid_amount, 0) - v_cash_back),
@@ -262,7 +268,7 @@ BEGIN
                                ELSE 'unpaid' END,
          returns = COALESCE(returns, '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
            'id', gen_random_uuid(), 'date', v_today, 'at', v_now, 'items', v_log, 'amount', v_refund,
-           'dueReduced', v_acct_red, 'cashBack', v_cash_back, 'note', p_note, 'by', p_by)),
+           'dueReduced', v_due_red, 'accountReduced', v_acct_red, 'cashBack', v_cash_back, 'note', p_note, 'by', p_by)),
          updated_at = v_now
    WHERE id = p_sale
    RETURNING * INTO v_sale;

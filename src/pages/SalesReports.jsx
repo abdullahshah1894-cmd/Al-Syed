@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useApp, SELLERS } from "../context/AppContext";
 import { localDate, isBetween } from "../utils/dates";
-import { isSettlement, realSales, saleProfit, totalProfit as sumProfit, udhaarAdded } from "../utils/sales";
+import { realSales, saleProfit, totalProfit as sumProfit, udhaarAdded, udhaarCollected, isUdhaarCollection } from "../utils/sales";
 import { BarChart3, TrendingUp, DollarSign, ShoppingBag, Award, PieChart, Clock, Wallet, HandCoins, Undo2 } from "lucide-react";
 import { Page, PageHeader, Card, CardHeader, Stat, Segmented, TableWrap, Th, Td, EmptyState } from "../components/ui";
 
@@ -62,7 +62,6 @@ const computeStats = (allSales, allExpenses, seller, range) => {
   const records = mine.filter((s) => isBetween(saleTime(s), range.from, range.to));
   // Real sales that still count (fully returned bills are not sales any more)
   const sales = realSales(records).filter((s) => s.paymentStatus !== "returned");
-  const settlements = records.filter(isSettlement);
   const returns = mine.flatMap((s) => (s.returns || []).filter((r) => inRange(returnDay(r), range)));
   const periodExpenses = (allExpenses || []).filter((e) => inRange(expenseDay(e), range));
   const expenses = sumBy(periodExpenses.filter((e) => matches(e.sellerName)), (e) => e.amount);
@@ -80,8 +79,8 @@ const computeStats = (allSales, allExpenses, seller, range) => {
     netProfit: grossProfit - expenses,
     items: sumBy(sales, netItems),
     udhaarGiven: sumBy(sales, udhaarAdded),
-    udhaarCollected: sumBy(settlements, (s) => s.paidAmount),
-    collections: settlements.length,
+    udhaarCollected: sumBy(records, udhaarCollected),
+    collections: records.filter(isUdhaarCollection).length,
     returnsCount: returns.length,
     returnsAmount: sumBy(returns, (r) => r.amount),
     avgBill: sales.length ? Math.round(revenue / sales.length) : 0,

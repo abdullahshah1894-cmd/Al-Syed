@@ -62,18 +62,26 @@ const request = async (url, options = {}) => {
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.message || err.error || res.statusText);
+    throw Object.assign(new Error(err.message || err.error || res.statusText), { status: res.status });
   }
   return await res.json();
 };
 
-// Reads: return null on failure so pages can still render
+// Reads: return null on failure so pages can still render. A dropped connection or a server
+// hiccup (5xx) is tried again twice, so one bad moment does not leave a list empty.
 const fetchJson = async (url, options = {}) => {
-  try {
-    return await request(url, options);
-  } catch (e) {
-    console.warn(`[API] ${options.method || "GET"} ${url} →`, e.message);
-    return null;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await request(url, options);
+    } catch (e) {
+      const retry = attempt < 2 && (!e.status || e.status >= 500) && !/session has expired/.test(e.message);
+      if (retry) {
+        await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+        continue;
+      }
+      console.warn(`[API] ${options.method || "GET"} ${url} →`, e.message);
+      return null;
+    }
   }
 };
 
@@ -115,6 +123,7 @@ export const api = {
   getWarranties: () => fetchJson(`${API_BASE}/warranties`),
   getWarrantyByImei: (imei) => fetchJson(`${API_BASE}/warranties/${imei}`),
   addWarrantyClaim: (imei, data) => send("POST", `${API_BASE}/warranties/${imei}/claims`, data),
+  updateWarrantyClaim: (imei, claimId, data) => send("PUT", `${API_BASE}/warranties/${imei}/claims/${claimId}`, data),
 
   // ── Auth ──────────────────────────────────────────
   login: (data) => send("POST", `${API_BASE}/auth/login`, data),

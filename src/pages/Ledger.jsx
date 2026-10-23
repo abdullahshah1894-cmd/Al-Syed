@@ -59,6 +59,44 @@ const fmtTimestamp = () => {
 // Rows get their database id up front, so the row on screen and the row in Supabase are the same record
 const uid = () => crypto.randomUUID();
 
+// This till's own id, kept in the browser. Each till only re-opens and shows its own open bill,
+// so two tills never add to one invoice. Rows from older builds have no device id and stay visible everywhere.
+const DEVICE_KEY = "ledger.deviceId";
+let deviceIdCache = null;
+const getDeviceId = () => {
+  if (deviceIdCache) return deviceIdCache;
+  try {
+    deviceIdCache = localStorage.getItem(DEVICE_KEY);
+    if (!deviceIdCache) {
+      deviceIdCache = uid();
+      localStorage.setItem(DEVICE_KEY, deviceIdCache);
+    }
+  } catch {
+    // Storage blocked (private window): an id for this page load only
+    deviceIdCache = deviceIdCache || uid();
+  }
+  return deviceIdCache;
+};
+const isMine = (e) => !e.deviceId || e.deviceId === getDeviceId();
+
+// Background product reloads after scans, at most every 15 s
+let lastProductRefresh = 0;
+const productRefreshDue = () => {
+  const now = Date.now();
+  if (now - lastProductRefresh < 15000) return false;
+  lastProductRefresh = now;
+  return true;
+};
+
+// Draft header text until checkout; then it becomes the real bill number from the database
+const DRAFT_DESC = "New bill (draft);TPcs:0";
+const isFocusBusy = (scanEl) => {
+  const a = document.activeElement;
+  if (!a || a === scanEl || a === document.body) return false;
+  // Typing somewhere else, or a window (checkout, manual entry) is open
+  return !!(a.matches?.("input, select, textarea, [contenteditable='true']") || a.closest?.('[role="dialog"]'));
+};
+
 // Screen row ⇄ ledger_entries row. The full screen row is kept in `extra.ui` so it reloads exactly as shown.
 const toDbEntry = (e) => ({
   id: e.id,
@@ -74,7 +112,7 @@ const toDbEntry = (e) => ({
   productId: e.productId || null,
   saleId: e.saleId || null,
   imeis: e.imeisArray && e.imeisArray.length > 0 ? e.imeisArray : e.imei ? [e.imei] : [],
-  extra: { ui: e },
+  extra: e.deviceId ? { ui: e, deviceId: e.deviceId } : { ui: e },
 });
 
 const fromDbEntry = (r) => {
@@ -93,6 +131,7 @@ const fromDbEntry = (r) => {
     parentInvoiceId: r.parent_invoice_id || undefined,
     productId: r.product_id || undefined,
     imeisArray: r.imeis || [],
+    ...(r.extra && r.extra.deviceId ? { deviceId: r.extra.deviceId } : {}),
     ...ui,
     id: r.id,
     saleId: r.sale_id || ui.saleId || undefined,
@@ -102,7 +141,12 @@ const fromDbEntry = (r) => {
 // ── Component ────────────────────────────────────────────────────────────────
 const Ledger = () => {
   // allCustomers (not the header-filtered list) so a customer added here is always found
-  const { products, shopSettings, allCustomers, recordSale, addCustomer } = useApp();
+  const { products, shopSettings, allCustomers, recordSale, addCustomer, refreshProducts } = useApp();
+  // Latest product list for queued scans (a scan's closure would otherwise see the list from when it was typed)
+  const productsRef = useRef(products);
+  useEffect(() => {
+    productsRef.current = products;
+  }, [products]);
   // Editing the opening balance and deleting payment rows is for the owner only
   const { isAdmin } = useAuth();
 
@@ -124,9 +168,12 @@ const Ledger = () => {
   // Scans are handled one after another (a fast scanner can send the next code while the last one is looked up)
   const scanQueueRef = useRef(Promise.resolve());
   const focusScan = () => scanRef.current?.focus();
+  // After a scan finishes: back to the scan box, unless the user is typing a rate / qty or a window is open
+  const focusScanIfFree = () => {
+    if (!isFocusBusy(scanRef.current)) focusScan();
+  };
 
   // Invoice tracking — each scan session groups items under an auto-created invoice
-  const [invoiceCounter, setInvoiceCounter] = useState(1);
   const [currentInvoiceId, setCurrentInvoiceId] = useState(null);
   // Same id, readable at once by queued scans (state only changes on the next render)
   const currentInvoiceRef = useRef(null);
@@ -336,12 +383,11 @@ const Ledger = () => {
         setOpeningBalance(ob);
         setObInput(String(ob));
 
-        // Re-open the last invoice that was not checked out yet
+        // Re-open the last invoice of THIS till that was not checked out yet (another till's open bill is theirs)
         const invoices = merged.filter((e) => e.type === "invoice");
-        const openInvoice = [...invoices].reverse().find((e) => !e.saleId);
+        const openInvoice = [...invoices].reverse().find((e) => !e.saleId && isMine(e));
         currentInvoiceRef.current = openInvoice ? openInvoice.id : null;
         setCurrentInvoiceId(currentInvoiceRef.current);
-        setInvoiceCounter(invoices.length + 1);
         setLoadError(null);
       } catch (err) {
         if (!cancelled) setLoadError(err.message);
@@ -359,8 +405,9 @@ const Ledger = () => {
     const q = query.trim();
     if (!q) return null;
 
-    // Local search first (instant)
-    for (const prod of products) {
+    // Local search first (instant). The list is refreshed in the background after scans,
+    // so a found code never waits on the server (a slow lookup used to land while a rate was being typed).
+    for (const prod of productsRef.current) {
       if (prod.imeis && prod.imeis.length > 0) {
         // Either SIM's IMEI identifies the phone
         const matchedImei = prod.imeis.find(
@@ -373,7 +420,7 @@ const Ledger = () => {
       }
     }
 
-    // Backend fallback — searches Supabase directly
+    // Backend fallback, only when nothing matched locally — searches Supabase directly
     try {
       const result = await api.searchImei(q);
       if (result && result.product) {
@@ -402,15 +449,21 @@ const Ledger = () => {
     setEntries(fn);
   };
 
+  // Keep the product list fresh without making a scan wait for it (at most every 15 s)
+  const refreshProductsSoon = () => {
+    if (!productRefreshDue()) return;
+    Promise.resolve(refreshProducts?.()).catch(() => {});
+  };
+
   // ── Create a new invoice header row and make it the current invoice ───────
+  // The real bill number comes from the database at checkout; until then the bill is a draft.
   const createInvoice = () => {
-    const invNumber = `INV-${todayISO().replace(/-/g, "")}-${String(invoiceCounter).padStart(3, "0")}`;
     const invId = uid();
     const invoiceEntry = {
       id: invId,
       type: "invoice",
       date: todayISO(),
-      description: `Sales-${invNumber}-Ptc.;TPcs:0`,
+      description: DRAFT_DESC,
       qty: "",
       rate: "",
       dis: "",
@@ -418,10 +471,10 @@ const Ledger = () => {
       lp: "",
       debit: 0,
       credit: null,
+      deviceId: getDeviceId(),
     };
     changeEntries((prev) => [...prev, invoiceEntry]);
     setInvoice(invId);
-    setInvoiceCounter((c) => c + 1);
     return invId;
   };
 
@@ -458,7 +511,7 @@ const Ledger = () => {
     // One invoice for the whole scan / paste; it is created on the first item found.
     // A checked-out invoice never gets new items.
     let invId = currentInvoiceRef.current;
-    if (invId && !entriesRef.current.some((e) => e.id === invId && e.type === "invoice" && !e.saleId)) invId = null;
+    if (invId && !entriesRef.current.some((e) => e.id === invId && e.type === "invoice" && !e.saleId && isMine(e))) invId = null;
 
     for (const query of queries) {
       // A sale is being saved for the current invoice: adding to it now would leave the item off the bill
@@ -557,7 +610,8 @@ const Ledger = () => {
                 ...e, 
                 qty: newQty,
                 imeisArray: newImeiList,
-                rate: e.rate || itemRate, 
+                // Keep a rate the user typed (or is typing); fill it only when the line never had one
+                rate: Number(e.rate) > 0 || e.rate === "" ? e.rate : itemRate,
                 description: `${product.name}`
               };
             }
@@ -590,6 +644,7 @@ const Ledger = () => {
             imei: imei?.imei || imei?.imei1 || null,
             imeisArray: imei ? [imei.imei || imei.imei1] : [],
             productId: product.id,
+            deviceId: getDeviceId(),
           };
           updated = [...prev, itemEntry];
         }
@@ -610,7 +665,9 @@ const Ledger = () => {
       });
     }
 
-    focusScan();
+    // Stock may have changed on another till: reload the list quietly for the next scan
+    refreshProductsSoon();
+    focusScanIfFree();
   };
 
   // ── Recompute invoice header totals from its child items ──────────────────
@@ -674,9 +731,15 @@ const Ledger = () => {
       scanRef.current?.focus();
       return;
     }
-    if (current && hasItems && !current.saleId &&
-      !window.confirm("This invoice has items that were not checked out. Start a new invoice anyway?")) {
-      return;
+    if (current && hasItems && !current.saleId) {
+      // An open bill left behind would keep its items reserved and confuse the next bill: discard it or keep it
+      if (submittingRef.current) return;
+      if (!window.confirm("This bill has items that were not checked out.\n\nDiscard this bill and start a new one?")) {
+        focusScan();
+        return;
+      }
+      changeEntries((prev) => prev.filter((e) => e.id !== current.id && e.parentInvoiceId !== current.id));
+      setInvoice(null);
     }
 
     createInvoice();
@@ -715,10 +778,24 @@ const Ledger = () => {
 
   // Paid / due for the checkout. Pending Bill: only what is paid now (default 0).
   // Cash / Card: the full total unless a different amount is typed.
+  // Walk-in: paid stops at the bill total, the rest is change to give back.
+  // Customer: paid may go above the bill up to their old Udhaar (the extra pays it off); more is refused.
   const checkoutAmounts = (total) => {
+    const cust = selectedCustomer ? allCustomers.find((c) => c.id === selectedCustomer) : null;
+    const oldUdhaar = cust ? Math.max(0, Number(cust.totalPending || 0)) : 0;
     const typed = Math.max(0, Number(paidAmountInput) || 0);
-    const paid = paymentMethod === "Pending Bill" ? typed : paidAmountInput !== "" ? typed : total;
-    return { paid, due: Math.max(0, total - paid) };
+    const tendered = paymentMethod === "Pending Bill" ? typed : paidAmountInput !== "" ? typed : total;
+    const maxPaid = cust ? total + oldUdhaar : total;
+    const paid = Math.min(tendered, maxPaid);
+    return {
+      paid,
+      due: Math.max(0, total - paid),
+      change: cust ? 0 : Math.max(0, tendered - total),
+      toOldUdhaar: cust ? Math.max(0, paid - total) : 0,
+      tooMuch: cust && tendered > maxPaid ? tendered - maxPaid : 0,
+      maxPaid,
+      oldUdhaar,
+    };
   };
 
   const finalizeCheckout = async () => {
@@ -762,7 +839,13 @@ const Ledger = () => {
     });
 
     const currentSaleTotal = cartItems.reduce((sum, i) => sum + i.subtotal, 0);
-    const { paid: effectivePaid, due: dueAmount } = checkoutAmounts(currentSaleTotal);
+    const { paid: effectivePaid, due: dueAmount, change: changeGiven, toOldUdhaar, tooMuch, maxPaid } =
+      checkoutAmounts(currentSaleTotal);
+
+    if (tooMuch > 0) {
+      alert(`Rs ${fmt(tooMuch)} too much. The most this customer can pay now is Rs ${fmt(maxPaid)} (this bill + old Udhaar).`);
+      return;
+    }
 
     // Money still due goes on a customer's Udhaar, so a walk-in cannot leave a balance
     if (dueAmount > 0 && !selectedCustomer) {
@@ -803,10 +886,18 @@ const Ledger = () => {
     // Not saved: keep the invoice open so it can be checked out again
     if (!recorded) return;
 
-    // Link the ledger invoice to its saved sale so it is not re-opened after a refresh
-    changeEntries((prev) => prev.map((e) => (e.id === invoiceHeader.id ? { ...e, saleId: recorded.id } : e)));
+    // Link the ledger invoice to its saved sale so it is not re-opened after a refresh,
+    // and give the header the real bill number the database issued
+    const totalPcs = invoiceItems.reduce((s, i) => s + Number(i.qty || 0), 0);
+    const billLabel = recorded.billNumber ? `Sales-${recorded.billNumber}-Ptc.` : "Sales (saved)";
+    changeEntries((prev) =>
+      prev.map((e) =>
+        e.id === invoiceHeader.id ? { ...e, saleId: recorded.id, billNumber: recorded.billNumber || "", description: `${billLabel};TPcs:${totalPcs}` } : e
+      )
+    );
 
-    setCompletedSaleInvoice(recorded);
+    // Change given / old Udhaar paid are not stored on the sale; the receipt shows them
+    setCompletedSaleInvoice({ ...recorded, changeGiven, toOldUdhaar });
     setShowCheckoutModal(false);
 
     // Reset the checkout form for the next bill (back to Pending Bill / Udhaar)
@@ -822,6 +913,10 @@ const Ledger = () => {
     setInvoice(null);
     setScanInput("");
   };
+
+  // "Rs X went to old Udhaar": stored paid above the bill total, or what checkout worked out
+  const oldUdhaarPaid = (inv) =>
+    inv ? Math.max(Number(inv.toOldUdhaar || 0), inv.customerId ? Math.max(0, Number(inv.paidAmount || 0) - Number(inv.grandTotal || 0)) : 0) : 0;
 
   // Customer's Udhaar for the receipt. Customers are refreshed from the server before recordSale
   // returns, so totalPending already includes this sale; previous = total minus what this sale added.
@@ -868,6 +963,13 @@ const Ledger = () => {
     text += `Paid Amount: Rs ${(inv.paidAmount || 0).toLocaleString()}\n`;
     if ((inv.dueAmount || 0) > 0) {
       text += `⚠️ ${bold}DUE / UDHAAR: Rs ${inv.dueAmount.toLocaleString()}${bold}\n`;
+      if (inv.dueDate) text += `Due date: ${fmtDate(inv.dueDate)}\n`;
+    }
+    if (oldUdhaarPaid(inv) > 0) {
+      text += `Rs ${fmt(oldUdhaarPaid(inv))} went to old Udhaar\n`;
+    }
+    if (Number(inv.changeGiven || 0) > 0) {
+      text += `Change given: Rs ${fmt(inv.changeGiven)}\n`;
     }
     if (totalUdhaar > 0) {
       text += `${bold}Total Udhaar: Rs ${totalUdhaar.toLocaleString()}${bold}\n`;
@@ -919,7 +1021,8 @@ const Ledger = () => {
 
   // ── Rate Change Handler for Ledger Rows ──
   const handleRateChange = (targetRow, newRateStr) => {
-    const newRate = Math.max(0, Number(newRateStr) || 0);
+    // Empty while a new rate is typed (a scan of the same item then leaves the box alone)
+    const newRate = String(newRateStr) === "" ? "" : Math.max(0, Number(newRateStr) || 0);
     setEntries((prev) => {
       if (isLockedEntry(prev, targetRow)) return prev;
       const updated = prev.map((e) => {
@@ -937,7 +1040,28 @@ const Ledger = () => {
     // Phone rows count their IMEIs: scan or delete units instead of typing a quantity
     if (itemImeis(targetRow).length > 0) return;
     // The box may be empty while a new number is typed; it becomes 1 again when it loses focus
-    const newQty = String(newQtyStr) === "" ? "" : Math.max(1, Math.floor(Number(newQtyStr)) || 1);
+    let newQty = String(newQtyStr) === "" ? "" : Math.max(1, Math.floor(Number(newQtyStr)) || 1);
+
+    // No more than in stock: the product's stock minus other lines of it on this bill
+    const product = targetRow.productId ? products.find((p) => p.id === targetRow.productId) : null;
+    if (product && newQty !== "") {
+      const ids = targetRow.groupIds || [targetRow.id];
+      const onBillElsewhere = entriesRef.current
+        .filter((e) => e.type === "item" && e.parentInvoiceId === targetRow.parentInvoiceId && e.productId === product.id && !ids.includes(e.id))
+        .reduce((s, e) => s + Number(e.qty || 0), 0);
+      const available = Math.max(0, Number(product.quantity || 0) - onBillElsewhere);
+      if (newQty > available) {
+        setScanStatus({
+          type: "error",
+          message: available > 0
+            ? `Only ${available} of ${product.name} in stock — quantity set to ${available}.`
+            : `${product.name} is out of stock.`,
+        });
+        if (available < 1) return;
+        newQty = available;
+      }
+    }
+
     setEntries((prev) => {
       if (isLockedEntry(prev, targetRow)) return prev;
       const updated = prev.map((e) => {
@@ -955,8 +1079,14 @@ const Ledger = () => {
     if (!manualForm.description) return;
 
     if (manualForm.type === "item") {
-      // Create invoice header if needed
-      const invId = currentInvoiceId || createInvoice();
+      if (submittingRef.current) {
+        alert("Wait until the checkout is saved, then add the line.");
+        return;
+      }
+      // This till's open invoice, or a new one (never a checked-out bill)
+      let invId = currentInvoiceRef.current;
+      if (invId && !entriesRef.current.some((e) => e.id === invId && e.type === "invoice" && !e.saleId)) invId = null;
+      if (!invId) invId = createInvoice();
 
       const itemEntry = {
         id: uid(), type: "item", date: manualForm.date,
@@ -964,15 +1094,19 @@ const Ledger = () => {
         qty: Number(manualForm.qty) || 1, rate: Number(manualForm.rate) || 0,
         dis: manualForm.dis, deal: manualForm.deal, lp: manualForm.lp,
         debit: null, credit: null, parentInvoiceId: invId,
+        deviceId: getDeviceId(),
       };
-      setEntries((prev) => updateInvoiceTotals([...prev, itemEntry], invId));
+      changeEntries((prev) => updateInvoiceTotals([...prev, itemEntry], invId));
     } else if (manualForm.type === "payment") {
-      setEntries((prev) => [...prev, {
+      changeEntries((prev) => [...prev, {
         id: uid(), type: "payment", date: manualForm.date,
         description: manualForm.description,
         qty: "", rate: "", dis: "", deal: "", lp: "",
         debit: Number(manualForm.debit) || 0, credit: Number(manualForm.credit) || 0,
       }]);
+      // Payments are not part of a bill: show the day's sheet so the saved payment is in view
+      setView("sheet");
+      setScanStatus({ type: "success", message: "✓ Payment added — shown on Today's sheet." });
     }
 
     setManualForm(EMPTY_MANUAL);
@@ -1004,7 +1138,8 @@ const Ledger = () => {
   const [view, setView] = useState("bill");
   const visibleEntries = useMemo(() => {
     if (view === "sheet") return entries;
-    const openInvoiceIds = new Set(entries.filter((e) => e.type === "invoice" && !e.saleId).map((e) => e.id));
+    // Only this till's open bills (another till's open bill is shown on Today's sheet, not here)
+    const openInvoiceIds = new Set(entries.filter((e) => e.type === "invoice" && !e.saleId && isMine(e)).map((e) => e.id));
     return entries.filter((e) => (e.type === "invoice" ? openInvoiceIds.has(e.id) : e.type === "item" && openInvoiceIds.has(e.parentInvoiceId)));
   }, [entries, view]);
   const shownOpening = view === "sheet" ? openingBalance : 0;
@@ -1039,12 +1174,65 @@ const Ledger = () => {
   // Invoices that were checked out (linked to a saved sale) can no longer be edited or deleted
   const lockedInvoiceIds = new Set(entries.filter((e) => e.type === "invoice" && e.saleId).map((e) => e.id));
 
-  // Live paid / due preview for the checkout modal
+  // Live paid / due preview for the checkout modal (also the "This bill" total: the current invoice only)
   const checkoutTotal = entries
     .filter((e) => e.type === "item" && e.parentInvoiceId === currentInvoiceId)
     .reduce((s, e) => s + Number(e.qty || 1) * Number(e.rate || 0), 0);
-  const checkoutDue = checkoutAmounts(checkoutTotal).due;
+  const checkoutCalc = checkoutAmounts(checkoutTotal);
+  const checkoutDue = checkoutCalc.due;
   const needsCustomer = checkoutDue > 0 && !selectedCustomer;
+  const paidTooMuch = checkoutCalc.tooMuch > 0;
+
+  // Group the rows of one product on one invoice into a single line (all its IMEIs together)
+  const groupedRows = useMemo(() => {
+    const out = [];
+    const invoiceGroups = {};
+    rows.forEach((row) => {
+      if (row.type === "item" && row.parentInvoiceId && row.productId) {
+        const key = `${row.parentInvoiceId}_${row.productId}`;
+        if (!invoiceGroups[key]) {
+          // All IMEIs of the row (imeisArray), not only the first one in row.imei
+          const newRow = { ...row, imeisArray: [...itemImeis(row)], groupIds: [row.id] };
+          invoiceGroups[key] = newRow;
+          out.push(newRow);
+        } else {
+          const g = invoiceGroups[key];
+          g.qty = Number(g.qty) + Number(row.qty || 1);
+          g.computedAmount = (g.computedAmount || 0) + (row.computedAmount || 0);
+          g.imeisArray.push(...itemImeis(row));
+          g.groupIds.push(row.id);
+        }
+      } else {
+        out.push({ ...row, groupIds: [row.id] });
+      }
+    });
+    return out;
+  }, [rows]);
+
+  // Dates: From after To would load nothing, so the two are swapped (and the user is told)
+  const [rangeNote, setRangeNote] = useState("");
+  const changeFrom = (v) => {
+    if (!v) return;
+    if (v > dateTo) {
+      setDateFrom(dateTo);
+      setDateTo(v);
+      setRangeNote(`"From" was after "To", so the dates were swapped: ${fmtDate(dateTo)} to ${fmtDate(v)}.`);
+    } else {
+      setDateFrom(v);
+      setRangeNote("");
+    }
+  };
+  const changeTo = (v) => {
+    if (!v) return;
+    if (v < dateFrom) {
+      setDateTo(dateFrom);
+      setDateFrom(v);
+      setRangeNote(`"To" was before "From", so the dates were swapped: ${fmtDate(v)} to ${fmtDate(dateFrom)}.`);
+    } else {
+      setDateTo(v);
+      setRangeNote("");
+    }
+  };
 
   // Lines of the current invoice still without a rate (checkout stays blocked)
   const noRateLines = missingRateLines(entries, currentInvoiceId);
@@ -1076,6 +1264,131 @@ const Ledger = () => {
   const cell = "border border-line px-2 py-1.5 text-xs text-ink align-middle";
   const cellR = cell + " text-right tabular-nums whitespace-nowrap";
   const cellC = cell + " text-center";
+
+  // What a row shows, shared by the table and the phone cards
+  const describeRow = (row) => {
+    const isInvoice = row.type === "invoice";
+    const isPayment = row.type === "payment";
+    const isActive = !!currentInvoiceId && (row.id === currentInvoiceId || row.parentInvoiceId === currentInvoiceId);
+    const locked = lockedInvoiceIds.has(isInvoice ? row.id : row.parentInvoiceId);
+    const needsRate = !locked && row.type === "item" && row.groupIds.some((id) => noRateIds.has(id));
+
+    let displayDesc = row.description;
+    if (row.type === "item") {
+      const baseName = row.fullName || (row.description ? row.description.split(" (")[0] : "");
+      if (row.imeisArray && row.imeisArray.length > 0) {
+        displayDesc = `${baseName} [IMEI: ${row.imeisArray.join(", ")}]`;
+      } else if (baseName) {
+        displayDesc = baseName;
+      }
+    } else if (isInvoice && !row.saleId && String(row.description || "").startsWith("New bill (draft)")) {
+      displayDesc = String(row.description).replace(";TPcs:", " · Pcs: ");
+    }
+    return { isInvoice, isPayment, isActive, locked, needsRate, displayDesc };
+  };
+
+  // Current bill on a phone: one card per line, with Qty and Rate in reach
+  const renderBillCards = () => {
+    if (groupedRows.length === 0) {
+      return (
+        <div className="px-4 py-10 text-sm text-muted">
+          <ScanLine size={24} className="mb-2 text-muted" aria-hidden="true" />
+          <span className="block font-semibold text-ink">No bill open</span>
+          <span className="block mt-1">Scan an IMEI or barcode above to start a bill, or add a manual entry.</span>
+        </div>
+      );
+    }
+    return (
+      <ul className="divide-y divide-line" aria-label="Bill lines">
+        {groupedRows.map((row) => {
+          const { isInvoice, isActive, locked, needsRate, displayDesc } = describeRow(row);
+          if (isInvoice) {
+            return (
+              <li key={row.id} className={`flex items-start justify-between gap-3 px-4 py-3 ${isActive ? "bg-brand-50" : "bg-sunken/70"}`}>
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-brand-800 break-words">{displayDesc}</div>
+                  <div className="mt-0.5 text-xs text-muted">{fmtDate(row.date)}</div>
+                  {isActive && <Badge tone="brand" className="mt-1">Current</Badge>}
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-sm font-bold tabular-nums whitespace-nowrap">Rs {fmt(row.debit)}</span>
+                  {!locked && (
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(row.id)}
+                      aria-label="Delete bill"
+                      title="Delete"
+                      className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-khata-600 hover:bg-khata-50 transition-colors"
+                    >
+                      <Trash2 size={16} aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+              </li>
+            );
+          }
+          const qtyEditable = !locked && !row.imei && itemImeis(row).length === 0;
+          return (
+            <li key={row.id} className={`px-4 py-3 ${needsRate ? "bg-saffron-50/60" : "bg-surface"}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 text-sm font-medium text-ink break-words">
+                  {displayDesc}
+                  {needsRate && <Badge tone="saffron" className="ml-1.5 align-middle">Rate needed</Badge>}
+                </div>
+                {!locked && (
+                  <button
+                    type="button"
+                    onClick={() => row.groupIds.forEach((id) => handleDelete(id))}
+                    aria-label="Delete line"
+                    title="Delete"
+                    className="-mr-2 -mt-1 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-khata-600 hover:bg-khata-50 transition-colors"
+                  >
+                    <Trash2 size={16} aria-hidden="true" />
+                  </button>
+                )}
+              </div>
+              <div className="mt-2 grid grid-cols-[4.5rem_1fr_auto] items-end gap-2">
+                <label className="text-xs font-semibold text-ink-soft">
+                  Qty
+                  {qtyEditable ? (
+                    <input
+                      type="number"
+                      min="1"
+                      inputMode="numeric"
+                      value={row.qty !== undefined && row.qty !== null ? row.qty : 1}
+                      onChange={(e) => handleQtyChange(row, e.target.value)}
+                      onFocus={(e) => e.target.select()}
+                      onBlur={() => row.qty === "" && handleQtyChange(row, "1")}
+                      className="mt-1 block w-full h-11 rounded-lg border border-line-strong bg-surface px-1 text-center text-base font-semibold text-ink tabular-nums focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+                    />
+                  ) : (
+                    <span className="mt-1 flex h-11 items-center justify-center text-base font-semibold text-ink tabular-nums">{row.qty || 1}</span>
+                  )}
+                </label>
+                <label className="text-xs font-semibold text-ink-soft">
+                  Rate (Rs)
+                  <input
+                    type="number"
+                    min="0"
+                    inputMode="numeric"
+                    value={row.rate !== undefined && row.rate !== null ? row.rate : ""}
+                    onChange={(e) => handleRateChange(row, e.target.value)}
+                    onFocus={(e) => !locked && e.target.select()}
+                    readOnly={locked}
+                    placeholder="Rate"
+                    className={`mt-1 block w-full h-11 rounded-lg px-2 text-right text-base font-semibold text-ink tabular-nums focus:outline-none ${needsRate ? "bg-saffron-50 border-2 border-saffron-500 focus:border-brand-500" : "bg-surface border border-line-strong focus:border-brand-500 focus:ring-2 focus:ring-brand-100"}`}
+                  />
+                </label>
+                <div className="pb-2.5 text-right text-sm font-bold tabular-nums whitespace-nowrap">
+                  Rs {fmt(row.computedAmount)}
+                </div>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    );
+  };
 
   // Save status line
   const saveTone = loadError || saveState === "error" ? "text-khata-600" : saveState === "saving" ? "text-saffron-700" : "text-paid-600";
@@ -1115,7 +1428,8 @@ const Ledger = () => {
       />
 
       {/* ━━ IMEI / Barcode Scanner — stays in reach while the sheet scrolls ━━ */}
-      <div className="sticky top-16 z-20 print:hidden">
+      {/* Sticky only from sm up: on a phone the card would cover most of the screen */}
+      <div className="sm:sticky sm:top-16 z-20 print:hidden">
         <Card className="space-y-3 shadow-pop">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
             <div className="flex items-center gap-2">
@@ -1208,23 +1522,32 @@ const Ledger = () => {
                 <label htmlFor="ledger-from" className="block text-xs font-semibold text-ink-soft">
                   From <span className="font-normal text-muted">{fmtDate(dateFrom)}</span>
                 </label>
-                <input id="ledger-from" type="date" value={dateFrom} onChange={(e) => e.target.value && setDateFrom(e.target.value)}
+                <input id="ledger-from" type="date" value={dateFrom} onChange={(e) => changeFrom(e.target.value)}
                   className={`${inputClass} sm:w-44`} />
               </div>
               <div className="min-w-0 space-y-1">
                 <label htmlFor="ledger-to" className="block text-xs font-semibold text-ink-soft">
                   To <span className="font-normal text-muted">{fmtDate(dateTo)}</span>
                 </label>
-                <input id="ledger-to" type="date" value={dateTo} onChange={(e) => e.target.value && setDateTo(e.target.value)}
+                <input id="ledger-to" type="date" value={dateTo} onChange={(e) => changeTo(e.target.value)}
                   className={`${inputClass} sm:w-44`} />
               </div>
             </div>
             <div className="text-xs text-muted sm:text-right">Generated {genTime}</div>
           </div>
+          {rangeNote && (
+            <p role="status" className="mt-2 flex items-start gap-1.5 rounded-xl border border-saffron-200 bg-saffron-50 px-3 py-2 text-xs font-semibold text-saffron-700 print:hidden">
+              <AlertCircle size={14} className="shrink-0 mt-0.5" aria-hidden="true" />
+              <span>{rangeNote}</span>
+            </p>
+          )}
         </div>
 
         {/* ── Ledger Table ── */}
-        <div className="overflow-x-auto custom-scrollbar">
+        {/* Phone: the current bill as stacked cards (the wide table would hide the Rate column) */}
+        {view === "bill" && <div className="sm:hidden print:hidden">{renderBillCards()}</div>}
+
+        <div className={`overflow-x-auto custom-scrollbar ${view === "bill" ? "hidden sm:block print:block" : ""}`}>
           <table className="w-full min-w-[900px] border-collapse text-xs">
             <colgroup>
               <col style={{ width: "86px" }} />
@@ -1257,45 +1580,8 @@ const Ledger = () => {
             <tbody>
               {/* Data Rows */}
               {(() => {
-                const groupedRows = [];
-                const invoiceGroups = {};
-
-                rows.forEach((row) => {
-                  if (row.type === "item" && row.parentInvoiceId && row.productId) {
-                    const key = `${row.parentInvoiceId}_${row.productId}`;
-                    if (!invoiceGroups[key]) {
-                      // All IMEIs of the row (imeisArray), not only the first one in row.imei
-                      const newRow = { ...row, imeisArray: [...itemImeis(row)], groupIds: [row.id] };
-                      invoiceGroups[key] = newRow;
-                      groupedRows.push(newRow);
-                    } else {
-                      const g = invoiceGroups[key];
-                      g.qty = Number(g.qty) + Number(row.qty || 1);
-                      g.computedAmount = (g.computedAmount || 0) + (row.computedAmount || 0);
-                      g.imeisArray.push(...itemImeis(row));
-                      g.groupIds.push(row.id);
-                    }
-                  } else {
-                    groupedRows.push({ ...row, groupIds: [row.id] });
-                  }
-                });
-
                 return groupedRows.map((row) => {
-                  const isInvoice = row.type === "invoice";
-                  const isPayment = row.type === "payment";
-                  const isActive = !!currentInvoiceId && (row.id === currentInvoiceId || row.parentInvoiceId === currentInvoiceId);
-                  const locked = lockedInvoiceIds.has(isInvoice ? row.id : row.parentInvoiceId);
-                  const needsRate = !locked && row.type === "item" && row.groupIds.some((id) => noRateIds.has(id));
-
-                  let displayDesc = row.description;
-                  if (row.type === "item") {
-                    const baseName = row.fullName || (row.description ? row.description.split(" (")[0] : "");
-                    if (row.imeisArray && row.imeisArray.length > 0) {
-                      displayDesc = `${baseName} [IMEI: ${row.imeisArray.join(", ")}]`;
-                    } else if (baseName) {
-                      displayDesc = baseName;
-                    }
-                  }
+                  const { isInvoice, isPayment, isActive, locked, needsRate, displayDesc } = describeRow(row);
 
                   const bg = isInvoice
                     ? isActive ? "bg-brand-50" : "bg-sunken/70"
@@ -1436,7 +1722,7 @@ const Ledger = () => {
       {/* ━━ Summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
       {view === "bill" ? (
         <div className="grid gap-3 sm:grid-cols-2 print:hidden">
-          <Stat label="This bill" value={`Rs ${fmt(totalDebit, 2)}`} tone="brand" hint={currentInvoiceId ? "Not checked out yet" : "Scan to start a bill"} />
+          <Stat label="This bill" value={`Rs ${fmt(currentInvoiceId ? checkoutTotal : 0, 2)}`} tone="brand" hint={currentInvoiceId ? "Draft — not checked out yet" : "Scan to start a bill"} />
           <Stat label="Today's sheet" value="Finished bills, returns, payments" hint="Switch to Today's sheet above to see the whole day" onClick={() => setView("sheet")} />
         </div>
       ) : (
@@ -1574,7 +1860,7 @@ const Ledger = () => {
               size="lg"
               icon={CheckCircle2}
               onClick={finalizeCheckout}
-              disabled={isSubmitting || needsCustomer || noRateLines.length > 0}
+              disabled={isSubmitting || needsCustomer || paidTooMuch || noRateLines.length > 0}
               className="w-full sm:w-auto"
             >
               {isSubmitting ? "Saving…" : "Confirm and save bill"}
@@ -1749,6 +2035,27 @@ const Ledger = () => {
               <span className="text-muted">Bill total: Rs {fmt(checkoutTotal)}</span>
               {checkoutDue > 0 && <span className="text-khata-600">Udhaar: Rs {fmt(checkoutDue)}</span>}
             </div>
+            {checkoutCalc.change > 0 && (
+              <div role="status" className="mt-1 flex justify-between gap-3 rounded-xl bg-paid-50 px-3 py-2.5 text-sm font-bold text-paid-700">
+                <span>Change to give back</span>
+                <span className="tabular-nums">Rs {fmt(checkoutCalc.change)}</span>
+              </div>
+            )}
+            {checkoutCalc.toOldUdhaar > 0 && !paidTooMuch && (
+              <p role="status" className="mt-1 rounded-xl bg-brand-50 px-3 py-2 text-xs font-semibold text-brand-700">
+                Rs {fmt(checkoutCalc.toOldUdhaar)} above this bill goes to the customer's old Udhaar
+                (old Udhaar Rs {fmt(checkoutCalc.oldUdhaar)}, left after this: Rs {fmt(checkoutCalc.oldUdhaar - checkoutCalc.toOldUdhaar)}).
+              </p>
+            )}
+            {paidTooMuch && (
+              <p role="alert" className="mt-1 flex items-start gap-1.5 rounded-xl border border-khata-200 bg-khata-50 px-3 py-2 text-xs font-semibold text-khata-700">
+                <AlertCircle size={14} className="shrink-0 mt-0.5" aria-hidden="true" />
+                <span>
+                  Too much: the most this customer can pay now is Rs {fmt(checkoutCalc.maxPaid)} (this bill
+                  {checkoutCalc.oldUdhaar > 0 ? ` + old Udhaar Rs ${fmt(checkoutCalc.oldUdhaar)}` : ", no old Udhaar"}).
+                </span>
+              </p>
+            )}
           </Field>
 
           {paymentMethod === "Pending Bill" && (
@@ -1811,6 +2118,7 @@ const Ledger = () => {
                   {completedSaleInvoice.cashierName && (
                     <div>Seller: {completedSaleInvoice.cashierName}</div>
                   )}
+                  <div>Payment: {completedSaleInvoice.paymentMethod || "Cash"}</div>
                 </div>
                 <div className="text-right">
                   <div className="font-black text-sm">{completedSaleInvoice.billNumber}</div>
@@ -1860,7 +2168,23 @@ const Ledger = () => {
                   <div className="mt-2 pt-2 border-t border-dashed border-black">
                     <div className="flex justify-between text-sm"><span>Paid</span><span>Rs. {(completedSaleInvoice.paidAmount || 0).toLocaleString()}</span></div>
                     <div className="flex justify-between text-sm font-bold mt-1"><span>BALANCE DUE</span><span>Rs. {completedSaleInvoice.dueAmount.toLocaleString()}</span></div>
+                    {completedSaleInvoice.dueDate && (
+                      <div className="flex justify-between text-sm mt-1"><span>Due date</span><span>{fmtDate(completedSaleInvoice.dueDate)}</span></div>
+                    )}
                   </div>
+                )}
+
+                {completedSaleInvoice.dueAmount <= 0 && (oldUdhaarPaid(completedSaleInvoice) > 0 || Number(completedSaleInvoice.changeGiven || 0) > 0) && (
+                  <div className="flex justify-between text-sm mt-2 pt-2 border-t border-dashed border-black">
+                    <span>Paid</span>
+                    <span>Rs. {(Number(completedSaleInvoice.paidAmount || 0) + Number(completedSaleInvoice.changeGiven || 0)).toLocaleString()}</span>
+                  </div>
+                )}
+                {oldUdhaarPaid(completedSaleInvoice) > 0 && (
+                  <div className="text-sm font-semibold">Rs. {fmt(oldUdhaarPaid(completedSaleInvoice))} went to old Udhaar</div>
+                )}
+                {Number(completedSaleInvoice.changeGiven || 0) > 0 && (
+                  <div className="flex justify-between text-sm font-bold"><span>Change given</span><span>Rs. {fmt(completedSaleInvoice.changeGiven)}</span></div>
                 )}
 
                 {(completedUdhaar.previous > 0 || completedUdhaar.total > 0) && (

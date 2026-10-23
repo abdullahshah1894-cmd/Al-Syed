@@ -22,7 +22,7 @@ const lineInfo = (item) => {
  * props: sale (normalized), currency, onClose(), onDone(updatedSale)
  */
 const ReturnItemsModal = ({ sale, currency = "Rs.", onClose, onDone }) => {
-  const { returnSaleItems } = useApp();
+  const { returnSaleItems, allCustomers } = useApp();
   const [picked, setPicked] = useState({}); // index -> { imeis: [], qty: "" }
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
@@ -50,8 +50,25 @@ const ReturnItemsModal = ({ sale, currency = "Rs.", onClose, onDone }) => {
       return qty > 0 ? { index, qty: Math.min(qty, info.left), amount: priceOf(item) * Math.min(qty, info.left) } : null;
     })
     .filter(Boolean);
-  const refund = requests.reduce((s, r) => s + r.amount, 0);
+  // Same as the server: the bill discount / tax is shared over the lines (original total / lines value)
+  const linesValue = items.reduce((sum, i) => sum + (Number(i.subtotal) || priceOf(i) * qtyOf(i)), 0);
+  const originalTotal =
+    Number(sale?.grandTotal || 0) + (sale?.returns || []).reduce((sum, r) => sum + Number(r.amount || 0), 0);
+  const ratio = linesValue > 0 ? originalTotal / linesValue : 1;
+  const refund = Math.min(
+    Number(sale?.grandTotal || 0),
+    Math.round(requests.reduce((s, r) => s + r.amount, 0) * ratio * 100) / 100
+  );
   const hasDiscount = Number(sale?.discountAmount || 0) > 0 || Number(sale?.taxAmount || 0) > 0;
+  // Split of the refund: off the customer's Udhaar first (only what this bill still owes and the
+  // customer still owes), the rest is cash back. A walk-in bill has no account: all cash back.
+  const custId = sale?.customerId || sale?.customer;
+  const customer = custId ? (allCustomers || []).find((c) => c.id === custId) : null;
+  const billDue = Math.max(0, Number(sale?.dueAmount || 0));
+  const offUdhaar = custId
+    ? Math.max(0, Math.min(billDue, customer ? Number(customer.totalPending || 0) : billDue, refund))
+    : Math.min(billDue, refund);
+  const cashBack = Math.max(0, refund - offUdhaar);
 
   const submit = async () => {
     if (saving) return;
@@ -152,10 +169,25 @@ const ReturnItemsModal = ({ sale, currency = "Rs.", onClose, onDone }) => {
         </Field>
 
         {refund > 0 && (
-          <div className="rounded-xl bg-sunken p-3 text-sm text-ink-soft">
-            Refund about <span className="font-semibold text-ink">{currency} {fmt(refund)}</span>.
-            {" "}It comes off this bill&apos;s Udhaar first; anything above that is cash back to the customer.
-            {hasDiscount && " The bill's discount or tax is shared over its items, so the final amount can differ slightly."}
+          <div className="rounded-xl bg-sunken p-3 text-sm text-ink-soft space-y-1">
+            <div className="flex flex-wrap justify-between gap-2">
+              <span>Refund about</span>
+              <span className="font-semibold text-ink">{currency} {fmt(refund)}</span>
+            </div>
+            <div className="flex flex-wrap justify-between gap-2">
+              <span>Off the Udhaar</span>
+              <span className="font-semibold text-khata-700">{currency} {fmt(offUdhaar)}</span>
+            </div>
+            <div className="flex flex-wrap justify-between gap-2">
+              <span>Cash back to the customer</span>
+              <span className="font-semibold text-paid-700">{currency} {fmt(cashBack)}</span>
+            </div>
+            <p className="text-xs text-muted">
+              {custId || billDue > 0
+                ? "The refund comes off what this bill and the customer still owe; anything above that is given back in cash."
+                : "Walk-in bill: there is no Udhaar account, so the whole refund is cash back."}
+              {hasDiscount && " The bill's discount or tax is shared over its items, so the final amount can differ slightly."}
+            </p>
           </div>
         )}
 

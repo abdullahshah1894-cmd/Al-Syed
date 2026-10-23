@@ -145,7 +145,8 @@ const ImeiChecker = () => {
     if (!d) return "—";
     // A plain YYYY-MM-DD is a local calendar day (new Date() would read it as UTC midnight)
     const dt = /^\d{4}-\d{2}-\d{2}$/.test(String(d)) ? new Date(`${d}T00:00:00`) : new Date(d);
-    return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString();
+    // One format on the whole page: dd/mm/yyyy
+    return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString("en-GB");
   };
 
   // Price this unit was billed at
@@ -281,7 +282,7 @@ const ImeiChecker = () => {
       </div>
       <dl className="divide-y divide-line">
         {w.warrantyType && row("Type", w.warrantyType)}
-        {row("Expires", w.warrantyExpiryDate)}
+        {row("Expires", fmtDate(w.warrantyExpiryDate))}
         {(w.claims || []).length > 0 &&
           row("Claims", `${w.claims.length} (latest: ${w.claims[w.claims.length - 1].status || "Pending"})`)}
       </dl>
@@ -402,25 +403,30 @@ const ImeiChecker = () => {
                     </div>
                   )}
 
-                  {/* Specs list */}
-                  {searchResult.matchedProduct.specs && (
-                    <div className="space-y-2 pt-3 border-t border-line">
-                      <h3 className="text-sm font-semibold text-ink-soft">Specifications</h3>
-                      <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-                        {[
-                          ["RAM", searchResult.matchedProduct.specs.ram],
-                          ["Storage", searchResult.matchedProduct.specs.storage],
-                          ["Colour", searchResult.matchedProduct.specs.color],
-                          ["OS", searchResult.matchedProduct.specs.os],
-                        ].map(([k, v]) => (
-                          <div key={k} className="flex gap-1.5 min-w-0">
-                            <dt className="text-muted">{k}</dt>
-                            <dd className="font-semibold text-ink truncate">{v || "N/A"}</dd>
-                          </div>
-                        ))}
-                      </dl>
-                    </div>
-                  )}
+                  {/* Specs list: only the specs that are filled in, nothing when there are none */}
+                  {(() => {
+                    const specs = searchResult.matchedProduct.specs || {};
+                    const filled = [
+                      ["RAM", specs.ram],
+                      ["Storage", specs.storage],
+                      ["Colour", specs.color],
+                      ["OS", specs.os],
+                    ].filter(([, v]) => String(v ?? "").trim() !== "");
+                    if (filled.length === 0) return null;
+                    return (
+                      <div className="space-y-2 pt-3 border-t border-line">
+                        <h3 className="text-sm font-semibold text-ink-soft">Specifications</h3>
+                        <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                          {filled.map(([k, v]) => (
+                            <div key={k} className="flex gap-1.5 min-w-0">
+                              <dt className="text-muted">{k}</dt>
+                              <dd className="font-semibold text-ink truncate">{v}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </div>
+                    );
+                  })()}
                 </Card>
 
                 {/* Bill & warranty */}
