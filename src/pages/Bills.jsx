@@ -2,7 +2,8 @@ import { useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useApp, SELLERS } from "../context/AppContext";
 import { useAuth } from "../context/AuthContext";
-import { Receipt, Search, Printer, Eye, X, Smartphone, Pencil, Trash2, RotateCcw, AlertCircle } from "lucide-react";
+import { Receipt, Search, Printer, Eye, X, Smartphone, Pencil, Trash2, RotateCcw, AlertCircle, Undo2 } from "lucide-react";
+import ReturnItemsModal from "../components/ReturnItemsModal";
 import { useShareImage } from "../components/useShareImage";
 import { printElement } from "../services/printReceipt";
 import { Page, PageHeader, Card, Badge, Money, Button, IconButton, Field, Input, Select, Textarea, Segmented, TableWrap, Th, Td, EmptyState, Modal, inputClass } from "../components/ui";
@@ -65,6 +66,9 @@ const Bills = () => {
   }
   // The open bill is looked up by id, so it shows the saved changes after an edit and closes after a delete
   const [selectedBillId, setSelectedBillId] = useState(null);
+  // Bill whose items are being returned (owner only)
+  const [returningId, setReturningId] = useState(null);
+  const returningBill = returningId ? (allSales || sales).find((s) => s.id === returningId) || null : null;
   const selectedBillModal = selectedBillId ? (allSales || sales).find((s) => s.id === selectedBillId) || null : null;
   const [openShare, shareDialog] = useShareImage();
 
@@ -666,6 +670,11 @@ const Bills = () => {
               <Button variant="success" icon={Smartphone} onClick={handleWhatsAppShare}>Share</Button>
               <Button variant="secondary" onClick={() => setSelectedBillId(null)}>Close</Button>
             </div>
+            {isAdmin && !isSettlement(selectedBillModal) && (selectedBillModal.items || []).some((i) => Number(i.returnedQty || 0) < Math.max(1, Number(i.quantity || i.qty || 1))) && (
+              <Button variant="danger-soft" icon={Undo2} onClick={() => setReturningId(selectedBillModal.id)} className="w-full">
+                Return items
+              </Button>
+            )}
             {isAdmin && (
               <div className="grid grid-cols-2 gap-2">
                 <Button variant="secondary" icon={Pencil} onClick={() => openEdit(selectedBillModal)}>
@@ -684,6 +693,15 @@ const Bills = () => {
           </div>
         </div>
       </div>
+    )}
+
+    {isAdmin && returningBill && (
+      <ReturnItemsModal
+        sale={returningBill}
+        currency={currency}
+        onClose={() => setReturningId(null)}
+        onDone={() => setReturningId(null)}
+      />
     )}
 
     {/* Edit Bill Modal */}

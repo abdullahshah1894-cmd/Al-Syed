@@ -145,6 +145,17 @@ BEGIN
     v_done_imeis := ARRAY(SELECT jsonb_array_elements_text(COALESCE(v_item->'returnedImeis', '[]'::jsonb)));
     v_ret_imeis := '{}';
 
+    -- Older bills saved phone lines without their IMEIs: find the units this bill sold
+    IF cardinality(v_item_imeis) = 0 AND COALESCE(v_item->>'productId', v_item->>'product', '') ~* uuid_re THEN
+      v_item_imeis := ARRAY(
+        SELECT COALESCE(NULLIF(e->>'imei', ''), NULLIF(e->>'imei1', ''), e->>'imei2')
+          FROM products pr, jsonb_array_elements(COALESCE(pr.imeis, '[]'::jsonb)) WITH ORDINALITY AS t(e, n)
+         WHERE pr.id = COALESCE(v_item->>'productId', v_item->>'product')::uuid
+           AND e->>'status' = 'sold'
+           AND (e->>'soldInSale' = p_sale::text OR e->>'soldInSale' = v_sale.bill_number)
+         ORDER BY n);
+    END IF;
+
     IF cardinality(v_item_imeis) > 0 THEN
       -- Phone line: return named IMEIs, or the next ones not returned yet
       v_ret_imeis := ARRAY(SELECT jsonb_array_elements_text(COALESCE(v_req->'imeis', '[]'::jsonb)));
@@ -407,8 +418,8 @@ BEGIN
     v_item := v_items->v_idx;
     IF v_item IS NULL THEN RAISE EXCEPTION 'Item % is not on this bill.', v_idx + 1; END IF;
     v_qty := GREATEST(1, COALESCE(NULLIF(v_item->>'quantity', '')::numeric, NULLIF(v_item->>'qty', '')::numeric, 1));
-    IF COALESCE(v_rate->>'unitSalePrice', '') !~ '^[0-9]+(.[0-9]+)?$' THEN
-      RAISE EXCEPTION 'Invalid price for item %.', v_idx + 1;
+    IF COALESCE(v_rate->>'unitSalePrice', '') !~ '^[0-9]+(.[0-9]+)?$' OR (v_rate->>'unitSalePrice')::numeric <= 0 THEN
+      RAISE EXCEPTION 'Item % needs a price above 0.', v_idx + 1;
     END IF;
     v_items := jsonb_set(v_items, ARRAY[v_idx::text], v_item || jsonb_build_object(
       'unitSalePrice', GREATEST(0, (v_rate->>'unitSalePrice')::numeric),

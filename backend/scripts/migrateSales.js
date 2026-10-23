@@ -111,6 +111,10 @@ BEGIN
     END IF;
     v_line := COALESCE(NULLIF(v_item->>'subtotal', '')::numeric,
                        COALESCE(NULLIF(v_item->>'unitSalePrice', '')::numeric, NULLIF(v_item->>'price', '')::numeric, 0) * v_qty);
+    IF NOT v_is_settlement AND v_line <= 0 THEN
+      RAISE EXCEPTION 'Enter a price for "%" — every item on the bill needs a price above 0.',
+        COALESCE(NULLIF(v_item->>'productName', ''), NULLIF(v_item->>'name', ''), 'an item');
+    END IF;
     v_lines_total := v_lines_total + v_line;
 
     v_req := ARRAY(SELECT jsonb_array_elements_text(
