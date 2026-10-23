@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import { AppProvider } from "./context/AppContext";
@@ -157,7 +157,7 @@ function App() {
             </Route>
 
             {/* Admin-Only Protected Routes */}
-            <Route element={<ProtectedRoute allowedRoles={["admin"]} />}>
+            <Route element={<ProtectedRoute allowedRoles={["admin"]} layout={MainLayout} />}>
               <Route
                 path="/suppliers"
                 element={

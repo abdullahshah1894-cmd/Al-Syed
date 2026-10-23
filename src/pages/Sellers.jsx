@@ -5,7 +5,7 @@ import {
   User, DollarSign, Clock, Users, Receipt, Search, TrendingUp, ShoppingBag, HandCoins, Undo2, CalendarDays,
 } from "lucide-react";
 import { Page, PageHeader, Card, CardHeader, Badge, Input, Segmented, TableWrap, Th, Td, EmptyState } from "../components/ui";
-import { isSettlement, realSales, saleBelongsTo, totalProfit, udhaarAdded } from "../utils/sales";
+import { isSettlement, realSales, saleBelongsTo, totalProfit, udhaarAdded, udhaarCollected, isUdhaarCollection } from "../utils/sales";
 import { localDate, isBetween } from "../utils/dates";
 
 const sameName = (a, b) => (a || "").trim().toLowerCase() === (b || "").trim().toLowerCase();
@@ -32,7 +32,11 @@ const rangeOf = (preset, customFrom, customTo, today = localDate()) => {
     return { from: localDate(start), to: today };
   }
   if (preset === "This Month") return { from: `${today.slice(0, 7)}-01`, to: today };
-  if (preset === "Custom") return { from: customFrom || null, to: customTo || null };
+  if (preset === "Custom") {
+    // From after To: use the two dates the right way round (the page shows a warning)
+    if (customFrom && customTo && customFrom > customTo) return { from: customTo, to: customFrom };
+    return { from: customFrom || null, to: customTo || null };
+  }
   return { from: null, to: null };
 };
 
@@ -41,9 +45,6 @@ const sellerStats = (allSales, seller, range) => {
   const mine = (allSales || []).filter((s) => sameName(sellerOf(s), seller));
   const records = mine.filter((s) => isBetween(s.createdAt, range.from, range.to));
   const bills = realSales(records).filter((s) => s.paymentStatus !== "returned");
-  const settlements = records.filter(isSettlement);
-  // Money paid above a bill goes against the customer's old Udhaar (same rule as the server)
-  const overPaid = realSales(records).filter((s) => num(s.paidAmount) > num(s.grandTotal));
   const returns = mine.flatMap((s) =>
     (s.returns || []).filter((r) => inRange(returnDay(r), range)).map((r) => ({ ...r, sale: s }))
   );
@@ -68,9 +69,8 @@ const sellerStats = (allSales, seller, range) => {
     profit: totalProfit(bills),
     items: sumBy(bills, netItems),
     udhaarGiven: sumBy(bills, udhaarAdded),
-    udhaarCollected:
-      sumBy(settlements, (s) => s.paidAmount) + sumBy(overPaid, (s) => num(s.paidAmount) - num(s.grandTotal)),
-    collections: settlements.length + overPaid.length,
+    udhaarCollected: sumBy(records, udhaarCollected),
+    collections: records.filter(isUdhaarCollection).length,
     returnsCount: returns.length,
     returnsAmount: sumBy(returns, (r) => r.amount),
     customers: customerKeys.size,
@@ -81,12 +81,19 @@ const sellerStats = (allSales, seller, range) => {
 };
 
 const Sellers = () => {
-  const { allSales, allCustomers, shopSettings } = useApp();
+  const { allSales, allCustomers, shopSettings, activeSeller } = useApp();
   const { isAdmin } = useAuth();
   const curr = shopSettings.currencySymbol || "Rs.";
   const fmt = (n) => `${curr} ${Math.round(num(n)).toLocaleString()}`;
 
-  const [selectedSeller, setSelectedSeller] = useState(SELLERS[0] || "");
+  // The header seller filter: when one seller is picked there, this page shows only that seller
+  const headerSeller =
+    activeSeller && activeSeller !== "All Sellers" && activeSeller !== "All"
+      ? SELLERS.find((n) => sameName(n, activeSeller)) || activeSeller
+      : null;
+  const visibleSellers = useMemo(() => (headerSeller ? [headerSeller] : SELLERS), [headerSeller]);
+  const [pickedSeller, setSelectedSeller] = useState(SELLERS[0] || "");
+  const selectedSeller = headerSeller || pickedSeller;
   const [searchTerm, setSearchTerm] = useState("");
   const [preset, setPreset] = useState("This Month");
   const [customFrom, setCustomFrom] = useState("");
@@ -94,6 +101,7 @@ const Sellers = () => {
 
   // "today" is part of the key so Today / This Week / This Month move on after midnight
   const today = localDate();
+  const rangeSwapped = preset === "Custom" && !!customFrom && !!customTo && customFrom > customTo;
   const range = useMemo(() => rangeOf(preset, customFrom, customTo, today), [preset, customFrom, customTo, today]);
   const rangeLabel =
     preset === "Custom"
@@ -101,8 +109,8 @@ const Sellers = () => {
       : RANGE_LABELS[preset] || preset;
 
   const stats = useMemo(
-    () => Object.fromEntries(SELLERS.map((seller) => [seller, sellerStats(allSales, seller, range)])),
-    [allSales, range]
+    () => Object.fromEntries(visibleSellers.map((seller) => [seller, sellerStats(allSales, seller, range)])),
+    [allSales, range, visibleSellers]
   );
   const current = stats[selectedSeller] || sellerStats(allSales, selectedSeller, range);
 
@@ -200,13 +208,23 @@ const Sellers = () => {
               onChange={(e) => setCustomTo(e.target.value)}
               className="w-auto min-w-[9.5rem]"
             />
+            {rangeSwapped && (
+              <span role="alert" className="basis-full text-xs font-semibold text-saffron-700">
+                &quot;From&quot; is after &quot;To&quot;, so the dates were swapped: showing {range.from} to {range.to}.
+              </span>
+            )}
           </div>
         )}
       </div>
 
       {/* Seller cards (click to select) */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {SELLERS.map((seller) => {
+      {headerSeller && (
+        <p className="text-sm text-ink-soft bg-brand-50 border border-brand-100 rounded-xl px-3 py-2">
+          Showing {headerSeller} only (seller picked at the top). Choose &quot;All sellers&quot; there to compare sellers.
+        </p>
+      )}
+      <div className={`grid grid-cols-1 gap-4 ${visibleSellers.length > 1 ? "lg:grid-cols-2" : ""}`}>
+        {visibleSellers.map((seller) => {
           const st = stats[seller];
           const active = seller === selectedSeller;
           return (

@@ -30,11 +30,14 @@ export const itemCount = (s) =>
   (s?.items || []).reduce((sum, i) => sum + Math.max(0, itemQty(i) - Number(i.returnedQty || 0)), 0);
 
 // Does this sale belong to this customer? A sale with a customerId only matches that customer;
-// name / phone matching is only used for old sales saved without a customerId.
+// name / phone matching is only used for old sales saved without a customerId, and never for a
+// walk-in bill (a walk-in who gave a customer's phone number is not that customer's khata).
 export const saleBelongsTo = (s, cust) => {
   if (!s || !cust) return false;
   const sid = s.customerId || s.customer;
   if (sid) return sid === cust.id;
+  const saleName = (s.customerName || "").trim().toLowerCase();
+  if (!saleName || saleName === "walk-in customer") return false;
   if (cust.phone && s.customerPhone && s.customerPhone.trim() === cust.phone.trim()) return true;
   return !!(cust.name && s.customerName && s.customerName.trim().toLowerCase() === cust.name.trim().toLowerCase());
 };
@@ -45,3 +48,17 @@ export const udhaarAdded = (s) => (isSettlement(s) ? 0 : Math.max(0, Number(s.du
 // All IMEIs of a sale item
 export const itemImeis = (i) =>
   (i?.imeisArray && i.imeisArray.length > 0 ? i.imeisArray : [i?.imei]).filter(Boolean);
+
+// Money received against Udhaar on one record: a payment receipt, or the part of a customer's sale
+// paid above its total (that extra pays off their old balance). The upfront cash on a credit sale
+// is sale money, not Udhaar collected. Every page uses this one rule.
+export const udhaarCollected = (s) => {
+  if (!s) return 0;
+  const paid = Number(s.paidAmount || 0);
+  if (isSettlement(s)) return Math.max(0, paid);
+  if (!(s.customerId || s.customer)) return 0;
+  return Math.max(0, paid - Number(s.grandTotal || 0));
+};
+
+// Number of records that collected Udhaar
+export const isUdhaarCollection = (s) => udhaarCollected(s) > 0;

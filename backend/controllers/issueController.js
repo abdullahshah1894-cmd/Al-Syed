@@ -28,28 +28,29 @@ const createIssue = async (req, res) => {
   try {
     const { customerName, imei, phoneIssue, companyName } = req.body;
 
-    if (!customerName || !imei || !phoneIssue || !companyName) {
+    if (![customerName, imei, phoneIssue, companyName].every((v) => String(v ?? "").trim())) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Generate Ticket Number (e.g., MI-260915-XXXX)
-    const dateStr = new Date().toISOString().slice(2, 10).replace(/-/g, ""); // YYMMDD
-    const randomHex = Math.floor(Math.random() * 65535).toString(16).toUpperCase().padStart(4, "0");
-    const ticketNumber = `MI-${dateStr}-${randomHex}`;
-
-    const newIssue = {
-      ticket_number: ticketNumber,
-      customer_name: customerName,
-      imei,
-      phone_issue: phoneIssue,
-      company_name: companyName,
-      status: "Pending",
-    };
-
-    const { data, error } = await supabase
-      .from("mobile_issues")
-      .insert([newIssue])
-      .select();
+    // Ticket number MI-YYMMDD-XXXX, dated in shop time (Pakistan). ticket_number is unique in the
+    // database, so on the rare clash pick another suffix instead of failing.
+    const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Karachi" }).slice(2).replace(/-/g, "");
+    let data, error;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const randomHex = Math.floor(Math.random() * 65536).toString(16).toUpperCase().padStart(4, "0");
+      ({ data, error } = await supabase
+        .from("mobile_issues")
+        .insert([{
+          ticket_number: `MI-${dateStr}-${randomHex}`,
+          customer_name: customerName,
+          imei,
+          phone_issue: phoneIssue,
+          company_name: companyName,
+          status: "Pending",
+        }])
+        .select());
+      if (!error || error.code !== "23505") break;
+    }
 
     if (error) return handleDbError(error, res, "Failed to create issue");
     res.status(201).json(data[0]);

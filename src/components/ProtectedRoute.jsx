@@ -2,7 +2,8 @@ import { Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { ShieldAlert } from "lucide-react";
 
-const ProtectedRoute = ({ allowedRoles }) => {
+// layout: wraps the "Owner only" message so the menu stays on screen
+const ProtectedRoute = ({ allowedRoles, layout: Layout }) => {
   const { user, token } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
@@ -13,7 +14,7 @@ const ProtectedRoute = ({ allowedRoles }) => {
   }
 
   if (allowedRoles && !allowedRoles.includes(user.role)) {
-    return (
+    const message = (
       <div className="min-h-[70vh] flex flex-col justify-center items-center p-6 text-center">
         <div className="w-14 h-14 bg-saffron-50 text-saffron-600 rounded-2xl flex items-center justify-center mb-4">
           <ShieldAlert size={28} />
@@ -30,6 +31,7 @@ const ProtectedRoute = ({ allowedRoles }) => {
         </button>
       </div>
     );
+    return Layout ? <Layout>{message}</Layout> : message;
   }
 
   return <Outlet />;

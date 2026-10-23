@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 
 import { printElement } from "../services/printReceipt";
+import { itemImeis } from "../utils/sales";
 import { useShareImage } from "../components/useShareImage";
 import {
   Badge, Button, EmptyState, Field, IconButton, Input, Modal, Money, Segmented, Textarea, inputClass,
@@ -19,6 +20,97 @@ const fmt = (n) => (Number(n) || 0).toLocaleString("en-PK", { maximumFractionDig
 // eslint-disable-next-line react-refresh/only-export-components
 export { formatWAPhone } from "../utils/shareImage";
 
+// The bill being made is kept for this browser tab, so leaving New sale and coming back keeps it
+const DRAFT_KEY = "pos-draft-v1";
+const readDraft = () => {
+  try {
+    const raw = sessionStorage.getItem(DRAFT_KEY);
+    const draft = raw ? JSON.parse(raw) : null;
+    return draft && typeof draft === "object" && Array.isArray(draft.cart) ? draft : null;
+  } catch {
+    return null;
+  }
+};
+const writeDraft = (draft) => {
+  try {
+    if (draft) sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    else sessionStorage.removeItem(DRAFT_KEY);
+  } catch {
+    // Storage blocked (private window): the cart just isn't kept
+  }
+};
+
+// A kept cart can be out of date (sold on another screen, stock changed): keep only what is still in stock
+const checkCartStock = (cart, products) => {
+  const kept = [];
+  const dropped = [];
+  cart.forEach((item) => {
+    const product = products.find((p) => p.id === item.product);
+    if (item.imei) {
+      const inStock = (product?.imeis || []).some(
+        (u) => u.status === "in_stock" && [u.imei, u.imei1, u.imei2].includes(item.imei)
+      );
+      if (inStock) kept.push(item);
+      else dropped.push(`${item.productName} (${item.imei})`);
+      return;
+    }
+    const available = product ? Math.max(0, Number(product.quantity) || 0) : 0;
+    if (available <= 0) {
+      dropped.push(item.productName);
+    } else if (item.quantity > available) {
+      dropped.push(`${item.quantity - available} x ${item.productName}`);
+      kept.push({ ...item, quantity: available, subtotal: available * (Number(item.unitSalePrice) || 0) });
+    } else {
+      kept.push(item);
+    }
+  });
+  return { kept, dropped };
+};
+
+// Cart units -> bill lines: one line per product and price, with all its phones' IMEIs on it
+const toSaleLines = (cart) => {
+  const lines = [];
+  const byKey = new Map();
+  cart.forEach((item) => {
+    const price = Number(item.unitSalePrice) || 0;
+    const key = `${item.product}|${price}|${item.imei ? "imei" : "bulk"}`;
+    const line = byKey.get(key);
+    if (line) {
+      line.quantity += Number(item.quantity) || 1;
+      line.subtotal = line.quantity * price;
+      if (item.imei) line.imeisArray.push(item.imei);
+      return;
+    }
+    const quantity = Number(item.quantity) || 1;
+    const next = {
+      product: item.product,
+      productId: item.product,
+      productName: item.productName,
+      brand: item.brand,
+      model: item.model,
+      category: item.category,
+      quantity,
+      unitSalePrice: price,
+      unitPurchasePrice: item.unitPurchasePrice,
+      subtotal: quantity * price,
+      imeisArray: item.imei ? [item.imei] : [],
+      ...(item.imei ? { imei: item.imei } : {}),
+    };
+    byKey.set(key, next);
+    lines.push(next);
+  });
+  return lines;
+};
+
+const methodLabel = (m) => (m === "Credit (Udhaar)" ? "Udhaar (pending bill)" : m || "Cash");
+// "2026-10-30" -> "30 Oct 2026" (read as a local date, not UTC)
+const showDueDate = (d) => {
+  const day = d ? String(d).slice(0, 10) : "";
+  if (!day) return "";
+  const date = new Date(`${day}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? day : date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+};
+
 // ─────────────────────────────────────────────────────────────────
 // POS Component
 // ─────────────────────────────────────────────────────────────────
@@ -26,25 +118,54 @@ const POS = () => {
   // All customers, not the header-filtered list: choosing a seller only sorts their customers first
   const { products, allCustomers: customers, recordSale, shopSettings, addCustomer, activeSeller, setActiveSeller } = useApp();
 
-  const [cart, setCart] = useState([]);
+  // The bill in progress comes back from this tab's storage (see DRAFT_KEY)
+  const [draft] = useState(readDraft);
+  const [cart, setCart] = useState(() => draft?.cart || []);
   const [searchTerm, setSearchTerm] = useState("");
   // The header filter can say "All Sellers" / "All", which is not a seller: the bill then goes to the first seller
   const selectedSeller = activeSeller && !/^all\b/i.test(activeSeller) ? activeSeller : SELLERS[0];
   const setSelectedSeller = setActiveSeller;
-  const [pickedCustomer, setSelectedCustomer] = useState(null);
+  const [pickedCustomer, setSelectedCustomer] = useState(() => draft?.customer || null);
   // Always the latest copy of the chosen customer, so the previous Udhaar shown and printed is current
   const selectedCustomer = pickedCustomer ? customers.find((c) => c.id === pickedCustomer.id) || pickedCustomer : null;
-  const [customerSearch, setCustomerSearch] = useState("");
+  const [customerSearch, setCustomerSearch] = useState(() => draft?.customerSearch || "");
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
-  const [discount, setDiscount] = useState(0);
-  const [taxPercent, setTaxPercent] = useState(0);
-  const [paymentMethod, setPaymentMethod] = useState("Cash");
-  const [paidAmountInput, setPaidAmountInput] = useState("");
-  const [dueDate, setDueDate] = useState("");
+  const [discount, setDiscount] = useState(() => draft?.discount ?? 0);
+  const [taxPercent, setTaxPercent] = useState(() => draft?.taxPercent ?? 0);
+  const [paymentMethod, setPaymentMethod] = useState(() => draft?.paymentMethod || "Cash");
+  const [paidAmountInput, setPaidAmountInput] = useState(() => draft?.paidAmountInput || "");
+  const [cashReceived, setCashReceived] = useState(() => draft?.cashReceived || "");
+  const [dueDate, setDueDate] = useState(() => draft?.dueDate || "");
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const submittingRef = useRef(false); // blocks a second click before the button re-renders as disabled
-  const [notes, setNotes] = useState("");
+  const [notes, setNotes] = useState(() => draft?.notes || "");
+
+  // A kept cart is checked against the stock once products are loaded
+  const [stockCheckPending, setStockCheckPending] = useState(() => (draft?.cart || []).length > 0);
+  const [cartNotice, setCartNotice] = useState("");
+  if (stockCheckPending && products.length > 0) {
+    setStockCheckPending(false);
+    const { kept, dropped } = checkCartStock(cart, products);
+    if (dropped.length > 0) {
+      setCart(kept);
+      setCartNotice(`No longer in stock, taken out of the cart: ${dropped.join(", ")}`);
+    }
+  }
+
+  // Keep the bill in progress for this tab; an empty bill clears it
+  useEffect(() => {
+    const isEmpty =
+      cart.length === 0 && !pickedCustomer && !customerSearch && !Number(discount) && !Number(taxPercent) &&
+      paymentMethod === "Cash" && !paidAmountInput && !cashReceived && !dueDate && !notes;
+    writeDraft(isEmpty ? null : {
+      cart,
+      customer: pickedCustomer
+        ? { id: pickedCustomer.id, name: pickedCustomer.name, phone: pickedCustomer.phone, sellerName: pickedCustomer.sellerName, totalPending: pickedCustomer.totalPending }
+        : null,
+      customerSearch, discount, taxPercent, paymentMethod, paidAmountInput, cashReceived, dueDate, notes,
+    });
+  }, [cart, pickedCustomer, customerSearch, discount, taxPercent, paymentMethod, paidAmountInput, cashReceived, dueDate, notes]);
 
   // Customer creation modal
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
@@ -307,6 +428,10 @@ const POS = () => {
     : currentSaleTotal;
   const dueAmount = Math.max(0, currentSaleTotal - effectivePaid);
   const balanceAfterSale = Math.max(0, previousBalance + currentSaleTotal - effectivePaid);
+  // Cash handed over (optional, Cash only): the bill is still paid at its total, the rest is change
+  const cashGiven = paymentMethod === "Cash" ? toAmount(cashReceived) : 0;
+  const changeDue = cashGiven > currentSaleTotal ? cashGiven - currentSaleTotal : 0;
+  const cashShort = cashGiven > 0 && cashGiven < currentSaleTotal;
 
   // Set the price of every unit of one product in the cart
   const setCartPrice = (productId, value) => {
@@ -346,17 +471,18 @@ const POS = () => {
       alert("Please select a customer for Udhaar (Credit) sales.");
       return;
     }
+    if (cashShort) {
+      alert(`Cash received (Rs. ${fmt(cashGiven)}) is less than the bill (Rs. ${fmt(currentSaleTotal)}). Enter the full amount, or use Pending bill for a part payment.`);
+      return;
+    }
 
     const saleData = {
       customer: selectedCustomer ? selectedCustomer.id : null,
       customerName: selectedCustomer ? selectedCustomer.name : (customerSearch.trim() || "Walk-in Customer"),
       customerPhone: selectedCustomer ? selectedCustomer.phone : "",
       sellerName: selectedSeller,
-      items: cart.map((item) => ({
-        ...item,
-        productId: item.product,
-        imeisArray: item.imei ? [item.imei] : (item.imeisArray || []),
-      })),
+      // One line per product (and price): quantity = units, imeisArray = every phone sold on it
+      items: toSaleLines(cart),
       subtotalAmount: subtotal,
       discountAmount,
       taxPercent: toAmount(taxPercent),
@@ -366,7 +492,7 @@ const POS = () => {
       dueAmount,
       paymentMethod,
       paymentStatus: dueAmount === 0 ? "paid" : effectivePaid > 0 ? "partial" : "unpaid",
-      dueDate: dueDate || null,
+      dueDate: isUdhaarSale ? dueDate || null : null,
       cashierName: selectedSeller,
       notes,
     };
@@ -382,15 +508,25 @@ const POS = () => {
     }
     // Not saved: keep the cart and the checkout open so nothing is lost
     if (!recorded) return;
-    setCompletedSaleInvoice({ ...recorded, sellerName: selectedSeller, previousBalance, balanceAfterSale });
+    setCompletedSaleInvoice({
+      ...recorded,
+      sellerName: selectedSeller,
+      previousBalance,
+      balanceAfterSale,
+      cashReceived: changeDue > 0 ? cashGiven : 0,
+      changeGiven: changeDue,
+    });
 
+    writeDraft(null);
     setCart([]);
+    setCartNotice("");
     setSelectedCustomer(null);
     setCustomerSearch("");
     setDiscount(0);
     setTaxPercent(0);
     setPaymentMethod("Cash");
     setPaidAmountInput("");
+    setCashReceived("");
     setDueDate("");
     setNotes("");
     setShowCheckoutModal(false);
@@ -450,7 +586,7 @@ const POS = () => {
       const price = item.unitPrice || item.unitSalePrice || item.price || 0;
       const sub = item.subtotal || qty * price;
       text += `${index + 1}. *${item.productName || item.name}* (x${qty}) - ${currency} ${Number(sub || 0).toLocaleString()}\n`;
-      const imeis = (item.imeisArray && item.imeisArray.length > 0 ? item.imeisArray : [item.imei]).filter(Boolean);
+      const imeis = itemImeis(item);
       if (imeis.length > 0) {
         text += `   IMEI: ${imeis.join(", ")}\n`;
       }
@@ -465,15 +601,23 @@ const POS = () => {
       text += `*Discount:* -${currency} ${Number(sale.discountAmount).toLocaleString()}\n`;
     }
     text += `*GRAND TOTAL:* ${currency} ${Number(sale.grandTotal || 0).toLocaleString()}\n`;
+    text += `*Payment:* ${methodLabel(sale.paymentMethod)}\n`;
     text += `*Paid Amount:* ${currency} ${Number(sale.paidAmount || 0).toLocaleString()}\n`;
+    if (Number(sale.changeGiven || 0) > 0) {
+      text += `*Cash received:* ${currency} ${Number(sale.cashReceived).toLocaleString()} · *Change:* ${currency} ${Number(sale.changeGiven).toLocaleString()}\n`;
+    }
     if (Number(sale.dueAmount || 0) > 0) {
       text += `*⚠️ DUE / UDHAAR:* ${currency} ${Number(sale.dueAmount || 0).toLocaleString()}\n`;
+      if (sale.dueDate) text += `*Due date:* ${showDueDate(sale.dueDate)}\n`;
+    }
+    const toOldUdhaar = sale.customerId ? Math.max(0, Number(sale.paidAmount || 0) - Number(sale.grandTotal || 0)) : 0;
+    if (toOldUdhaar > 0) {
+      text += `${currency} ${toOldUdhaar.toLocaleString()} paid above this bill went to old Udhaar\n`;
     }
     if (Number(sale.previousBalance || 0) > 0) {
       text += `*Previous Udhaar:* ${currency} ${Number(sale.previousBalance).toLocaleString()}\n`;
       text += `*TOTAL OUTSTANDING:* ${currency} ${Number(sale.balanceAfterSale || 0).toLocaleString()}\n`;
     }
-    text += `*Payment:* ${sale.paymentMethod || "Cash"}\n`;
     text += `━━━━━━━━━━━━━━━━━━━━━\n`;
     text += `Thank you for your business! 🙏`;
     return text;
@@ -692,6 +836,20 @@ const POS = () => {
 
         {/* Cart items */}
         <div className="flex-1 min-h-[10rem] lg:min-h-0 lg:overflow-y-auto custom-scrollbar p-4 space-y-2">
+          {cartNotice && (
+            <div role="status" className="flex items-start gap-2 rounded-xl border border-saffron-200 bg-saffron-50 px-3 py-2 text-xs font-semibold text-saffron-700">
+              <AlertCircle size={14} className="shrink-0 mt-0.5" aria-hidden="true" />
+              <span className="flex-1">{cartNotice}</span>
+              <button
+                type="button"
+                aria-label="Dismiss"
+                onClick={() => setCartNotice("")}
+                className="h-6 w-6 -mr-1 -mt-0.5 inline-flex items-center justify-center rounded-md hover:bg-saffron-100"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
           {cart.length === 0 ? (
             <EmptyState
               icon={ShoppingCart}
@@ -891,7 +1049,7 @@ const POS = () => {
             <Button
               size="lg"
               onClick={finalizeCheckout}
-              disabled={isSubmitting || (paymentMethod === "Credit (Udhaar)" && !selectedCustomer)}
+              disabled={isSubmitting || cashShort || (paymentMethod === "Credit (Udhaar)" && !selectedCustomer)}
               className="flex-1 sm:flex-none"
             >
               {isSubmitting ? "Saving…" : "Confirm and save bill"}
@@ -926,7 +1084,7 @@ const POS = () => {
                     type="button"
                     key={method}
                     aria-pressed={isSelected}
-                    onClick={() => { setPaymentMethod(method); setPaidAmountInput(""); }}
+                    onClick={() => { setPaymentMethod(method); setPaidAmountInput(""); setCashReceived(""); }}
                     className={cx(
                       "h-11 px-2 rounded-xl border text-sm font-semibold transition-colors",
                       isSelected
@@ -964,6 +1122,33 @@ const POS = () => {
                 </div>
               )}
             </div>
+          )}
+
+          {paymentMethod === "Cash" && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+              <Field label="Cash received (optional)" htmlFor="pos-cash-received">
+                <Input
+                  id="pos-cash-received"
+                  type="number" min="0" inputMode="decimal" placeholder={String(currentSaleTotal)} value={cashReceived}
+                  onChange={(e) => setCashReceived(e.target.value)}
+                  className="font-semibold"
+                />
+              </Field>
+              <div
+                aria-live="polite"
+                className={cx(
+                  "rounded-xl px-3 py-2 text-sm font-semibold",
+                  cashShort ? "bg-khata-50 text-khata-700" : "bg-sunken text-ink"
+                )}
+              >
+                {cashShort
+                  ? `Rs. ${fmt(currentSaleTotal - cashGiven)} short. Take the full amount, or use Pending bill.`
+                  : <>Change to give: <span className="tabular-nums">Rs. {fmt(changeDue)}</span></>}
+              </div>
+            </div>
+          )}
+          {!isUdhaarSale && !selectedCustomer && (
+            <p className="text-xs text-muted">Walk-in: the bill is paid at its total, Rs. {fmt(currentSaleTotal)}. Anything handed over above that is change.</p>
           )}
 
           <Field label="Notes (optional)" htmlFor="pos-notes">
@@ -1037,17 +1222,20 @@ const POS = () => {
                   <span>ITEM / QTY</span>
                   <span>AMOUNT</span>
                 </div>
-                {getGroupedItems(completedSaleInvoice.items || []).map((item, idx) => {
+                {/* The saved bill lines: one per product and price, with all their IMEIs */}
+                {(completedSaleInvoice.items || []).map((item, idx) => {
+                  const qty = Number(item.quantity || item.qty || 1);
                   const rate = item.unitSalePrice || item.price || 0;
-                  const sub = item.subtotal || (item.quantity * rate);
+                  const sub = item.subtotal || (qty * rate);
+                  const imeis = itemImeis(item);
                   return (
                     <div key={idx} className="pb-1">
                       <div className="flex justify-between items-start text-sm">
-                        <div className="pr-2">
+                        <div className="pr-2 min-w-0">
                           <div className="font-semibold">{item.productName || item.name}</div>
-                          <div className="text-xs">{item.quantity} × Rs. {Number(rate).toLocaleString()}</div>
-                          {item.imeisArray && item.imeisArray.length > 0 && (
-                            <div className="font-mono text-[10px]">IMEI: {item.imeisArray.join(", ")}</div>
+                          <div className="text-xs">{qty} × Rs. {Number(rate).toLocaleString()}</div>
+                          {imeis.length > 0 && (
+                            <div className="font-mono text-[10px] break-all">IMEI: {imeis.join(", ")}</div>
                           )}
                         </div>
                         <span className="font-semibold whitespace-nowrap">Rs. {Number(sub).toLocaleString()}</span>
@@ -1071,20 +1259,40 @@ const POS = () => {
 
                 <div className="flex justify-between text-lg font-black mt-2 pt-2 border-t border-black"><span>TOTAL</span><span>Rs. {completedSaleInvoice.grandTotal.toLocaleString()}</span></div>
 
-                {(completedSaleInvoice.dueAmount > 0 || completedSaleInvoice.previousBalance > 0) && (
-                  <div className="mt-2 pt-2 border-t border-dashed border-black">
-                    <div className="flex justify-between text-sm"><span>Paid</span><span>Rs. {(completedSaleInvoice.paidAmount || 0).toLocaleString()}</span></div>
-                    {completedSaleInvoice.dueAmount > 0 && (
-                      <div className="flex justify-between text-sm font-bold mt-1"><span>BALANCE DUE</span><span>Rs. {completedSaleInvoice.dueAmount.toLocaleString()}</span></div>
-                    )}
-                    {completedSaleInvoice.previousBalance > 0 && (
-                      <>
-                        <div className="flex justify-between text-sm mt-1"><span>Previous Udhaar</span><span>Rs. {completedSaleInvoice.previousBalance.toLocaleString()}</span></div>
-                        <div className="flex justify-between text-sm font-bold mt-1"><span>TOTAL OUTSTANDING</span><span>Rs. {(completedSaleInvoice.balanceAfterSale || 0).toLocaleString()}</span></div>
-                      </>
-                    )}
-                  </div>
-                )}
+                {(() => {
+                  const sale = completedSaleInvoice;
+                  const paid = Number(sale.paidAmount || 0);
+                  const due = Number(sale.dueAmount || 0);
+                  // A customer who paid above this bill: the extra came off their old Udhaar (server rule)
+                  const toOldUdhaar = sale.customerId ? Math.max(0, paid - Number(sale.grandTotal || 0)) : 0;
+                  return (
+                    <div className="mt-2 pt-2 border-t border-dashed border-black space-y-1">
+                      <div className="flex justify-between text-sm"><span>Payment</span><span className="font-semibold">{methodLabel(sale.paymentMethod)}</span></div>
+                      <div className="flex justify-between text-sm"><span>Paid</span><span>Rs. {paid.toLocaleString()}</span></div>
+                      {Number(sale.changeGiven || 0) > 0 && (
+                        <>
+                          <div className="flex justify-between text-sm"><span>Cash received</span><span>Rs. {Number(sale.cashReceived).toLocaleString()}</span></div>
+                          <div className="flex justify-between text-sm font-bold"><span>CHANGE</span><span>Rs. {Number(sale.changeGiven).toLocaleString()}</span></div>
+                        </>
+                      )}
+                      {due > 0 && (
+                        <div className="flex justify-between text-sm font-bold"><span>BALANCE DUE</span><span>Rs. {due.toLocaleString()}</span></div>
+                      )}
+                      {due > 0 && sale.dueDate && (
+                        <div className="flex justify-between text-sm"><span>Due date</span><span>{showDueDate(sale.dueDate)}</span></div>
+                      )}
+                      {toOldUdhaar > 0 && (
+                        <div className="text-xs">Rs. {toOldUdhaar.toLocaleString()} paid above this bill went to old Udhaar.</div>
+                      )}
+                      {Number(sale.previousBalance || 0) > 0 && (
+                        <>
+                          <div className="flex justify-between text-sm"><span>Previous Udhaar</span><span>Rs. {Number(sale.previousBalance).toLocaleString()}</span></div>
+                          <div className="flex justify-between text-sm font-bold"><span>TOTAL OUTSTANDING</span><span>Rs. {Number(sale.balanceAfterSale || 0).toLocaleString()}</span></div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="border-t-2 border-dashed border-black my-3"></div>

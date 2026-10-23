@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useEffect, useRef } from "react";
+/* eslint-disable react-refresh/only-export-components -- the provider, its hook and shared helpers live together on purpose */
+import { createContext, useContext, useState, useEffect, useRef } from "react";
 import { api } from "../services/api";
 import { useAuth } from "./AuthContext";
 import { localDate } from "../utils/dates";
@@ -15,6 +16,16 @@ const warrantyStatus = (w) => {
 };
 
 const AppContext = createContext();
+
+// The header's seller filter is remembered on this device across reloads
+const SELLER_KEY = "alsyed.activeSeller";
+const readSavedSeller = () => {
+  try {
+    return localStorage.getItem(SELLER_KEY) || "All Sellers";
+  } catch {
+    return "All Sellers";
+  }
+};
 
 // The two hardcoded sellers for this shop
 export const SELLERS = ["Aziz", "Mubashir"];
@@ -35,7 +46,15 @@ export const AppProvider = ({ children }) => {
   const [warranties, setWarranties] = useState([]);
   const [issues, setIssues] = useState([]);
   const [expenses, setExpenses] = useState([]);
-  const [activeSeller, setActiveSeller] = useState("All Sellers");
+  const [activeSeller, setActiveSellerState] = useState(readSavedSeller);
+  const setActiveSeller = (name) => {
+    setActiveSellerState(name);
+    try {
+      localStorage.setItem(SELLER_KEY, name);
+    } catch {
+      // storage blocked: the filter still works for this visit
+    }
+  };
   const [suppliers, setSuppliers] = useState([]);
   const [supplierTransactions, setSupplierTransactions] = useState([]);
   const [backendOnline, setBackendOnline] = useState(false);
@@ -206,6 +225,16 @@ const normalizeProduct = (p) => {
     alert(`${what} was NOT saved.\n\n${err.message}\n\nNothing was lost on screen — please try again.`);
   };
 
+  // The same save tapped twice while the first is still on its way returns the first one's
+  // result instead of saving a second copy (double receipts, double bills).
+  const inFlight = useRef(new Map());
+  const once = (key, run) => {
+    if (inFlight.current.has(key)) return inFlight.current.get(key);
+    const promise = run().finally(() => inFlight.current.delete(key));
+    inFlight.current.set(key, promise);
+    return promise;
+  };
+
   const requestSeq = useRef({ products: 0, customers: 0, warranties: 0, suppliers: 0 });
   const latestOnly = async (key, load, apply) => {
     const seq = ++requestSeq.current[key];
@@ -220,7 +249,7 @@ const normalizeProduct = (p) => {
     latestOnly("warranties", api.getWarranties, (data) => Array.isArray(data) && setWarranties(data.map(normalizeWarranty)));
 
   // Fetch all data from Supabase-backed backend once someone is logged in; clear it on logout
-  const { token } = useAuth();
+  const { token, isAdmin } = useAuth();
   const [dataToken, setDataToken] = useState(token);
   if (dataToken !== token) {
     setDataToken(token);
@@ -249,7 +278,8 @@ const normalizeProduct = (p) => {
           api.getMobileIssues ? api.getMobileIssues() : Promise.resolve([]),
           api.getExpenses ? api.getExpenses() : Promise.resolve([]),
           api.getSettings(),
-          api.getSuppliers(),
+          // Suppliers are owner-only on the server; a cashier would only get "not allowed"
+          isAdmin ? api.getSuppliers() : Promise.resolve(null),
         ]);
         if (cancelled) return;
 
@@ -289,11 +319,15 @@ const normalizeProduct = (p) => {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, isAdmin]);
 
   // Add new sale — saved to Supabase first; the screen only shows it once the database has it.
   // The backend marks IMEIs sold, reduces stock, creates warranties and updates the customer balance.
-  const recordSale = async (newSaleData) => {
+  const recordSale = (newSaleData) =>
+    once(`sale:${JSON.stringify([newSaleData.customer || newSaleData.customerId || "", newSaleData.items, newSaleData.grandTotal, newSaleData.paidAmount])}`, () =>
+      saveSale(newSaleData)
+    );
+  const saveSale = async (newSaleData) => {
     // Carry each item's cost so profit is stored with the sale
     const items = (newSaleData.items || []).map((item) => {
       const prod = products.find((p) => p.id === (item.productId || item.product || item.id));
@@ -328,10 +362,8 @@ const normalizeProduct = (p) => {
 
   // Add Product — shown only after Supabase saves it
   const addProduct = async (productData) => {
-    const payload = {
-      ...productData,
-      barcode: productData.barcode || `888462${Math.floor(10000 + Math.random() * 90000)}`,
-    };
+    // Left blank, the database gives the product the next unique barcode
+    const payload = { ...productData, barcode: String(productData.barcode || "").trim() };
     try {
       const saved = await api.createProduct(payload);
       const normalized = normalizeProduct(saved);
@@ -448,8 +480,23 @@ const normalizeProduct = (p) => {
     }
   };
 
+  // Move a claim along: { status, notes }
+  const updateWarrantyClaim = async (imei, claimId, data) => {
+    try {
+      const saved = await api.updateWarrantyClaim(imei, claimId, data);
+      const normalized = normalizeWarranty(saved);
+      setWarranties((prev) => prev.map((w) => (w.id === normalized.id ? normalized : w)));
+      return normalized;
+    } catch (err) {
+      notifyError("Claim update", err);
+      return null;
+    }
+  };
+
   // Settle Customer Pending Payment — the backend lowers the balance when it saves the receipt
-  const payPendingAmount = async (customerId, amountPaid, sellerName = "") => {
+  const payPendingAmount = (customerId, amountPaid, sellerName = "") =>
+    once(`pay:${customerId}:${Number(amountPaid)}`, () => savePayment(customerId, amountPaid, sellerName));
+  const savePayment = async (customerId, amountPaid, sellerName = "") => {
     const customer = customers.find((c) => c.id === customerId);
 
     if (customer) {
@@ -799,6 +846,7 @@ const normalizeProduct = (p) => {
         deleteCustomer,
         addStock,
         addWarrantyClaim,
+        updateWarrantyClaim,
         refreshProducts,
         refreshCustomers,
         returnSaleItems,

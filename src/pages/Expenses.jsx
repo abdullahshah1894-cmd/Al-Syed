@@ -151,11 +151,12 @@ const Expenses = () => {
     if (saving) return;
     if (editingExpense && !isAdmin) return;
     if (!form.title.trim()) { setFormError("Expense title is required."); return; }
-    if (!form.amount || Number(form.amount) <= 0) { setFormError("Amount must be greater than zero."); return; }
+    const amount = Math.round(Number(form.amount) * 100) / 100;
+    if (!form.amount || !Number.isFinite(amount) || amount <= 0) { setFormError("Amount must be greater than zero."); return; }
 
     const data = {
       title: form.title.trim(),
-      amount: Number(form.amount),
+      amount,
       category: form.category,
       description: form.description.trim() || null,
       sellerName: form.sellerName || null,
@@ -436,7 +437,7 @@ const Expenses = () => {
           </Field>
 
           <Field label={`Amount (${curr}) *`} htmlFor="exp-amount">
-            <Input id="exp-amount" type="number" inputMode="decimal" min="1" required value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="0" />
+            <Input id="exp-amount" type="number" inputMode="decimal" min="0.01" step="0.01" required value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="0" />
           </Field>
 
           <Field label="Category" htmlFor="exp-category">

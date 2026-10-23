@@ -410,8 +410,20 @@ const Suppliers = () => {
     setShowPurchase(true);
   };
 
-  const setLine = (key, patch) => setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
-  const removeLine = (key) => setLines((prev) => prev.filter((l) => l.key !== key));
+  // Any change to the purchase clears the last error, so a fixed problem stops showing
+  const clearPurchaseError = () => setPurchaseError((err) => (err ? "" : err));
+  const setLine = (key, patch) => {
+    clearPurchaseError();
+    setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  };
+  const removeLine = (key) => {
+    clearPurchaseError();
+    setLines((prev) => prev.filter((l) => l.key !== key));
+  };
+  const addLine = () => {
+    clearPurchaseError();
+    setLines((prev) => [...prev, newLine()]);
+  };
 
   const pickProduct = (key, p) => {
     if (!p) { setLine(key, { productId: "", productQuery: "" }); return; }
@@ -540,6 +552,7 @@ const Suppliers = () => {
       if (!tx) return;
       setShowPurchase(false);
       setLines([]);
+      setPurchaseError("");
     } finally {
       setSavingPurchase(false);
     }
@@ -781,7 +794,64 @@ const Suppliers = () => {
             {/* Statement */}
             <div>
               <h3 className="text-base font-semibold mb-2">Account statement</h3>
-              <TableWrap>
+
+              {/* Phones: one card per entry instead of a wide table */}
+              <ul className="md:hidden space-y-2">
+                <li className="rounded-xl bg-sunken/60 border border-line px-3 py-2.5 flex items-center justify-between gap-3">
+                  <span className="text-sm font-semibold text-ink-soft">Opening balance</span>
+                  <span className={`font-semibold tabular-nums whitespace-nowrap ${balanceCls(viewSupplier.openingBalance)}`}>
+                    {money(viewSupplier.openingBalance)}
+                  </span>
+                </li>
+                {statement.length === 0 ? (
+                  <li>
+                    <EmptyState
+                      icon={FileText}
+                      title="No purchases or payments yet"
+                      description='Use "New purchase" when stock arrives and "Record payment" when you pay.'
+                    />
+                  </li>
+                ) : (
+                  statement.map((t) => (
+                    <li key={t.id} className="rounded-xl border border-line p-3 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {t.type === "purchase" ? <Badge tone="brand">Purchase</Badge> : <Badge tone="paid">Payment</Badge>}
+                            {t.stockAdded && <span className="text-[11px] text-muted">Stock added</span>}
+                          </div>
+                          <div className="text-xs text-muted">
+                            {fmtDate(t.date)}
+                            {t.invoiceNumber ? <> · <span className="font-mono">{t.invoiceNumber}</span></> : null}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 gap-1">
+                          <IconButton icon={Edit3} label="Edit entry" onClick={() => openEditTx(t)} />
+                          <IconButton icon={Trash2} label="Delete entry" variant="danger-soft" onClick={() => handleDeleteTx(t)} />
+                        </div>
+                      </div>
+                      {itemsSummary(t) && <p className="text-sm text-ink-soft break-words">{itemsSummary(t)}</p>}
+                      <dl className="grid grid-cols-3 gap-2 rounded-lg bg-sunken p-2 text-xs">
+                        <div className="min-w-0">
+                          <dt className="text-muted">Amount</dt>
+                          <dd className="font-semibold text-ink truncate">{t.type === "purchase" ? money(t.amount) : "—"}</dd>
+                        </div>
+                        <div className="min-w-0">
+                          <dt className="text-muted">Paid</dt>
+                          <dd className="font-semibold text-paid-600 truncate">{t.paid ? money(t.paid) : "—"}</dd>
+                        </div>
+                        <div className="min-w-0">
+                          <dt className="text-muted">Balance owed</dt>
+                          <dd className={`font-semibold truncate ${balanceCls(t.running)}`}>{balanceLabel(t.running)}</dd>
+                        </div>
+                      </dl>
+                      {t.notes && <p className="text-xs text-muted break-words">{t.notes}</p>}
+                    </li>
+                  ))
+                )}
+              </ul>
+
+              <TableWrap className="hidden md:block">
                 <thead>
                   <tr>
                     <Th>Date</Th>
@@ -859,7 +929,7 @@ const Suppliers = () => {
           </>
         }
       >
-        <form id="supplier-form" onSubmit={handleSupplierSubmit} className="space-y-4">
+        <form id="supplier-form" onSubmit={handleSupplierSubmit} onChange={() => supplierError && setSupplierError("")} className="space-y-4">
           <ErrorNote>{supplierError}</ErrorNote>
           <Field label="Supplier name *" htmlFor="sup-name">
             <Input id="sup-name" type="text" required value={supplierForm.name} onChange={(e) => setSupplierForm({ ...supplierForm, name: e.target.value })}
@@ -907,7 +977,7 @@ const Suppliers = () => {
           </>
         }
       >
-        <form id="purchase-form" onSubmit={handlePurchaseSubmit} className="space-y-4">
+        <form id="purchase-form" onSubmit={handlePurchaseSubmit} onChange={clearPurchaseError} className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <Field label="Date" htmlFor="pur-date">
               <Input id="pur-date" type="date" value={purchaseForm.date} onChange={(e) => setPurchaseForm({ ...purchaseForm, date: e.target.value })} />
@@ -1041,7 +1111,7 @@ const Suppliers = () => {
 
             <button
               type="button"
-              onClick={() => setLines((prev) => [...prev, newLine()])}
+              onClick={addLine}
               className="w-full h-11 border border-dashed border-line-strong hover:border-brand-400 text-ink-soft hover:text-brand-700 hover:bg-brand-50 rounded-2xl text-sm font-semibold flex items-center justify-center gap-1.5 transition-colors"
             >
               <Plus size={16} aria-hidden="true" /> Add item
@@ -1115,7 +1185,7 @@ const Suppliers = () => {
           </>
         }
       >
-        <form id="payment-form" onSubmit={handlePaymentSubmit} className="space-y-4">
+        <form id="payment-form" onSubmit={handlePaymentSubmit} onChange={() => paymentError && setPaymentError("")} className="space-y-4">
           <ErrorNote>{paymentError}</ErrorNote>
           <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-4">
             <Field label={`Amount (${curr}) *`} htmlFor="pay-amount">
@@ -1154,7 +1224,7 @@ const Suppliers = () => {
         }
       >
         {editingTx && (
-          <form id="tx-form" onSubmit={handleTxSubmit} className="space-y-4">
+          <form id="tx-form" onSubmit={handleTxSubmit} onChange={() => txError && setTxError("")} className="space-y-4">
             <ErrorNote>{txError}</ErrorNote>
             <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-4">
               <Field label="Date" htmlFor="tx-date">

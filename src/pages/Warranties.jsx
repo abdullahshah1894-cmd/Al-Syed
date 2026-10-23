@@ -1,6 +1,7 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useApp } from "../context/AppContext";
-import { ShieldCheck, Search, Wrench, FileText } from "lucide-react";
+import { useAuth } from "../context/AuthContext";
+import { ShieldCheck, Search, Wrench, FileText, ListChecks } from "lucide-react";
 import MobileIssues from "./MobileIssues";
 import {
   Page,
@@ -9,6 +10,7 @@ import {
   Badge,
   Button,
   Field,
+  Input,
   Select,
   Textarea,
   Segmented,
@@ -20,12 +22,87 @@ import {
   inputClass,
 } from "../components/ui";
 
-// Warranty dates are stored as YYYY-MM-DD (or a timestamp): show the local day, "—" when missing
+// Warranty dates are stored as YYYY-MM-DD (or a timestamp): show the local day as dd/mm/yyyy, "—" when missing
 const showDate = (d) => {
   if (!d) return "—";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(String(d))) return String(d);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d));
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
   const date = new Date(d);
-  return isNaN(date.getTime()) ? String(d) : date.toLocaleDateString("en-CA");
+  return isNaN(date.getTime()) ? String(d) : date.toLocaleDateString("en-GB");
+};
+
+// Claim workflow (same list the server accepts)
+const CLAIM_STATUSES = ["Pending", "In Repair", "Sent to Company", "Resolved", "Rejected"];
+const CLAIM_LABELS = { "In Repair": "In repair", "Sent to Company": "Sent to company" };
+const claimLabel = (s) => CLAIM_LABELS[s] || s || "Pending";
+const CLAIM_TONES = { Pending: "saffron", "In Repair": "brand", "Sent to Company": "brand", Resolved: "paid", Rejected: "neutral" };
+const claimTone = (s) => CLAIM_TONES[s || "Pending"] || "neutral";
+const isOpenClaim = (c) => !["Resolved", "Rejected"].includes(c.status);
+
+// One claim: details for everyone, status / notes editing for the owner
+const ClaimRow = ({ warranty, claim, canEdit, onSave }) => {
+  const [status, setStatus] = useState(claim.status || "Pending");
+  const [notes, setNotes] = useState(claim.notes || "");
+  const [saving, setSaving] = useState(false);
+  const changed = status !== (claim.status || "Pending") || notes.trim() !== (claim.notes || "").trim();
+  const idBase = `claim-${claim.id}`;
+
+  const save = async (e) => {
+    e.preventDefault();
+    if (!changed || saving) return;
+    setSaving(true);
+    try {
+      // updateWarrantyClaim alerts the user itself if the database refuses
+      await onSave(warranty.imei, claim.id, { status, notes: notes.trim() });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <li className="rounded-xl border border-line p-3 space-y-2">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-ink break-words">{claim.issue || "No issue written"}</p>
+          <p className="text-xs text-muted">
+            Logged {showDate(claim.claimDate)}
+            {claim.claimType ? ` · ${claim.claimType} claim` : ""}
+            {claim.closedDate ? ` · Closed ${showDate(claim.closedDate)}` : ""}
+          </p>
+        </div>
+        <Badge tone={claimTone(claim.status)}>{claimLabel(claim.status)}</Badge>
+      </div>
+
+      {canEdit && claim.id ? (
+        <form onSubmit={save} className="grid gap-2 sm:grid-cols-[12rem_1fr]">
+          <Field label="Status" htmlFor={`${idBase}-status`}>
+            <Select id={`${idBase}-status`} value={status} onChange={(e) => setStatus(e.target.value)} disabled={saving}>
+              {CLAIM_STATUSES.map((st) => (
+                <option key={st} value={st}>{claimLabel(st)}</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Notes" htmlFor={`${idBase}-notes`} hint="Optional">
+            <Input
+              id={`${idBase}-notes`}
+              type="text"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              disabled={saving}
+              placeholder="e.g. Sent to service centre, job no. 1234"
+            />
+          </Field>
+          <div className="sm:col-span-2 flex justify-end">
+            <Button type="submit" size="sm" disabled={!changed} loading={saving}>
+              {saving ? "Saving…" : "Save claim"}
+            </Button>
+          </div>
+        </form>
+      ) : (
+        claim.notes && <p className="text-xs text-ink-soft break-words">Notes: {claim.notes}</p>
+      )}
+    </li>
+  );
 };
 
 // Status filter labels (the values stay the stored status names)
@@ -35,7 +112,7 @@ const STATUS_LABELS = {
   "Expiring Soon": "Expiring soon",
   Expired: "Expired",
   Void: "Void",
-  "Pending Claims": "Pending claims",
+  "Pending Claims": "Open claims",
 };
 
 const statusTone = (status) =>
@@ -44,7 +121,9 @@ const statusTone = (status) =>
 const statusLabel = (status) => STATUS_LABELS[status] || status || "—";
 
 const Warranties = () => {
-  const { warranties, addWarrantyClaim } = useApp();
+  const { warranties, products, addWarrantyClaim, updateWarrantyClaim } = useApp();
+  // Only the owner moves a claim along (the server refuses it for cashiers)
+  const { isAdmin } = useAuth();
   const [searchTerm, setSearchTerm] = useState("");
   const [activeTab, setActiveTab] = useState("warranties"); // "warranties" | "repairs"
   const [selectedStatusFilter, setSelectedStatusFilter] = useState("All");
@@ -54,11 +133,31 @@ const Warranties = () => {
   const [claimIssue, setClaimIssue] = useState("");
   const [claimType, setClaimType] = useState("Brand");
   const [claimNotes, setClaimNotes] = useState("");
+  const [claimError, setClaimError] = useState("");
   const [savingClaim, setSavingClaim] = useState(false);
+
+  // Claims list modal (by warranty id, so it shows the live record after a save)
+  const [claimsForId, setClaimsForId] = useState(null);
+  const claimsWarranty = claimsForId ? (warranties || []).find((w) => w.id === claimsForId) || null : null;
+  const closeClaimsModal = useCallback(() => setClaimsForId(null), []);
+
+  // A dual-SIM phone's warranty is saved under one IMEI: map every unit IMEI to both of its IMEIs,
+  // so searching the other IMEI still finds the warranty
+  const pairedImeis = useMemo(() => {
+    const map = new Map();
+    (products || []).forEach((p) =>
+      (p.imeis || []).forEach((u) => {
+        const keys = [...new Set([u?.imei, u?.imei1, u?.imei2].filter(Boolean).map(String))];
+        if (keys.length > 1) keys.forEach((k) => map.set(k, keys));
+      })
+    );
+    return map;
+  }, [products]);
 
   const statusOptions = ["All", "Active", "Expiring Soon", "Expired", "Void", "Pending Claims"];
 
-  const hasPendingClaim = (w) => (w.claims || []).some((c) => c.status === "Pending");
+  // Open = not resolved or rejected yet
+  const hasPendingClaim = (w) => (w.claims || []).some(isOpenClaim);
 
   const filteredWarranties = (warranties || []).filter((w) => {
     // Walk-in sales may have no phone / customer name, so guard every field
@@ -67,7 +166,7 @@ const Warranties = () => {
     const qDigits = q.replace(/[\s-]/g, "");
     const matchesSearch =
       !q ||
-      String(w.imei || "").includes(qDigits || q) ||
+      (pairedImeis.get(String(w.imei || "")) || [String(w.imei || "")]).some((k) => k.includes(qDigits || q)) ||
       [w.productName, w.brand, w.model, w.customerName].some((v) => String(v || "").toLowerCase().includes(qLower)) ||
       (!!qDigits && String(w.customerPhone || "").replace(/[\s-]/g, "").includes(qDigits));
     const matchesStatus =
@@ -81,11 +180,18 @@ const Warranties = () => {
     setClaimIssue("");
     setClaimType(w.warrantyType === "Shop Warranty" ? "Shop" : "Brand");
     setClaimNotes("");
+    setClaimError("");
   };
 
   const handleClaimSubmit = async (e) => {
     e.preventDefault();
-    if (!claimWarranty || !claimIssue.trim() || savingClaim) return;
+    if (!claimWarranty || savingClaim) return;
+    // Spaces only pass the browser's "required" check: say what is missing
+    if (!claimIssue.trim()) {
+      setClaimError("Write what is wrong with the phone.");
+      document.getElementById("claim-issue")?.focus();
+      return;
+    }
     setSavingClaim(true);
     try {
       // addWarrantyClaim alerts the user itself if the database refuses; the modal keeps the input
@@ -112,19 +218,24 @@ const Warranties = () => {
     const claims = warr.claims || [];
     const latestClaim = claims.length > 0 ? claims[claims.length - 1] : null;
     if (!latestClaim) return <span className="text-xs text-muted">No claims</span>;
+    const open = claims.filter(isOpenClaim).length;
     return (
-      <div>
-        <div className="font-medium text-ink">
+      <button
+        type="button"
+        onClick={() => setClaimsForId(warr.id)}
+        className="text-left rounded-lg -mx-1.5 px-1.5 py-1 hover:bg-sunken"
+        title={isAdmin ? "See the claims and change their status" : "See the claims"}
+      >
+        <span className="flex items-center gap-1.5 font-medium text-brand-700">
+          <ListChecks size={14} aria-hidden="true" />
           {claims.length} {claims.length === 1 ? "claim" : "claims"}
-        </div>
-        <div
-          className={`text-xs font-semibold ${latestClaim.status === "Pending" ? "text-saffron-700" : "text-muted"}`}
-          title={latestClaim.issue}
-        >
-          Latest: {latestClaim.status || "Pending"}
-          {latestClaim.claimType ? ` (${latestClaim.claimType})` : ""}
-        </div>
-      </div>
+          {open > 0 && <span className="text-xs font-normal text-muted">· {open} open</span>}
+        </span>
+        <span className="mt-0.5 flex flex-wrap items-center gap-1 text-xs text-muted" title={latestClaim.issue}>
+          Latest <Badge tone={claimTone(latestClaim.status)}>{claimLabel(latestClaim.status)}</Badge>
+          {latestClaim.closedDate && <span>closed {showDate(latestClaim.closedDate)}</span>}
+        </span>
+      </button>
     );
   };
 
@@ -331,13 +442,18 @@ const Warranties = () => {
           }
         >
           <form id="warranty-claim-form" onSubmit={handleClaimSubmit} className="space-y-4">
-            <Field label="Issue" htmlFor="claim-issue">
+            <Field label="Issue *" htmlFor="claim-issue" error={claimError}>
               <Textarea
                 id="claim-issue"
                 required
                 rows={3}
                 value={claimIssue}
-                onChange={(e) => setClaimIssue(e.target.value)}
+                onChange={(e) => {
+                  setClaimIssue(e.target.value);
+                  if (claimError) setClaimError("");
+                }}
+                aria-invalid={!!claimError}
+                className={claimError ? "border-khata-600" : undefined}
                 placeholder="What is wrong with the phone?"
               />
             </Field>
@@ -359,6 +475,45 @@ const Warranties = () => {
               />
             </Field>
           </form>
+        </Modal>
+      )}
+
+      {/* Claims of one warranty: status badges for everyone, status changes for the owner */}
+      {claimsWarranty && (
+        <Modal
+          open
+          onClose={closeClaimsModal}
+          size="md"
+          title="Warranty claims"
+          description={
+            <>
+              {claimsWarranty.productName} · <span className="font-mono">{claimsWarranty.imei}</span>
+              {claimsWarranty.customerName ? ` · ${claimsWarranty.customerName}` : ""}
+            </>
+          }
+          footer={
+            <Button variant="secondary" onClick={closeClaimsModal}>
+              Close
+            </Button>
+          }
+        >
+          {(claimsWarranty.claims || []).length === 0 ? (
+            <EmptyState icon={FileText} title="No claims" description="Log a claim from the warranty row." />
+          ) : (
+            <ul className="space-y-3">
+              {[...claimsWarranty.claims].reverse().map((c, i) => (
+                <ClaimRow
+                  // A saved change gives the row a new key, so its form restarts from the saved values
+                  key={`${c.id || i}|${c.status}|${c.notes || ""}`}
+                  warranty={claimsWarranty}
+                  claim={c}
+                  canEdit={isAdmin}
+                  onSave={updateWarrantyClaim}
+                />
+              ))}
+            </ul>
+          )}
+          {!isAdmin && <p className="mt-3 text-xs text-muted">Only the owner can change a claim's status.</p>}
         </Modal>
       )}
     </Page>

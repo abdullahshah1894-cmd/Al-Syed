@@ -211,6 +211,8 @@ BEGIN
         v_total, v_lines_total - v_discount + v_tax;
     END IF;
   END IF;
+  -- A walk-in has no account for extra money: anything above the bill is change, not "paid"
+  IF NOT v_is_settlement AND v_cust IS NULL AND v_paid > v_total THEN v_paid := v_total; END IF;
   v_due := CASE WHEN v_is_settlement THEN 0 ELSE GREATEST(0, v_total - v_paid) END;
   IF v_due > 0 AND v_cust IS NULL THEN
     RAISE EXCEPTION 'Choose a customer for a bill with Rs % still to pay.', v_due;

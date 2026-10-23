@@ -1,15 +1,8 @@
 import { useState } from "react";
 import { useNavigate, useLocation, Navigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { AlertCircle, Eye, EyeOff } from "lucide-react";
+import { AlertCircle, Eye, EyeOff, LogIn } from "lucide-react";
 import { Button, Field, Input } from "../components/ui";
-
-// Ruled khata page: faint blue lines with the red margin rule of a ledger book
-const ledgerPaper = {
-  backgroundImage:
-    "linear-gradient(to right, transparent 3.25rem, var(--color-khata-300) 3.25rem, var(--color-khata-300) calc(3.25rem + 1.5px), transparent calc(3.25rem + 1.5px))," +
-    "repeating-linear-gradient(to bottom, transparent 0, transparent 2.25rem, var(--color-brand-100) 2.25rem, var(--color-brand-100) calc(2.25rem + 1px))",
-};
 
 const Login = () => {
   const [username, setUsername] = useState("");
@@ -41,36 +34,23 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen bg-paper grid lg:grid-cols-[1.1fr_1fr]">
-      {/* Shop side (desktop) */}
-      <section className="hidden lg:flex flex-col justify-between bg-brand-50 p-12 relative overflow-hidden" style={ledgerPaper}>
-        <div className="pl-16">
-          <div className="text-sm font-semibold text-brand-700">Kohat, Jinnah Plaza</div>
-        </div>
-        <div className="pl-16 max-w-xl">
-          <h1 className="font-display font-extrabold text-ink leading-[0.95] text-[clamp(3.5rem,6vw,5.5rem)] tracking-tight">
-            Al-Syed
-          </h1>
-          <p className="mt-2 font-display text-2xl font-semibold text-ink-soft">Mobiles & Electronics</p>
-          <p className="mt-8 text-base text-ink-soft leading-relaxed max-w-md">
-            Ring up sales, scan IMEIs, keep every customer&apos;s khata straight and know exactly what is in stock.
-          </p>
-        </div>
-        <div className="pl-16 text-xs text-muted">Every sale and payment is saved to the shop&apos;s database the moment you press save.</div>
-      </section>
-
-      {/* Login form */}
-      <section className="flex items-center justify-center p-5 sm:p-10">
-        <div className="w-full max-w-sm">
-          <div className="lg:hidden mb-10">
-            <h1 className="font-display font-extrabold text-5xl text-ink leading-none">Al-Syed</h1>
-            <p className="mt-1 font-display text-lg font-semibold text-ink-soft">Mobiles & Electronics</p>
+    <div className="min-h-screen bg-paper flex items-center justify-center px-4 py-10">
+      <div className="w-full max-w-sm">
+        {/* Shop */}
+        <div className="flex flex-col items-center text-center mb-8">
+          <div className="w-14 h-14 rounded-2xl bg-brand-600 text-white flex items-center justify-center font-display font-extrabold text-xl shadow-card">
+            AS
           </div>
+          <h1 className="mt-4 text-2xl font-bold">Al-Syed Mobiles & Electronics</h1>
+          <p className="mt-1 text-sm text-muted">Point of sale, stock and khata</p>
+        </div>
 
-          <h2 className="text-2xl font-bold">Log in</h2>
-          <p className="mt-1 text-sm text-muted">Use the username and password the owner gave you.</p>
+        {/* Form */}
+        <div className="bg-surface border border-line rounded-2xl shadow-card p-6 sm:p-7">
+          <h2 className="font-sans text-lg font-semibold">Log in</h2>
+          <p className="mt-0.5 text-sm text-muted">Enter your username and password.</p>
 
-          <form onSubmit={handleSubmit} className="mt-8 space-y-4">
+          <form onSubmit={handleSubmit} className="mt-6 space-y-4">
             <Field label="Username" htmlFor="login-username">
               <Input
                 id="login-username"
@@ -82,7 +62,7 @@ const Login = () => {
                 spellCheck={false}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="h-12"
+                className="h-11"
               />
             </Field>
 
@@ -95,12 +75,12 @@ const Login = () => {
                   autoComplete="current-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="h-12 pr-12"
+                  className="h-11 pr-11"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword((v) => !v)}
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 h-9 w-9 inline-flex items-center justify-center rounded-lg text-muted hover:text-ink hover:bg-sunken"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 h-9 w-9 inline-flex items-center justify-center rounded-lg text-muted hover:text-ink hover:bg-sunken"
                   aria-label={showPassword ? "Hide password" : "Show password"}
                 >
                   {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
@@ -114,12 +94,14 @@ const Login = () => {
               </div>
             )}
 
-            <Button type="submit" size="lg" loading={submitting} className="w-full">
+            <Button type="submit" size="lg" icon={LogIn} loading={submitting} className="w-full">
               {submitting ? "Logging in…" : "Log in"}
             </Button>
           </form>
         </div>
-      </section>
+
+        <p className="mt-6 text-center text-xs text-muted">Jinnah Plaza, Kohat</p>
+      </div>
     </div>
   );
 };

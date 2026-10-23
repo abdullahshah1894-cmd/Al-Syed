@@ -36,13 +36,44 @@ const editFormFor = (bill) => ({
   rates: (bill.items || []).map((i) => String(itemRate(i))),
 });
 
-// New totals for the edit preview; same rules as the server (tax on the subtotal, discount capped)
+// Units still on the bill (returned ones are gone) and what they come to at a given rate
+const itemKept = (i) => Math.max(0, itemQty(i) - itemReturned(i));
+const lineValue = (item, rate) =>
+  itemReturned(item) > 0
+    ? Math.max(0, Number(rate) || 0) * itemKept(item)
+    : Number(rate) !== itemRate(item) ? Math.max(0, Number(rate) || 0) * itemQty(item) : itemSubtotal(item);
+
+// When a return was made: "23 Oct 2026, 14:05" from the return's timestamp (older entries only have a date)
+const returnTime = (r) => {
+  const value = r.at || r.date;
+  if (!value) return "—";
+  const plainDate = !r.at && /^\d{4}-\d{2}-\d{2}$/.test(String(value));
+  const d = plainDate ? new Date(`${value}T00:00:00`) : new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleString("en-GB", plainDate
+    ? { day: "2-digit", month: "short", year: "numeric" }
+    : { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+};
+
+// New totals for the edit preview; same rules as the server's update_sale (tax on the subtotal, discount capped).
+// A bill with returns cannot have its amounts changed (the server refuses), and the return already
+// scaled its subtotal / tax / discount down, so the preview shows the saved amounts, without the returned units.
 const previewTotals = (bill, form) => {
+  if (hasReturns(bill)) {
+    const total = Number(bill.grandTotal || 0);
+    const paid = Number(bill.paidAmount || 0);
+    return {
+      subtotal: Number(bill.subtotalAmount || 0),
+      tax: Number(bill.taxAmount || 0),
+      discount: Number(bill.discountAmount || 0),
+      total,
+      paid,
+      due: Number(bill.dueAmount || 0),
+      extra: Math.max(0, paid - total),
+    };
+  }
   const subtotal = (bill.items || []).length > 0
-    ? (bill.items || []).reduce((sum, item, idx) => {
-        const rate = form.rates[idx];
-        return sum + (Number(rate) !== itemRate(item) ? Math.max(0, Number(rate) || 0) * itemQty(item) : itemSubtotal(item));
-      }, 0)
+    ? (bill.items || []).reduce((sum, item, idx) => sum + lineValue(item, form.rates[idx]), 0)
     : Number(bill.subtotalAmount || 0);
   const tax = Math.round((subtotal * Number(bill.taxPercent || 0)) / 100);
   const discount = Math.min(Math.max(0, Number(form.discountAmount) || 0), subtotal + tax);
@@ -177,10 +208,11 @@ const Bills = () => {
       }
       if (Number(editForm.paidAmount) !== Number(bill.paidAmount || 0)) data.paidAmount = Number(editForm.paidAmount);
       if (!settlement) {
-        const badRate = (bill.items || []).findIndex((_, idx) => editForm.rates[idx] === "" || Number(editForm.rates[idx]) < 0);
+        // Every line needs a price above 0 (the server refuses 0 too)
+        const badRate = (bill.items || []).findIndex((_, idx) => !(Number(editForm.rates[idx]) > 0));
         if (badRate >= 0) {
           const item = bill.items[badRate];
-          alert(`Enter a rate for ${item.productName || item.name || `item ${badRate + 1}`}.`);
+          alert(`Enter a price above 0 for ${item.productName || item.name || `item ${badRate + 1}`}.`);
           return;
         }
         const rates = (bill.items || [])
@@ -578,8 +610,11 @@ const Bills = () => {
                   <span>Subtotal:</span>
                   <span>
                     Rs {money(
-                      selectedBillModal.subtotalAmount ||
-                        (selectedBillModal.items || []).reduce((sum, i) => sum + itemSubtotal(i), 0)
+                      // After a return the server keeps the subtotal of what is left (it can be 0)
+                      hasReturns(selectedBillModal)
+                        ? selectedBillModal.subtotalAmount
+                        : selectedBillModal.subtotalAmount ||
+                            (selectedBillModal.items || []).reduce((sum, i) => sum + itemSubtotal(i), 0)
                     )}
                   </span>
                 </div>
@@ -622,27 +657,34 @@ const Bills = () => {
             {(selectedBillModal.returns || []).length > 0 && (
               <div className="border-t border-dashed border-slate-300 pt-2 space-y-1.5 text-[10.5px]">
                 <div className="font-bold text-[10px] text-rose-700 uppercase tracking-wider">Returns</div>
-                {selectedBillModal.returns.map((r, idx) => (
-                  <div key={idx} className="bg-rose-50 border border-rose-100 rounded p-1.5 space-y-0.5">
-                    <div className="flex justify-between text-slate-600">
-                      <span>{r.date ? new Date(r.date).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : "—"}</span>
-                      <span className="font-bold text-slate-900">Rs {money(r.amount)}</span>
-                    </div>
-                    {(r.items || []).map((ri, j) => (
-                      <div key={j} className="text-slate-800">
-                        {ri.productName || "Item"} x{ri.qty || 1}
-                        {(ri.imeis || []).length > 0 && <span className="text-slate-500"> ({ri.imeis.join(", ")})</span>}
+                {selectedBillModal.returns.map((r, idx) => {
+                  // Newer returns keep the customer's account change apart from the bill's due;
+                  // older ones only have dueReduced, which was the account change
+                  const udhaarOff = Number(r.accountReduced ?? r.dueReduced ?? 0);
+                  const cashBack = Number(r.cashBack || 0);
+                  return (
+                    <div key={r.id || idx} className="bg-rose-50 border border-rose-100 rounded p-1.5 space-y-0.5">
+                      <div className="flex justify-between gap-2 text-slate-600">
+                        <span>{returnTime(r)}</span>
+                        <span className="font-bold text-slate-900">Refund Rs {money(r.amount)}</span>
                       </div>
-                    ))}
-                    {Number(r.dueReduced || 0) > 0 && (
-                      <div className="text-slate-600">Udhaar reduced: Rs {money(r.dueReduced)}</div>
-                    )}
-                    {Number(r.cashBack || 0) > 0 && (
-                      <div className="text-slate-600">Cash given back: Rs {money(r.cashBack)}</div>
-                    )}
-                    {r.note && <div className="text-slate-500 italic">{r.note}</div>}
-                  </div>
-                ))}
+                      {(r.items || []).map((ri, j) => (
+                        <div key={j} className="text-slate-800">
+                          {ri.productName || "Item"} x{ri.qty || 1}
+                          {(ri.imeis || []).length > 0 && <span className="text-slate-500"> ({ri.imeis.join(", ")})</span>}
+                        </div>
+                      ))}
+                      {udhaarOff > 0 && (
+                        <div className="flex justify-between text-slate-700"><span>Taken off Udhaar:</span><span className="font-semibold">Rs {money(udhaarOff)}</span></div>
+                      )}
+                      <div className="flex justify-between text-slate-700">
+                        <span>Cash given back:</span><span className="font-semibold">Rs {money(cashBack)}</span>
+                      </div>
+                      {r.by && <div className="text-slate-500">By {r.by}</div>}
+                      {r.note && <div className="text-slate-500 italic">{r.note}</div>}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -783,12 +825,12 @@ const Bills = () => {
                           <div className="text-sm font-semibold text-ink break-words">{item.productName || item.name}</div>
                           <div className="text-xs text-muted">
                             Qty {itemQty(item)}
-                            {returned > 0 && <span className="text-saffron-700"> · {returned} of {itemQty(item)} returned</span>}
+                            {returned > 0 && <span className="text-saffron-700"> · {returned} of {itemQty(item)} returned, {itemKept(item)} left</span>}
                           </div>
                         </div>
                         <input
                           type="number"
-                          min="0"
+                          min="1"
                           aria-label={`Rate for ${item.productName || item.name || `item ${idx + 1}`}`}
                           value={editForm.rates[idx]}
                           onChange={(e) => setRate(idx, e.target.value)}
@@ -796,7 +838,7 @@ const Bills = () => {
                           className={`${inputClass} w-28 text-right tabular-nums`}
                         />
                         <div className="w-24 text-right text-sm font-semibold text-ink tabular-nums">
-                          Rs {money(Number(editForm.rates[idx]) !== itemRate(item) ? Math.max(0, Number(editForm.rates[idx]) || 0) * itemQty(item) : itemSubtotal(item))}
+                          Rs {money(lineValue(item, editForm.rates[idx]))}
                         </div>
                       </div>
                     );
