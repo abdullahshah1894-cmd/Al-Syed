@@ -7,6 +7,7 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Sidebar from "./components/Sidebar";
 import Header from "./components/Header";
+import DataProblemBanner from "./components/DataProblemBanner";
 
 import Login from "./pages/Login";
 
@@ -54,6 +55,7 @@ const MainLayout = ({ children }) => {
       <Sidebar open={menuOpen} onClose={closeMenu} />
       <div className="flex-1 min-w-0 flex flex-col print:block">
         <Header onMenu={() => setMenuOpen(true)} />
+        <DataProblemBanner />
         <main className="flex-1 min-w-0 print:block">
           <ErrorBoundary resetKey={pathname}>
             <Suspense fallback={<PageLoading />}>{children}</Suspense>

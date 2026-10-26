@@ -91,7 +91,8 @@ export const AppProvider = ({ children }) => {
   };
   const [suppliers, setSuppliers] = useState([]);
   const [supplierTransactions, setSupplierTransactions] = useState([]);
-  const [backendOnline, setBackendOnline] = useState(false);
+  // Why the screens would be empty: null, "unreachable" (the server could not give the data) or "empty"
+  const [dataProblem, setDataProblem] = useState(null);
 
   // Shop Settings
   const [shopSettings, setShopSettings] = useState({
@@ -301,6 +302,7 @@ const normalizeProduct = (p) => {
       setSuppliers([]);
       setSupplierTransactions([]);
       setActiveSeller("All Sellers");
+      setDataProblem(null);
     }
   }
   useEffect(() => {
@@ -329,9 +331,13 @@ const normalizeProduct = (p) => {
           setShopSettings((prev) => ({ ...prev, ...dbSettings }));
         }
 
+        const main = [dbProducts, dbSales, dbCustomers];
+        if (main.some((list) => !Array.isArray(list))) setDataProblem("unreachable");
+        else if (main.every((list) => list.length === 0)) setDataProblem("empty");
+        else setDataProblem(null);
+
         if (Array.isArray(dbProducts)) {
           setProducts(dbProducts.map(normalizeProduct));
-          setBackendOnline(true);
         }
         if (Array.isArray(dbSales)) {
           setSales(dbSales.map(normalizeSale));
@@ -860,7 +866,7 @@ const normalizeProduct = (p) => {
         saveShopSettings,
         activeSeller,
         setActiveSeller,
-        backendOnline,
+        dataProblem,
         recordSale,
         addProduct,
         updateProduct,
