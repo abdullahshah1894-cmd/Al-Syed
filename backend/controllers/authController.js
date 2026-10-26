@@ -6,7 +6,8 @@ const isHash = (value) => typeof value === "string" && value.startsWith("$2");
 
 exports.login = async (req, res) => {
   try {
-    const username = String(req.body.username || "").trim();
+    // Usernames are stored in lower case; phones and autofill often type "Admin"
+    const username = String(req.body.username || "").trim().toLowerCase();
     const password = String(req.body.password || "");
     if (!username || !password) return res.status(400).json({ error: "Enter your username and password." });
 
@@ -59,7 +60,7 @@ exports.createUser = async (req, res) => {
       .from("users")
       .insert([{
         name,
-        username: String(username).trim(),
+        username: String(username).trim().toLowerCase(),
         password: await bcrypt.hash(String(password), 10),
         role: role === "admin" ? "admin" : "cashier",
       }])
