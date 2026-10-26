@@ -1,12 +1,11 @@
 const supabase = require("../config/supabase");
-const { fetchAll, hideProductCost } = require("../lib/fetchAll");
+const { hideProductCost } = require("../lib/fetchAll");
+const lists = require("../lib/lists");
 
 // Get all products (not deleted)
 exports.getProducts = async (req, res) => {
   try {
-    const data = await fetchAll(() =>
-      supabase.from("products").select("*").eq("is_deleted", false).order("created_at", { ascending: false })
-    );
+    const data = await lists.products();
     res.json(data.map((p) => hideProductCost(req, p)));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -19,7 +18,8 @@ exports.searchByImei = async (req, res) => {
     const query = String(req.params.query || "").trim();
     if (!query) return res.status(400).json({ error: "Enter an IMEI or barcode." });
 
-    const all = await fetchAll(() => supabase.from("products").select("*").eq("is_deleted", false).order("created_at"));
+    // Oldest first, so the first product that ever had this IMEI wins (as before)
+    const all = [...(await lists.products())].reverse();
 
     const byBarcode = all.find((p) => p.barcode && p.barcode === query);
     if (byBarcode) return res.json({ product: hideProductCost(req, byBarcode), matchedImei: null });
@@ -52,13 +52,10 @@ exports.createProduct = async (req, res) => {
     const keys = imeis.flatMap((i) => [...new Set([i.imei, i.imei1, i.imei2].filter(Boolean))]);
     if (keys.length > 0) {
       const repeated = keys.filter((k, idx) => keys.indexOf(k) !== idx);
-      const existing = await fetchAll(() => supabase.from("products").select("id, name, imeis").eq("is_deleted", false).order("id"));
-      const inStock = new Map();
-      (existing || []).forEach((p) =>
-        (p.imeis || []).forEach((i) => {
-          if (i.status === "in_stock") [i.imei, i.imei1, i.imei2].filter(Boolean).forEach((k) => inStock.set(k, p.name));
-        })
-      );
+      // Ask the database about just these IMEIs (instead of downloading every product)
+      const { data: found, error: findError } = await supabase.rpc("find_in_stock_imeis", { p_keys: keys });
+      if (findError) throw new Error(findError.message);
+      const inStock = new Map((found || []).map((r) => [r.imei, r.product_name]));
       const clashes = [...new Set([...repeated, ...keys.filter((k) => inStock.has(k))])];
       if (clashes.length > 0) {
         return res.status(409).json({

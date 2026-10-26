@@ -18,12 +18,14 @@ const signToken = (user) =>
     { expiresIn: `${TOKEN_HOURS}h` }
   );
 
-// The user's current role / token version, cached briefly so every request is not a DB call
-const CACHE_MS = 30 * 1000;
+// The user's current role / token version. Requests are answered from memory; once the copy is
+// 30 s old it is re-read from the database in the background (the request does not wait), so a
+// deleted or demoted user, or a login from before a password change, stops working within ~30 s.
+// A copy older than 10 minutes (server idle) is re-read before answering.
+const FRESH_MS = 30 * 1000;
+const MAX_STALE_MS = 10 * 60 * 1000;
 const userCache = new Map();
-const loadUser = async (id) => {
-  const hit = userCache.get(id);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.user;
+const fetchUser = async (id) => {
   const { data, error } = await supabase
     .from("users")
     .select("id, name, username, role, is_deleted, token_version")
@@ -32,6 +34,19 @@ const loadUser = async (id) => {
   if (error) throw new Error(error.message);
   userCache.set(id, { user: data, at: Date.now() });
   return data;
+};
+const refreshing = new Map();
+const loadUser = async (id) => {
+  const hit = userCache.get(id);
+  const age = hit ? Date.now() - hit.at : Infinity;
+  if (age < FRESH_MS) return hit.user;
+  if (age < MAX_STALE_MS) {
+    if (!refreshing.has(id)) {
+      refreshing.set(id, fetchUser(id).catch(() => {}).finally(() => refreshing.delete(id)));
+    }
+    return hit.user;
+  }
+  return fetchUser(id);
 };
 const forgetUser = (id) => userCache.delete(id);
 

@@ -1,10 +1,10 @@
 const supabase = require("../config/supabase");
-const { fetchAll } = require("../lib/fetchAll");
+const lists = require("../lib/lists");
 
 // Get all expenses
 exports.getExpenses = async (req, res) => {
   try {
-    const data = await fetchAll(() => supabase.from("expenses").select("*").order("created_at", { ascending: false }));
+    const data = await lists.expenses();
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -1,9 +1,9 @@
 const supabase = require("../config/supabase");
-const { fetchAll } = require("../lib/fetchAll");
+const lists = require("../lib/lists");
 
 exports.getWarranties = async (req, res) => {
   try {
-    const data = await fetchAll(() => supabase.from("warranties").select("*").order("created_at", { ascending: false }));
+    const data = await lists.warranties();
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
