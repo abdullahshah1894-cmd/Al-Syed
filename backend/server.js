@@ -1,10 +1,22 @@
 const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, ".env") });
+
+// A wrong or missing key in backend/.env: say so plainly in the server window instead of a stack trace
+try {
+  require("./config/supabase");
+} catch (err) {
+  console.error(`
+[Backend] CANNOT START: ${err.message}
+`);
+  process.exit(1);
+}
 const express = require("express");
 const cors = require("cors");
 const compression = require("compression");
 const { connectCache, closeCache, invalidateOnWrite } = require("./lib/cache");
 const lists = require("./lib/lists");
+const { checkDatabase } = require("./lib/dbStatus");
+const { PROJECT_REF } = require("./config/project");
 
 const app = express();
 
@@ -24,9 +36,16 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health Check (public)
-app.get("/api/health", (req, res) => {
-  res.json({ status: "OK", service: "Mobile Shop ERP — Supabase PostgreSQL Backend", timestamp: new Date().toISOString() });
+// Health Check (public): is the server up, and can it read the shop's data?
+// Open http://localhost:5000/api/health when the app shows no data.
+app.get("/api/health", async (req, res) => {
+  const database = await checkDatabase();
+  res.status(database.ok ? 200 : 503).json({
+    status: database.ok ? "OK" : "DATABASE PROBLEM",
+    service: "Mobile Shop ERP — Supabase PostgreSQL Backend",
+    database,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // Login is public; every other API route needs a logged-in user
@@ -93,8 +112,14 @@ const PORT = process.env.PORT || 5000;
 connectCache().then(() => {
   app.listen(PORT, () => {
     console.log(`[Backend] Server live → http://localhost:${PORT}`);
-    console.log(`[Backend] Database → Supabase PostgreSQL (ejfyzkvueqxadxvateyd)`);
+    console.log(`[Backend] Database → Supabase project ${PROJECT_REF}`);
     console.log(`[Backend] API → http://localhost:${PORT}/api/health`);
+    checkDatabase().then((db) => {
+      if (!db.ok) console.error(`[Backend] CANNOT READ THE SHOP'S DATA: ${db.error}`);
+      else if (db.products === 0) {
+        console.warn(`[Backend] Connected, but project ${db.project} has no products. If this shop already has stock, SUPABASE_URL in backend/.env points to the wrong project.`);
+      } else console.log(`[Backend] Database OK → ${db.products} products`);
+    });
     lists.warmUp();
   });
 });
