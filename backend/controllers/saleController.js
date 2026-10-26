@@ -1,12 +1,11 @@
 const supabase = require("../config/supabase");
-const { fetchAll, hideSaleCost } = require("../lib/fetchAll");
+const { hideSaleCost } = require("../lib/fetchAll");
+const lists = require("../lib/lists");
 
 // Get all sales
 exports.getSales = async (req, res) => {
   try {
-    const data = await fetchAll(() =>
-      supabase.from("sales").select("*").eq("is_deleted", false).order("created_at", { ascending: false })
-    );
+    const data = await lists.sales();
     res.json(data.map((s) => hideSaleCost(req, s)));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -110,7 +109,7 @@ exports.deleteSale = async (req, res) => {
 // Get analytics: top 5 products, totals
 exports.getAnalytics = async (req, res) => {
   try {
-    const sales = await fetchAll(() => supabase.from("sales").select("*").eq("is_deleted", false).order("created_at"));
+    const sales = await lists.sales();
 
     let totalRevenue = 0;
     let totalProfit = 0;

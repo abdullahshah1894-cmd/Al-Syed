@@ -1,4 +1,7 @@
 const supabase = require("../config/supabase");
+const lists = require("../lib/lists");
+
+const ISSUE_STATUSES = ["Pending", "Under Inspection", "Repaired", "Delivered", "Rejected"];
 
 // Helper to handle Supabase errors
 const handleDbError = (error, res, message) => {
@@ -10,13 +13,7 @@ const handleDbError = (error, res, message) => {
 // @route   GET /api/issues
 const getIssues = async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("mobile_issues")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) return handleDbError(error, res, "Failed to fetch issues");
-    res.json(data);
+    res.json(await lists.issues());
   } catch (err) {
     res.status(500).json({ error: "Server error", details: err.message });
   }
@@ -66,8 +63,8 @@ const updateIssueStatus = async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
 
-    if (!status) {
-      return res.status(400).json({ error: "Status is required" });
+    if (!ISSUE_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `Status must be one of: ${ISSUE_STATUSES.join(", ")}` });
     }
 
     const { data, error } = await supabase

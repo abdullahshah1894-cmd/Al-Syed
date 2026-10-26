@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, lazy, Suspense } from "react";
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import { AppProvider } from "./context/AppContext";
@@ -9,22 +9,34 @@ import Sidebar from "./components/Sidebar";
 import Header from "./components/Header";
 
 import Login from "./pages/Login";
-import Dashboard from "./pages/Dashboard";
-import POS from "./pages/POS";
-import Inventory from "./pages/Inventory";
-import ImeiChecker from "./pages/ImeiChecker";
-import Bills from "./pages/Bills";
-import PendingPayments from "./pages/PendingPayments";
-import Warranties from "./pages/Warranties";
-import SalesReports from "./pages/SalesReports";
-import InventoryValuation from "./pages/InventoryValuation";
-import ZakatCalculator from "./pages/ZakatCalculator";
-import Settings from "./pages/Settings";
-import Ledger from "./pages/Ledger";
-import MobileIssues from "./pages/MobileIssues";
-import Expenses from "./pages/Expenses";
-import Sellers from "./pages/Sellers";
-import Suppliers from "./pages/Suppliers";
+
+// Each page is its own file, so the app opens without loading every screen first.
+// Once the app is idle, all pages are fetched in the background so moving between them stays instant.
+const pageLoaders = [];
+const page = (load) => {
+  pageLoaders.push(load);
+  return lazy(load);
+};
+const preloadPages = () => pageLoaders.forEach((load) => load().catch(() => {}));
+
+const Dashboard = page(() => import("./pages/Dashboard"));
+const POS = page(() => import("./pages/POS"));
+const Inventory = page(() => import("./pages/Inventory"));
+const ImeiChecker = page(() => import("./pages/ImeiChecker"));
+const Bills = page(() => import("./pages/Bills"));
+const PendingPayments = page(() => import("./pages/PendingPayments"));
+const Warranties = page(() => import("./pages/Warranties"));
+const SalesReports = page(() => import("./pages/SalesReports"));
+const InventoryValuation = page(() => import("./pages/InventoryValuation"));
+const ZakatCalculator = page(() => import("./pages/ZakatCalculator"));
+const Settings = page(() => import("./pages/Settings"));
+const Ledger = page(() => import("./pages/Ledger"));
+const MobileIssues = page(() => import("./pages/MobileIssues"));
+const Expenses = page(() => import("./pages/Expenses"));
+const Sellers = page(() => import("./pages/Sellers"));
+const Suppliers = page(() => import("./pages/Suppliers"));
+
+const PageLoading = () => <div className="p-8 text-sm text-muted">Loading…</div>;
 
 // Main App Layout Wrapper
 const MainLayout = ({ children }) => {
@@ -33,13 +45,19 @@ const MainLayout = ({ children }) => {
   // Phone / tablet: the menu is a drawer
   const [menuOpen, setMenuOpen] = useState(false);
   const closeMenu = useCallback(() => setMenuOpen(false), []);
+  useEffect(() => {
+    const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 1500));
+    idle(preloadPages);
+  }, []);
   return (
     <div className="min-h-screen lg:flex bg-paper text-ink print:block print:bg-white">
       <Sidebar open={menuOpen} onClose={closeMenu} />
       <div className="flex-1 min-w-0 flex flex-col print:block">
         <Header onMenu={() => setMenuOpen(true)} />
         <main className="flex-1 min-w-0 print:block">
-          <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
+          <ErrorBoundary resetKey={pathname}>
+            <Suspense fallback={<PageLoading />}>{children}</Suspense>
+          </ErrorBoundary>
         </main>
       </div>
     </div>

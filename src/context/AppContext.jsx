@@ -1,8 +1,9 @@
 /* eslint-disable react-refresh/only-export-components -- the provider, its hook and shared helpers live together on purpose */
-import { createContext, useContext, useState, useEffect, useRef } from "react";
+import { createContext, useContext, useState, useEffect, useRef, useMemo } from "react";
 import { api } from "../services/api";
 import { useAuth } from "./AuthContext";
 import { localDate } from "../utils/dates";
+import { itemImeis } from "../utils/sales";
 
 // Warranty status from its expiry date: Expired, Expiring Soon (30 days), Active. Void stays Void.
 const warrantyStatus = (w) => {
@@ -16,6 +17,39 @@ const warrantyStatus = (w) => {
 };
 
 const AppContext = createContext();
+
+// Show a saved sale's effect on stock at once (units sold, quantity down); the background reload
+// that follows replaces it with the server's numbers.
+const applySaleToStock = (products, items) =>
+  products.map((p) => {
+    const lines = (items || []).filter((i) => (i.productId || i.product || i.id) === p.id);
+    if (lines.length === 0) return p;
+    const sold = new Set(lines.flatMap(itemImeis));
+    if (sold.size > 0 && Array.isArray(p.imeis) && p.imeis.length > 0) {
+      const imeis = p.imeis.map((u) =>
+        u.status === "in_stock" && [u.imei, u.imei1, u.imei2].some((k) => k && sold.has(k)) ? { ...u, status: "sold" } : u
+      );
+      const left = imeis.filter((u) => u.status === "in_stock").length;
+      return { ...p, imeis, quantity: left, stock: left };
+    }
+    const qty = lines.reduce((sum, i) => sum + Number(i.quantity || i.qty || 1), 0);
+    const left = Math.max(0, Number(p.quantity || 0) - qty);
+    return { ...p, quantity: left, stock: left };
+  });
+
+// Was this sale made by this seller (name in lower case)?
+const soldBy = (s, seller) =>
+  (s.sellerName || "").toLowerCase() === seller || (s.cashierName || "").toLowerCase() === seller;
+
+// Move a customer's Udhaar by what a bill or receipt changed it (balance_effect from the server)
+const applyBalanceEffect = (customers, customerId, effect) =>
+  customerId && effect != null
+    ? customers.map((c) => {
+        if (c.id !== customerId) return c;
+        const totalPending = Math.max(0, c.totalPending + Number(effect));
+        return { ...c, totalPending, totalPaid: c.totalPurchases - totalPending };
+      })
+    : customers;
 
 // The header's seller filter is remembered on this device across reloads
 const SELLER_KEY = "alsyed.activeSeller";
@@ -247,6 +281,10 @@ const normalizeProduct = (p) => {
     latestOnly("customers", api.getCustomers, (data) => Array.isArray(data) && setCustomers(data.map(normalizeCustomer)));
   const refreshWarranties = () =>
     latestOnly("warranties", api.getWarranties, (data) => Array.isArray(data) && setWarranties(data.map(normalizeWarranty)));
+  // After a save the screen is ready at once; the full lists catch up from the server behind it
+  const refreshInBackground = (...refreshers) => {
+    Promise.all(refreshers.map((r) => r())).catch((e) => console.warn("[AppContext] Background reload failed:", e.message));
+  };
 
   // Fetch all data from Supabase-backed backend once someone is logged in; clear it on logout
   const { token, isAdmin } = useAuth();
@@ -356,7 +394,9 @@ const normalizeProduct = (p) => {
 
     const normalized = { ...formattedSale, ...normalizeSale(saved) };
     setSales((prev) => [normalized, ...prev]);
-    await Promise.all([refreshProducts(), refreshCustomers(), refreshWarranties()]);
+    setProducts((prev) => applySaleToStock(prev, saved.items || items));
+    setCustomers((prev) => applyBalanceEffect(prev, saved.customer_id, saved.balance_effect));
+    refreshInBackground(refreshProducts, refreshCustomers, refreshWarranties);
     return normalized;
   };
 
@@ -523,7 +563,8 @@ const normalizeProduct = (p) => {
         const recorded = await api.createSale(settlementRecord);
         const normalized = normalizeSale(recorded);
         setSales((prev) => [normalized, ...prev]);
-        await refreshCustomers();
+        setCustomers((prev) => applyBalanceEffect(prev, recorded.customer_id, recorded.balance_effect));
+        refreshInBackground(refreshCustomers);
         return normalized;
       } catch (err) {
         notifyError(`Payment of Rs.${amountPaid} from ${customer.name}`, err);
@@ -621,21 +662,21 @@ const normalizeProduct = (p) => {
   // ── Bill returns / edit / delete ───────────────────────────────────────────
   // The server changes stock, the bill, warranties and the customer balance together;
   // afterwards the affected lists are reloaded from the database.
-  const afterBillChange = async (saved) => {
+  const afterBillChange = (saved) => {
     if (saved && saved.id) {
       const normalized = normalizeSale(saved);
       setSales((prev) =>
         saved.is_deleted ? prev.filter((x) => x.id !== saved.id) : prev.map((x) => (x.id === saved.id ? normalized : x))
       );
     }
-    await Promise.all([refreshProducts(), refreshCustomers(), refreshWarranties()]);
+    refreshInBackground(refreshProducts, refreshCustomers, refreshWarranties);
   };
 
   // items: [{ index, qty, imeis }] — index is the item position on the bill
   const returnSaleItems = async (saleId, items, note = "") => {
     try {
       const saved = await api.returnSaleItems(saleId, { items, note });
-      await afterBillChange(saved);
+      afterBillChange(saved);
       return normalizeSale(saved);
     } catch (err) {
       notifyError("Return", err);
@@ -647,7 +688,7 @@ const normalizeProduct = (p) => {
   const updateSale = async (saleId, data) => {
     try {
       const saved = await api.updateSale(saleId, data);
-      await afterBillChange(saved);
+      afterBillChange(saved);
       return normalizeSale(saved);
     } catch (err) {
       notifyError("Bill update", err);
@@ -659,7 +700,7 @@ const normalizeProduct = (p) => {
   const deleteSale = async (saleId) => {
     try {
       const saved = await api.deleteSale(saleId);
-      await afterBillChange({ ...saved, is_deleted: true });
+      afterBillChange({ ...saved, is_deleted: true });
       return true;
     } catch (err) {
       notifyError("Bill delete", err);
@@ -723,7 +764,8 @@ const normalizeProduct = (p) => {
   const addSupplierPurchase = async (supplierId, data) => {
     try {
       const saved = await api.addSupplierPurchase(supplierId, data);
-      await Promise.all([refreshSuppliers(), refreshProducts()]);
+      await refreshSuppliers();
+      refreshInBackground(refreshProducts);
       return normalizeSupplierTx(saved);
     } catch (err) {
       notifyError("Purchase", err);
@@ -779,33 +821,22 @@ const normalizeProduct = (p) => {
   };
 
 
-  const filteredSales =
-    activeSeller === "All Sellers" || activeSeller === "All"
-      ? sales
-      : sales.filter(
-          (s) =>
-            (s.sellerName || "").toLowerCase() === activeSeller.toLowerCase() ||
-            (s.cashierName || "").toLowerCase() === activeSeller.toLowerCase()
-        );
+  // The header's seller filter. Worked out only when the lists or the seller change, so pages that
+  // memoise on these lists do not redo their work on every render.
+  const sellerKey = activeSeller === "All Sellers" || activeSeller === "All" ? "" : activeSeller.toLowerCase();
 
-  const filteredCustomers =
-    activeSeller === "All Sellers" || activeSeller === "All"
-      ? customers
-      : customers.filter(
-          (c) =>
-            (c.sellerName || "").toLowerCase() === activeSeller.toLowerCase() ||
-            sales.some(
-              (s) =>
-                (s.customerId === c.id || s.customer === c.id) &&
-                ((s.sellerName || "").toLowerCase() === activeSeller.toLowerCase() ||
-                  (s.cashierName || "").toLowerCase() === activeSeller.toLowerCase())
-            )
-        );
+  const filteredSales = useMemo(() => (sellerKey ? sales.filter((s) => soldBy(s, sellerKey)) : sales), [sales, sellerKey]);
 
-  const filteredExpenses =
-    activeSeller === "All Sellers" || activeSeller === "All"
-      ? expenses
-      : expenses.filter((e) => (e.sellerName || "").toLowerCase() === activeSeller.toLowerCase());
+  const filteredCustomers = useMemo(() => {
+    if (!sellerKey) return customers;
+    const soldTo = new Set(sales.filter((s) => soldBy(s, sellerKey)).map((s) => s.customerId || s.customer).filter(Boolean));
+    return customers.filter((c) => (c.sellerName || "").toLowerCase() === sellerKey || soldTo.has(c.id));
+  }, [customers, sales, sellerKey]);
+
+  const filteredExpenses = useMemo(
+    () => (sellerKey ? expenses.filter((e) => (e.sellerName || "").toLowerCase() === sellerKey) : expenses),
+    [expenses, sellerKey]
+  );
 
   return (
     <AppContext.Provider

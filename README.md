@@ -130,7 +130,10 @@ A comprehensive, full-stack Point of Sale (POS), Inventory, Customer Khata / Led
      (seeded: `admin` / `admin123`, `cashier` / `cashier123` — change these). Vite forwards `/api` to the
      backend on port 5000; for a backend on another machine set `VITE_API_URL` in `.env`.
    - **Production:** `npm run build`, then run the backend with `NODE_ENV=production`; it serves the app and
-     the API from the same address.
+     the API from the same address (http://localhost:5000).
+   - **Cache:** the server keeps the lists (products, sales, customers, ...) in memory and refreshes them after
+     every save, so screens load in milliseconds instead of a round trip to Supabase. Set `REDIS_URL` in
+     `backend/.env` to keep the cache in Redis instead (shared when several computers run the server).
 
 ---
 
@@ -138,8 +141,10 @@ A comprehensive, full-stack Point of Sale (POS), Inventory, Customer Khata / Led
 
 1. First time only: clone the repo, copy `backend/.env.example` to `backend/.env` and fill in the Supabase keys
    (the **service_role** key is required).
-2. **To get the newest version:** double-click `update-app.bat` (pulls `main` from GitHub and installs packages).
-3. **To open the app:** double-click `start-app.bat` (starts the server and the app, then opens http://localhost:5173).
+2. **To get the newest version:** double-click `update-app.bat` (pulls `main` from GitHub, installs packages and
+   builds the app).
+3. **To open the app:** double-click `start-app.bat` (starts the server, which also serves the built app, then opens
+   http://localhost:5000). Keep the "Al-Syed server" window open while working.
 
 Database changes are applied once to the shared Supabase database, so every laptop sees the same data.
 

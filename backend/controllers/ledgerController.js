@@ -1,5 +1,5 @@
 const supabase = require("../config/supabase");
-const { fetchAll } = require("../lib/fetchAll");
+const lists = require("../lib/lists");
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const toUUID = (val) => (val && UUID_REGEX.test(String(val)) ? val : null);
@@ -24,21 +24,10 @@ const toRow = (body) => ({
   extra: body.extra && typeof body.extra === "object" ? body.extra : {},
 });
 
-// Get ledger entries, optionally limited to a date range (?from=YYYY-MM-DD&to=YYYY-MM-DD).
-// Item rows without an invoice are left out: older builds saved one per scan with no link.
+// Get ledger entries, optionally limited to a date range (?from=YYYY-MM-DD&to=YYYY-MM-DD)
 exports.getLedgerEntries = async (req, res) => {
   try {
-    const data = await fetchAll(() => {
-      let query = supabase
-        .from("ledger_entries")
-        .select("*")
-        .or("type.neq.item,parent_invoice_id.not.is.null")
-        .order("created_at", { ascending: true });
-      if (req.query.from) query = query.gte("date", req.query.from);
-      if (req.query.to) query = query.lte("date", req.query.to);
-      return query;
-    });
-    res.json(data);
+    res.json(await lists.ledger(req.query.from, req.query.to));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -108,12 +97,8 @@ exports.deleteLedgerEntry = async (req, res) => {
       return res.json({ message: "Skipped delete: non-UUID id", id });
     }
 
-    // Delete children (items under this invoice)
-    const { error: childError } = await supabase.from("ledger_entries").delete().eq("parent_invoice_id", id);
-    if (childError) throw new Error(childError.message);
-
-    // Delete the entry itself
-    const { error } = await supabase.from("ledger_entries").delete().eq("id", id);
+    // The entry and the items under it, in one statement (id is a checked UUID)
+    const { error } = await supabase.from("ledger_entries").delete().or(`id.eq.${id},parent_invoice_id.eq.${id}`);
     if (error) throw new Error(error.message);
 
     res.json({ message: "Ledger entry deleted" });

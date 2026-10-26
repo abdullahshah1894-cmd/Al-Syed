@@ -2,10 +2,14 @@ const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, ".env") });
 const express = require("express");
 const cors = require("cors");
+const compression = require("compression");
+const { connectCache, closeCache, invalidateOnWrite } = require("./lib/cache");
+const lists = require("./lib/lists");
 
 const app = express();
 
 // Middleware
+app.use(compression()); // the product and sales lists shrink to about a tenth on the wire
 app.use(cors({ exposedHeaders: ["X-New-Token"] }));
 app.use(express.json({ limit: "20mb" }));
 
@@ -53,6 +57,9 @@ const ADMIN_ONLY = [
 ];
 ADMIN_ONLY.forEach(([method, route]) => app[method](route, requireAdmin));
 
+// Lists are served from the cache; every allowed write marks the lists it changes as stale
+app.use("/api", invalidateOnWrite);
+
 // API Routes — Supabase-backed
 app.use("/api/products", require("./routes/productRoutes"));
 app.use("/api/sales", require("./routes/saleRoutes"));
@@ -67,22 +74,31 @@ app.use("/api/settings", require("./routes/settingsRoutes"));
 // Unknown API path: answer instead of hanging
 app.use("/api", (req, res) => res.status(404).json({ error: `Not found: ${req.method} ${req.originalUrl}` }));
 
-// Serve frontend in production
+// Serve the built app in production (npm run build). File names under /assets change with every
+// build, so the browser may keep them for a year; index.html is always checked for a new version.
 if (process.env.NODE_ENV === "production") {
-  app.use(express.static(path.join(__dirname, "../dist")));
+  const dist = path.join(__dirname, "../dist");
+  app.use("/assets", express.static(path.join(dist, "assets"), { immutable: true, maxAge: "1y" }));
+  app.use(express.static(dist, { index: false }));
   app.get("*", (req, res) => {
-    if (!req.path.startsWith("/api")) {
-      res.sendFile(path.join(__dirname, "../dist", "index.html"));
-    }
+    res.set("Cache-Control", "no-cache");
+    res.sendFile(path.join(dist, "index.html"));
   });
 } else {
   app.get("/", (req, res) => res.send("Mobile Shop ERP Backend Server — Supabase Edition — Live!"));
 }
 
-// Start Server
+// Start Server: connect the cache, start listening, then load the main lists in the background
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`[Backend] Server live → http://localhost:${PORT}`);
-  console.log(`[Backend] Database → Supabase PostgreSQL (ejfyzkvueqxadxvateyd)`);
-  console.log(`[Backend] API → http://localhost:${PORT}/api/health`);
+connectCache().then(() => {
+  app.listen(PORT, () => {
+    console.log(`[Backend] Server live → http://localhost:${PORT}`);
+    console.log(`[Backend] Database → Supabase PostgreSQL (ejfyzkvueqxadxvateyd)`);
+    console.log(`[Backend] API → http://localhost:${PORT}/api/health`);
+    lists.warmUp();
+  });
 });
+
+const shutdown = () => closeCache().finally(() => process.exit(0));
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

@@ -1,13 +1,12 @@
 const supabase = require("../config/supabase");
+const lists = require("../lib/lists");
 
 const ALLOWED = ["shopName", "address", "phone", "taxRate", "currencySymbol"];
 
 // Get shop settings (single row, id = 1)
 exports.getSettings = async (req, res) => {
   try {
-    const { data, error } = await supabase.from("shop_settings").select("data").eq("id", 1).maybeSingle();
-    if (error) throw new Error(error.message);
-    res.json(data ? data.data : {});
+    res.json(await lists.settings());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

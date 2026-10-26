@@ -1,5 +1,5 @@
 const supabase = require("../config/supabase");
-const { fetchAll } = require("../lib/fetchAll");
+const lists = require("../lib/lists");
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SUPPLIER_FIELDS = ["name", "phone", "company", "address", "notes", "opening_balance"];
@@ -29,10 +29,7 @@ const withBalances = (suppliers, txs) =>
 // GET /api/suppliers — suppliers with totals; GET /api/suppliers?withTransactions=1 adds their transactions
 exports.getSuppliers = async (req, res) => {
   try {
-    const [suppliers, txs] = await Promise.all([
-      fetchAll(() => supabase.from("suppliers").select("*").eq("is_deleted", false).order("name", { ascending: true })),
-      fetchAll(() => supabase.from("supplier_transactions").select("*").eq("is_deleted", false).order("date", { ascending: false })),
-    ]);
+    const { suppliers, transactions: txs } = await lists.suppliers();
     // Only transactions of suppliers that still exist
     const ids = new Set((suppliers || []).map((x) => x.id));
     const liveTxs = (txs || []).filter((t) => ids.has(t.supplier_id));
